@@ -1,0 +1,7 @@
+node_modules
+dist
+capturas
+.playwright-mcp
+scripts/*.json
+*.log
+.DS_Store
