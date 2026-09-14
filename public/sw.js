@@ -7,7 +7,7 @@
  *
  * Sube VERSION cuando cambie la app: al activarse borra las cachés viejas.
  */
-const VERSION = 'v1'
+const VERSION = 'v2'   // súbela en cada publicación: obliga a tirar la caché vieja
 const CACHE = `baluarte-${VERSION}`
 
 /** Lo mínimo imprescindible para arrancar sin red. */
@@ -98,12 +98,25 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url)
   if (url.origin !== self.location.origin) return   // el juego no pide nada de fuera
 
-  // Navegación: siempre el index cacheado; si no lo hay todavía, red.
+  // Navegación: LA RED MANDA, con la caché de red de seguridad.
+  //
+  // Antes se devolvía siempre el index guardado y se refrescaba por detrás, y
+  // el resultado era que una versión nueva no llegaba nunca al móvil: abrías el
+  // juego y seguías viendo lo de ayer. Ahora se pide a la red con un tope de 3
+  // segundos; si hay conexión ves lo último, y si no la hay (o tarda) entra lo
+  // guardado, así que el juego sigue abriéndose en el avión.
   if (req.mode === 'navigate') {
     e.respondWith((async () => {
       const cache = await caches.open(CACHE)
+      try {
+        const res = await Promise.race([
+          fetch(req, { cache: 'no-store' }),
+          new Promise((_, no) => setTimeout(() => no(new Error('tarda')), 3000))
+        ])
+        if (res && res.ok) { cache.put('./index.html', res.clone()); return res }
+      } catch { /* sin red o demasiado lenta: tiramos de lo guardado */ }
       const guardado = await cache.match('./index.html')
-      if (guardado) { refrescar('./index.html', cache); return guardado }
+      if (guardado) return guardado
       try {
         const res = await fetch(req)
         if (res.ok) cache.put('./index.html', res.clone())

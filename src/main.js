@@ -156,5 +156,30 @@ arrancar()
 
 // Registra la app instalable (PWA) sin romper nada si falla
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}))
+  window.addEventListener('load', async () => {
+    try {
+      // `updateViaCache: 'none'` obliga al navegador a comprobar el sw.js de
+      // verdad en vez de usar su copia (que puede tener hasta 24 h).
+      const reg = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      reg.update().catch(() => {})
+
+      // Cuando entra una versión nueva, se recarga UNA vez sola: si no, el
+      // jugador se queda con la de ayer sin saber por qué.
+      let recargando = false
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (recargando) return
+        recargando = true
+        location.reload()
+      })
+      // Y si ya hay una esperando su turno, que pase ya.
+      if (reg.waiting) reg.waiting.postMessage('actualizar')
+      reg.addEventListener('updatefound', () => {
+        const nuevo = reg.installing
+        if (!nuevo) return
+        nuevo.addEventListener('statechange', () => {
+          if (nuevo.state === 'installed' && navigator.serviceWorker.controller) nuevo.postMessage('actualizar')
+        })
+      })
+    } catch { /* sin service worker el juego funciona igual, solo que sin offline */ }
+  })
 }
