@@ -119,6 +119,19 @@ const porMin = (base, factor = 1.52) => (n = 1) => Math.round(base * Math.pow(fa
  * lo que gusta del juego: no se toca. Lo que estaba mal era el tope, que
  * prometía camas para gente que no tenía dónde trabajar.
  *
+ * PERO LA TABLA NO BASTA, y esto es lo que de verdad arregla la queja: la
+ * tabla mira el catálogo (lo que el juego DEJARÍA construir), no la aldea que
+ * el jugador tiene. El banco de pruebas de 30 días lo midió: en la Edad de los
+ * Castillos el catálogo permite 51 puestos, pero una aldea normal a esa altura
+ * tiene 28 — y el tope repartía camas para 64. Resultado: entre el 33 % y el
+ * 68 % de la aldea sin puesto, en TODAS las edades.
+ *
+ * Por eso el tope de verdad se calcula en sim/villagers.js (`poblacion()`) con
+ * TRES frenos y manda el más pequeño: este `poblacionMax`, las camas puestas, y
+ * los PUESTOS QUE EXISTEN HOY en la aldea más el colchón de los andamios. Este
+ * número de aquí es el techo por nivel de Ayuntamiento; el que aprieta de
+ * verdad, casi siempre, es el de los puestos.
+ *
  * REGLA DURA, la nueva: el tope de población = las plazas que el juego DEJA
  * construir a ese nivel + el colchón de obra (los martillos de las
  * `obrasSimultaneas` del Ayuntamiento, más dos de relevo). Ni una cama de

@@ -31,12 +31,18 @@ const COSTE_BASE = UNIDADES.aldeano.coste.comida
  * 3.300 de comida y el 46 más que el granero entero, así que el tope de
  * población era decorativo y la aldea se quedaba a medias para siempre.
  * Ahora sube en línea recta y con techo: el freno del juego es el TOPE DE
- * POBLACIÓN (Ayuntamiento y camas), nunca el precio.
+ * POBLACIÓN (Ayuntamiento, camas y PUESTOS DE TRABAJO), nunca el precio.
  *   1.º 50 · 11.º 170 · 21.º 290 · del 38.º en adelante, 500 y ahí se queda.
+ *
+ * Se probó a subirlo (30 por cabeza, techo 700) al atar el tope a los puestos,
+ * por si contratar gente de más era el sumidero de comida que marcaba el ritmo
+ * de las primeras horas. NO LO ERA: el banco de pruebas da la misma partida con
+ * un precio y con el otro. Ver la nota de `poblacion()` sobre lo que varía el
+ * banco entre partidas idénticas. Se queda como estaba.
  */
 const COSTE_POR_CABEZA = 12
 const COSTE_TOPE = 500
-/** Camas del propio Ayuntamiento: crece con él, así no hace falta un barrio de chozas. */
+
 const camasAyuntamiento = (n = 1) => 4 + Math.max(1, n)
 const PLAZAS_OBRA = 3                           // martillos que caben en un andamio
 const SEG_POR_DIA = 480                         // ciclo de 8 min, el mismo que usa render/fx
@@ -336,6 +342,15 @@ function actualizarAnimo (dt) {
  * El colchón son las `obrasSimultaneas` del Ayuntamiento más dos de relevo:
  * ayto 1 → 3 · ayto 4 → 4 · ayto 9 → 7 · ayto 14 → 8.
  *
+ * ¿ESTO ACELERA LA PARTIDA? No. Se comprobó, porque bajar de 88 aldeanos a 75
+ * quita comida gastada en contratar y eso podría adelantar las edades. El banco
+ * de pruebas (30 días) dio Edad Imperial el día 11 con el arreglo… y el día 15
+ * en una partida sin él. Parecía una aceleración de cuatro días, así que se
+ * repitió la partida SIN el arreglo dos veces más: dio el día 10 y el día 11.
+ * O sea que el banco varía cinco días entre partidas idénticas (manda la
+ * piedra, y un nivel de cantera de más el tercer día lo cambia todo). Con el
+ * arreglo: día 11 y día 10. El ritmo es el mismo; el día 15 era el raro.
+ *
  * `Math.max(actual, …)` al final: si demueles media aldea el tope no puede
  * quedar por DEBAJO de la gente que ya vive ahí (nadie se evapora). Lo que hace
  * es congelar la contratación hasta que vuelva a haber sitio.
@@ -405,7 +420,7 @@ export function plazasDeLaAldea () {
     if (b.enObra) continue
     const n = plazasDe(b)
     if (n <= 0) continue
-    const gente = trabajadoresDe(b.id).length
+    const gente = cuantosEn(b)
     plazas += n
     ocupadas += Math.min(n, gente)
     if (gente === 0) sinAtender++
@@ -459,6 +474,10 @@ export function asignar (villagerId, buildingId) {
   v.job = jobDe(b)
   if (!Array.isArray(b.trabajadores)) b.trabajadores = []
   b.trabajadores.push(v.id)
+  // ORDEN ESTABLE. Al recargar, `sincronizarTrabajadores()` reconstruye esta
+  // lista ordenada; si en vivo va en orden de llegada, guardar y volver a cargar
+  // da un estado DISTINTO y el banco lo caza. Se ordena también aquí.
+  if (b.trabajadores.length > 1) b.trabajadores.sort()
   const m = mem(v)
   m.fase = null; m.t = 0; m.atasco = 0
   v.estado = 'descansando'
@@ -488,6 +507,13 @@ export function librePara (buildingId) {
   if (!b) return 0
   return Math.max(0, plazasDe(b) - trabajadoresDe(buildingId).length)
 }
+
+/**
+ * Cuántos trabajan ahí. `b.trabajadores` lo mantiene al día este módulo, así que
+ * contar no hace falta recorrer los aldeanos: la interfaz pregunta esto cuatro
+ * veces por segundo y por edificio, y a 119 edificios eso eran 9.000 vueltas.
+ */
+const cuantosEn = (b) => (b && Array.isArray(b.trabajadores) ? b.trabajadores.length : 0)
 
 /** @returns {any[]} los aldeanos de ese edificio (objetos, con su id dentro). */
 export function trabajadoresDe (buildingId) {
@@ -529,7 +555,7 @@ export function edificiosSinAtender (soloVacios = false) {
     const nivel = b.nivel || 1
     const plazas = Math.max(0, d.plazas(nivel))
     if (plazas <= 0) continue
-    const ocupadas = Math.min(plazas, trabajadoresDe(b.id).length)
+    const ocupadas = Math.min(plazas, cuantosEn(b))
     const libres = plazas - ocupadas
     if (libres <= 0) continue
     if (soloVacios && ocupadas > 0) continue

@@ -563,6 +563,9 @@ function fasesConstruccion () {
   if (peor) bloqueosPorRecurso[peor]++
 }
 
+let hambreSesion = 0
+let hambreTotal = 0
+
 function fasePoblacion () {
   const s = game.state
   const parados = s.villagers.filter(v => v.job === 'parado')
@@ -833,8 +836,10 @@ async function jugarPartida () {
       let bloqueado = 0; let muerto = 0
       const ticksSesion = Math.round((ses.minutos * 60) / PASO)
       const cadaDecision = Math.round(20 / PASO)     // decide cada 20 s de juego
+      hambreSesion = 0
       for (let t = 0; t < ticksSesion; t += cadaDecision) {
         tick(cadaDecision, true)
+        if ((game.state.animo?.factor ?? 1) < 1) { hambreSesion += 20; hambreTotal += 20 }
         const acciones = decidir()
         if (acciones === 0) {
           if (hayAlgoEnMarcha()) bloqueado += 20
@@ -868,6 +873,9 @@ async function jugarPartida () {
         // cuando el jugador automático ya ha repartido a todo el mundo: lo que
         // siga parado aquí es gente que de verdad no tiene dónde ir.
         ociosos: censoOciosos(),
+        // segundos de esta sesión con la despensa vacía: el ánimo bajo recorta
+        // un 25 % de TODA la producción y no se medía en ninguna parte
+        segHambre: Math.round(hambreSesion),
         bloqueadoSeg: bloqueado, muertoSeg: muerto,
         cuelloBotella: cuelloDeBotella(resumenIni),
         censo: censoEdificios()
@@ -1204,6 +1212,7 @@ function resumenFinal () {
       pendientesAlFinal: hayCola ? Edificios.obrasEnEspera().length : 0
     },
     ociosidad: ociosidadPorEdad(),
+    minutosConHambre: +(hambreTotal / 60).toFixed(1),
     paron: {
       minutosBloqueado: +(M.segundosBloqueado / 60).toFixed(1),
       minutosMuerto: +(M.segundosMuerto / 60).toFixed(1),

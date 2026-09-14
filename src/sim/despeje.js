@@ -193,11 +193,51 @@ export function plazasDeObra () {
   return Math.max(1, d.obrasSimultaneas(Math.max(1, ayto.nivel || 1)))
 }
 
-/** Cuadrillas que pueden salir ahora mismo: las plazas que no están en una obra. */
+/**
+ * LAS CUADRILLAS DE LOS PARADOS (14-sep-2026).
+ *
+ * Hasta ahora despejar COSTABA una plaza de obra: mandar a talar era dejar de
+ * construir. Sigue siendo verdad para la cuadrilla oficial —es el precio que
+ * hace que despejar no compita con tener serrerías— pero el aldeano que no
+ * tiene puesto fijo no le quita la plaza a nadie: no estaba construyendo, es
+ * que no estaba haciendo NADA.
+ *
+ * Así que la gente sin plantilla abre cuadrillas APARTE. Dos parados hacen el
+ * trabajo de un constructor (uno solo se queda a medias: hace falta quien tale
+ * y quien arrastre), y el valle es finito —unos 2.800 de madera y 800 de piedra
+ * en las 60x60 casillas enteras—, así que esto no es una fuente de producción
+ * que desmadre el ritmo: es el empujón de las primeras horas y el premio por
+ * tener la aldea ordenada.
+ *
+ * Quién manda a quién: aquí solo se abren las faenas. Los aldeanos que se
+ * arriman los elige sim/villagers.js (`apañarse`), que es el dueño de
+ * `state.villagers`; este módulo se limita a LEER cuántos parados hay.
+ */
+const PEONES_POR_CUADRILLA = 2
+/** Aunque sobre media aldea, no se abren más de estas cuadrillas de parados a la vez. */
+const MAX_CUADRILLAS_PARADOS = 4
+
+/** Aldeanos sin puesto fijo. Solo se lee: los villagers son de sim/villagers.js. */
+function parados () {
+  let n = 0
+  for (const v of game.state.villagers || []) if (v.job === 'parado') n++
+  return n
+}
+
+/** Cuántas cuadrillas puede poner hoy la gente que sobra. */
+export function cuadrillasDeParados () {
+  return Math.min(MAX_CUADRILLAS_PARADOS, Math.floor(parados() / PEONES_POR_CUADRILLA))
+}
+
+/**
+ * Cuadrillas que pueden salir ahora mismo. Las de constructores salen de las
+ * plazas de obra que no esté usando una construcción; las de parados van
+ * aparte y no le quitan el sitio a nadie.
+ */
 function libres () {
   const d = bloque()
-  const ocupadas = (game.state.obras || []).length + d.faenas.length
-  return Math.max(0, plazasDeObra() - ocupadas)
+  const deObra = Math.max(0, plazasDeObra() - (game.state.obras || []).length)
+  return Math.max(0, deObra + cuadrillasDeParados() - d.faenas.length)
 }
 
 // ── Encargar ─────────────────────────────────────────────────────────────
@@ -585,6 +625,38 @@ function tickAuto (dt) {
   }
 }
 
+/**
+ * LA GENTE QUE SOBRA SALE SOLA AL VALLE. No hace falta que el jugador encienda
+ * nada ni pinte una zona: si tienes aldeanos sin puesto, se van a talar lo que
+ * estorba más cerca de casa. Es lo que convierte «tengo 7 parados» en «tengo 7
+ * talando», y el material entra en la caja como cualquier otro ingreso.
+ *
+ * Los frenos son los mismos que los del automático, para que no se desmadre:
+ * con la madera Y la piedra a tope no se tala (sería tirarlo), lo que el
+ * jugador haya mandado a dedo va primero, y solo se tala en terreno tuyo.
+ */
+const PARADOS_CADA = 3
+let paradosReloj = 0
+
+function tickParados (dt) {
+  const d = bloque()
+  if (d.auto.on) return                  // el automático ya se encarga de buscar faena
+  paradosReloj += dt || 0
+  if (paradosReloj < PARADOS_CADA) return
+  paradosReloj = 0
+  if (!hayInventario) return
+  if (cuadrillasDeParados() <= 0) return
+  if (almacenLleno()) return
+  if (d.cola.length) return              // lo que mandó el jugador a dedo va primero
+  let hueco = libres()
+  if (hueco <= 0) return
+  const utiles = casillasDeZona(null).filter(rindeAlgo)
+  for (const r of utiles) {
+    if (hueco <= 0) break
+    if (encargar(r.x, r.z, true).ok) hueco--
+  }
+}
+
 /** Se acabó lo que había: el automático se apaga solo y lo dice. */
 function agotado () {
   const d = bloque()
@@ -603,7 +675,10 @@ function agotado () {
  */
 function cuadrarPlazas () {
   const d = bloque()
-  let sobran = (game.state.obras || []).length + d.faenas.length - plazasDeObra()
+  // las cuadrillas de parados van aparte: la obra solo desaloja a las que
+  // ocupan una plaza de obra de verdad
+  const sitio = Math.max(0, plazasDeObra() - (game.state.obras || []).length) + cuadrillasDeParados()
+  let sobran = d.faenas.length - sitio
   if (sobran <= 0) return 0
   const orden = [...d.faenas].sort((a, b) => b.fin - a.fin)
   let n = 0
@@ -633,6 +708,8 @@ export function resumen () {
     hayInventario,
     plazas: plazasDeObra(),
     obras: (game.state.obras || []).length,
+    // cuadrillas que pone la gente sin puesto fijo, aparte de las plazas de obra
+    cuadrillasDeParados: cuadrillasDeParados(),
     libres: libres(),
     enMarcha: d.faenas.map(f => ({
       id: f.id, x: f.x, z: f.z, piezas: f.piezas, auto: !!f.auto,
@@ -699,6 +776,7 @@ export function init () {
     // esperando para siempre.
     arrancarCola()
     tickAuto(dt || 0.25)
+    tickParados(dt || 0.25)
   })
 
   // Construir encima sigue despejando gratis (lo hace render/terrain): aquí solo

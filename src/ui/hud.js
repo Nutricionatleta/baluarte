@@ -552,7 +552,7 @@ function economia () {
   return out
 }
 
-/** Cuánta gente hay, cuánta cabe y cuánta está de brazos cruzados. */
+/** Cuánta gente hay, cuánta cabe, cuánta está sin puesto y en qué se la puede poner. */
 function gente () {
   const s = game.state
   const p = pedir('aldeanos', 'poblacion', null) || { actual: (s.villagers || []).length, maxima: 0 }
@@ -560,7 +560,19 @@ function gente () {
   const parados = trabajos
     ? (trabajos.parado || 0)
     : (s.villagers || []).filter(v => !v.buildingId).length
-  return { actual: p.actual || 0, maxima: p.maxima || 0, parados, coste: pedir('aldeanos', 'costeContratar', 0) }
+  // `faena` trae el reparto de los que no tienen plantilla: cuántos están ya
+  // echando una mano (cuadrilla del valle, andamios) y en qué se puede poner al
+  // resto AHORA MISMO. Sin esto el HUD solo sabía enseñar un globo rojo.
+  const faena = pedir('aldeanos', 'faenaParaParados', null)
+  return {
+    actual: p.actual || 0,
+    maxima: p.maxima || 0,
+    parados,
+    apañados: faena ? faena.apañados : 0,
+    sueltos: faena ? faena.sueltos : parados,
+    opciones: faena ? faena.opciones : [],
+    coste: pedir('aldeanos', 'costeContratar', 0)
+  }
 }
 
 /** Producción real de un edificio concreto, por hora. */
@@ -640,9 +652,12 @@ function problemas () {
   if (g.maxima > 0 && g.actual >= g.maxima) {
     mas({
       clave: 'camas', icono: '🛏️', peso: 70,
-      titulo: 'No quedan camas',
-      detalle: `${g.actual} de ${g.maxima} vecinos: no llegará gente nueva hasta que levantes casas o mejores el Ayuntamiento.`,
-      boton: 'Construir', accion: () => events.emit(EV.UI_PANEL, { panel: 'construir', datos: { categoria: 'centro' } })
+      titulo: vacios.length ? 'No quedan camas' : 'La aldea no puede crecer más',
+      detalle: vacios.length
+        ? `${g.actual} de ${g.maxima} vecinos: no llegará gente nueva hasta que levantes casas o mejores el Ayuntamiento.`
+        : `${g.actual} de ${g.maxima} vecinos. El tope sube con los PUESTOS DE TRABAJO que levantas: otra granja, serrería o cantera te deja traer más gente (y las casas ponen las camas).`,
+      boton: 'Construir',
+      accion: () => events.emit(EV.UI_PANEL, { panel: 'construir', datos: { categoria: vacios.length ? 'centro' : 'recursos' } })
     })
   }
 
@@ -881,9 +896,11 @@ function pintarRecursos (instante = false) {
   const g = gente()
   const txt = `${g.actual}/${g.maxima}`
   if (nodos.poblacion.textContent !== txt) nodos.poblacion.textContent = txt
-  pintarParados(g.parados)
+  // el globo cuenta SOLO a los que no hacen nada: el que está en la cuadrilla
+  // del valle o dándole al martillo no es un problema que resolver
+  pintarParados(g.sueltos)
   nodos.botonGente.setAttribute('aria-label',
-    `${g.actual} de ${g.maxima} aldeanos${g.parados ? `, ${g.parados} sin faena` : ''}. Ver producción y contratar`)
+    `${g.actual} de ${g.maxima} aldeanos${g.sueltos ? `, ${g.sueltos} sin faena` : ''}${g.apañados ? `, ${g.apañados} echando una mano` : ''}. Ver producción y contratar`)
 }
 
 /** Los aldeanos sin faena: en rojo y con su siesta, para que se entiendan solos. */
@@ -1022,9 +1039,11 @@ function abrirEconomia (recurso = null) {
     pieTexto.append(
       el('div', { texto: `${ICONO.aldeano} ${g.actual} de ${g.maxima} aldeanos` }),
       el('div', {
-        clase: g.parados ? 'ritmo-mal' : 'tenue',
+        clase: g.sueltos ? 'ritmo-mal' : 'tenue',
         estilo: { fontSize: '.88em' },
-        texto: g.parados ? `${g.parados} de brazos cruzados` : 'Todos con faena'
+        texto: g.sueltos
+          ? `${g.sueltos} de brazos cruzados`
+          : (g.apañados ? `${g.apañados} echando una mano` : 'Todos con faena')
       })
     )
   }
@@ -1039,13 +1058,71 @@ function abrirEconomia (recurso = null) {
 
 function firmaEconomia (r, eco, g) {
   const e = eco[r]
-  return [r, e.lleno, Math.round(e.entra), Math.round(e.gasta), e.tope, g.actual, g.parados,
+  return [r, e.lleno, Math.round(e.entra), Math.round(e.gasta), e.tope, g.actual, g.parados, g.sueltos,
+    g.opciones.map(o => `${o.clave}:${o.cuantos}`).join(','),
     e.edificios.map(x => `${x.id}:${x.nivel}:${x.dentro}`).join(',')].join('|')
+}
+
+/**
+ * LA GENTE SIN PUESTO, con nombre y apellidos. Antes solo había un globo rojo
+ * con un número: te decía QUE tenías parados, nunca QUÉ hacer con ellos. Aquí
+ * sale, de más a menos provecho, en qué se pueden poner ahora mismo —y el botón
+ * que lo hace—, y también en qué están ya (la cuadrilla del valle, los
+ * andamios), que es la mitad de la respuesta: tu gente no está de brazos
+ * cruzados aunque no tenga plantilla fija.
+ */
+function bloqueParados (g, panel) {
+  if (!g.parados) return null
+  const caja = el('div', { clase: 'col' })
+  caja.appendChild(el('div', {
+    clase: 'eco-seccion',
+    texto: g.sueltos > 0
+      ? `🧍 ${g.sueltos} sin nada que hacer${g.apañados ? ` · ${g.apañados} echando una mano` : ''}`
+      : `🧍 ${g.parados} sin puesto fijo, todos echando una mano`
+  }))
+  const lista = el('div', { clase: 'eco-lista' })
+  for (const o of g.opciones) {
+    const fila = el('div', { clase: 'dato' }, [
+      el('i', { texto: o.icono }),
+      el('div', { clase: 'dato-txt' }, [
+        el('span', { texto: o.texto }),
+        el('small', { clase: 'tenue', texto: o.detalle })
+      ])
+    ])
+    if (o.boton === 'Repartir') {
+      fila.appendChild(el('button', {
+        clase: 'btn btn-oro', type: 'button', texto: '🧭 Repartir',
+        onclick: () => {
+          const n = pedir('aldeanos', 'asignarAutomatico', 0)
+          pintarRecursos()
+          if (!n) toast('No queda ni un puesto libre', 'info')
+        }
+      }))
+    } else if (o.boton === 'Construir') {
+      fila.appendChild(el('button', {
+        clase: 'btn btn-piedra', type: 'button', texto: '🔨 Construir',
+        onclick: () => { panel?.cerrar?.(); events.emit(EV.UI_PANEL, { panel: 'construir', datos: { categoria: 'recursos' } }) }
+      }))
+    }
+    lista.appendChild(fila)
+  }
+  if (!g.opciones.length) {
+    lista.appendChild(el('div', { clase: 'dato tenue' }, [
+      el('i', { texto: '🧍' }),
+      el('div', { clase: 'dato-txt' }, el('span', { texto: 'Están dando una vuelta por la plaza' }))
+    ]))
+  }
+  caja.appendChild(lista)
+  return caja
 }
 
 function cuerpoEconomia (r, eco, g, panel) {
   const e = eco[r]
   const caja = el('div', { clase: 'col' })
+
+  // lo primero de todo: qué hago con la gente que no tiene puesto
+  const sinPuesto = bloqueParados(g, panel)
+  if (sinPuesto) caja.appendChild(sinPuesto)
 
   // --- cabecera: el ritmo, gordo y en color ---
   const cifra = el('div', { clase: `ritmo ${e.lleno ? 'ritmo-mal' : tonoRitmo(e.ritmo)}`, texto: e.lleno ? '0/h' : porHora(e.ritmo) })
@@ -1222,14 +1299,21 @@ function constructores () {
   }))
   talas.sort((a, b) => a.restante - b.restante)
 
-  const ocupados = Math.min(plazas, obras.length + talas.length)
+  // Las cuadrillas que pone la gente SIN PUESTO van aparte de las plazas de
+  // obra: no le quitan el sitio a la construcción, así que suman. Sin esto la
+  // pastilla decía «0 libres» con media aldea talando por su cuenta.
+  const deParados = Math.max(0, Number(dsp?.cuadrillasDeParados) || 0)
+  const plazasTotales = plazas + deParados
+  const ocupados = Math.min(plazasTotales, obras.length + talas.length)
   return {
-    plazas,
+    plazas: plazasTotales,
+    plazasDeObra: plazas,
+    cuadrillasDeParados: deParados,
     obras,
     talas,
     tareas: [...obras, ...talas].sort((a, b) => a.restante - b.restante),
     ocupados,
-    libres: Math.max(0, plazas - ocupados),
+    libres: Math.max(0, plazasTotales - ocupados),
     auto: dsp?.auto || { on: false, zonaTexto: '', quedan: 0 },
     espera: pedir('edificios', 'obrasEnEspera', [])
   }
@@ -1487,15 +1571,18 @@ let hojaConstructores = null
 function pintarDespejeConstructores (cont, c, panel) {
   const a = c.auto || { on: false, zonaTexto: '', quedan: 0 }
   const util = c.libres > 0 || a.on || c.talas.length
-  const firma = `${util}|${a.on}|${a.zonaTexto}|${Math.ceil(a.quedan / 5)}`
+  const firma = `${util}|${a.on}|${a.zonaTexto}|${Math.ceil(a.quedan / 5)}|${c.cuadrillasDeParados || 0}`
   if (cont.dataset.firma === firma) return
   cont.dataset.firma = firma
   vaciar(cont)
   if (!util) return
 
+  const deParados = c.cuadrillasDeParados || 0
   const nota = a.on
     ? `Talando en ${a.zonaTexto}: ${a.quedan} casilla${a.quedan === 1 ? '' : 's'} por delante. Si encargas una obra, sueltan el hacha y van a ella.`
-    : 'Que no estén de brazos cruzados: mientras no haya obra, a talar y a picar piedra.'
+    : (deParados
+        ? `Tu gente sin puesto ya está en el valle: ${deParados} cuadrilla${deParados === 1 ? '' : 's'} aparte de los constructores, así que talar no te para ninguna obra.`
+        : 'Que no estén de brazos cruzados: mientras no haya obra, a talar y a picar piedra.')
 
   cont.appendChild(el('div', { clase: 'aviso aviso-info' }, [
     el('i', { texto: '🪓' }),
@@ -1668,13 +1755,18 @@ function consejoAhora () {
   }
 
   const g = gente()
-  if (g.parados > 0) {
+  if (g.sueltos > 0) {
+    // si no hay ni un puesto libre, repartir no arregla nada: lo que falta es
+    // dónde meterlos, y el consejo tiene que decir ESO
+    const hayHueco = g.opciones.some(o => o.boton === 'Repartir')
     return {
       texto,
       icono: ICONO.aldeano,
       urgente: false,
-      boton: 'Repartir',
-      accion: () => { pedir('aldeanos', 'asignarAutomatico', 0); pintarRecursos(); pintarConsejo() }
+      boton: hayHueco ? 'Repartir' : 'Construir',
+      accion: hayHueco
+        ? () => { pedir('aldeanos', 'asignarAutomatico', 0); pintarRecursos(); pintarConsejo() }
+        : () => events.emit(EV.UI_PANEL, { panel: 'construir', datos: { categoria: 'recursos' } })
     }
   }
 
