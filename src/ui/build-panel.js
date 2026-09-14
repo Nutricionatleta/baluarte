@@ -537,9 +537,11 @@ function botonDespejar () {
       el('span', { estilo: { fontWeight: '900' }, texto: 'Despejar el terreno' }),
       el('span', {
         estilo: { fontSize: '.72em', fontWeight: '700', opacity: '.85' },
-        texto: enMarcha
-          ? `${enMarcha} casilla${enMarcha > 1 ? 's' : ''} en faena · talar da madera y piedra`
-          : 'Tala árboles y pica rocas: madera, piedra y sitio para construir'
+        texto: r?.auto?.on
+          ? `🤖 Automático encendido · ${r.auto.zonaTexto} · ${r.auto.quedan} por talar`
+          : enMarcha
+            ? `${enMarcha} casilla${enMarcha > 1 ? 's' : ''} en faena · talar da madera y piedra`
+            : 'Marca una zona o toca casilla a casilla: madera, piedra y sitio'
       })
     ])
   ])
@@ -1636,6 +1638,8 @@ function entrarEnColocacion (tipo) {
   const d = def(tipo)
   if (!d) return
   salirDeColocacion(true)
+  // colocar y despejar son dos barras en el mismo sitio: nunca las dos a la vez
+  salirDeDespeje(true)
   cerrar()
 
   puesta = {
@@ -1943,9 +1947,16 @@ const simDespejeResumen = () => seguro(DESPEJE.resumen, null)
 const simDespejeQueHay = (x, z) => seguro(DESPEJE.resumenDe, null, x, z)
 const simDespejeEncargar = (x, z) => seguro(DESPEJE.encargar, { ok: false, motivo: 'Ahora no' }, x, z)
 const simDespejeCancelarEspera = () => seguro(DESPEJE.cancelarEspera, 0)
+const simZonaEntre = (ax, az, bx, bz) => seguro(DESPEJE.zonaEntre, null, ax, az, bx, bz)
+const simZonaResumen = (zona) => seguro(DESPEJE.resumenZona, { casillas: 0, madera: 0, piedra: 0, minutos: 0, cabe: 0 }, zona)
+const simZonaEncargar = (zona) => seguro(DESPEJE.encargarZona, { pedidas: 0, faltan: 0 }, zona)
+const simAutoEstado = () => seguro(DESPEJE.autoEstado, { on: false, zona: null, zonaTexto: '', quedan: 0, haciendo: 0 })
+const simAutoPoner = (on, zona) => seguro(DESPEJE.ponerAuto, null, on, zona)
 
-let despeje = null       // { pedidas, ultimoMotivo, ultimoTexto }
+// { pedidas, ultimoMotivo, ultimoTexto, modo:'casilla'|'zona', zona, ancla, arrastrando, previa }
+let despeje = null
 let barraDespeje = null
+let marcoZona = null     // el recuadro de selección que sigue al dedo
 
 /**
  * Se entra igual que a colocar un muro: barra fina abajo y el dedo arrastrando.
@@ -1954,20 +1965,29 @@ let barraDespeje = null
  * la cámara y hace que scene.js vaya soltando GRID_TAP casilla a casilla, que es
  * exactamente lo que hace falta para pintar.
  */
-function entrarEnDespeje () {
+function entrarEnDespeje (modo = 'casilla') {
   salirDeDespeje(true)
-  despeje = { pedidas: 0, ultimoTexto: '', ultimoMotivo: '' }
+  despeje = {
+    pedidas: 0, ultimoTexto: '', ultimoMotivo: '',
+    modo: modo === 'zona' ? 'zona' : 'casilla',
+    zona: null, ancla: null, arrastrando: false, previa: null
+  }
   emitiendo = true
   events.emit(EV.BUILD_MODE, { activo: true, tipo: null, despejando: true, ancho: 1, alto: 1 })
   emitiendo = false
   crearBarraDespeje()
-  toast('Arrastra el dedo por lo que quieras limpiar', 'info', 2200)
+  escucharArrastre(true)
+  toast(despeje.modo === 'zona'
+    ? 'Arrastra para marcar la zona que hay que limpiar'
+    : 'Arrastra el dedo por lo que quieras limpiar', 'info', 2200)
 }
 
 function salirDeDespeje (silencioso = false) {
   if (!despeje) return
   const pedidas = despeje.pedidas
   despeje = null
+  escucharArrastre(false)
+  quitarMarcoZona()
   barraDespeje?.caja?.remove()
   barraDespeje = null
   emitiendo = true
@@ -1977,9 +1997,20 @@ function salirDeDespeje (silencioso = false) {
   if (pedidas) toast(`🪓 ${pedidas} casilla${pedidas > 1 ? 's' : ''} encargada${pedidas > 1 ? 's' : ''} a la cuadrilla`, 'bien')
 }
 
+/** Cambiar entre pintar casilla a casilla y marcar un rectángulo. */
+function cambiarModoDespeje (modo) {
+  if (!despeje || despeje.modo === modo) return
+  despeje.modo = modo
+  despeje.zona = null; despeje.ancla = null; despeje.previa = null
+  quitarMarcoZona()
+  pintarModoDespeje()
+  refrescarBarraDespeje()
+}
+
 /** Cada casilla que roza el dedo se encarga; lo que no vale, se dice y no molesta más. */
 function pintarDespeje (x, z) {
   if (!despeje) return
+  if (despeje.modo === 'zona') { estirarZona(x, z); return }
   const hay = simDespejeQueHay(x, z)
   despeje.ultimoTexto = hay ? `${hay.texto} · ${Math.round(hay.segundos)} s` : ''
   const r = simDespejeEncargar(x, z)
@@ -1993,6 +2024,113 @@ function pintarDespeje (x, z) {
     despeje.ultimoMotivo = ''
   }
   refrescarBarraDespeje()
+}
+
+/* --- marcar una zona: un arrastre en vez de cuarenta toques --------------- */
+/**
+ * El rectángulo se arma con DOS fuentes: las casillas las da EV.GRID_TAP (el
+ * render ya sabe qué casilla hay bajo el dedo, con el relieve resuelto), y el
+ * principio y el final del gesto salen de los punteros del documento, que es lo
+ * único que el bus no cuenta. Mientras el dedo va, la barra dice lo que cae
+ * dentro y lo que se saca; al soltar, la zona queda marcada para encargarla o
+ * para dársela al automático.
+ */
+function escucharArrastre (activar) {
+  if (activar) {
+    window.addEventListener('pointerdown', alBajarZona, true)
+    window.addEventListener('pointermove', alMoverZona, true)
+    window.addEventListener('pointerup', alSubirZona, true)
+    window.addEventListener('pointercancel', alSubirZona, true)
+  } else {
+    window.removeEventListener('pointerdown', alBajarZona, true)
+    window.removeEventListener('pointermove', alMoverZona, true)
+    window.removeEventListener('pointerup', alSubirZona, true)
+    window.removeEventListener('pointercancel', alSubirZona, true)
+  }
+}
+
+/** El HUD va por encima del lienzo: un dedo que empieza ahí no marca zona. */
+function sobreHud (e) {
+  const t = e.target
+  return !!(t && typeof t.closest === 'function' && t.closest('#hud, .panel, .hoja, button, input, select, textarea, a'))
+}
+
+function alBajarZona (e) {
+  if (!despeje || despeje.modo !== 'zona' || sobreHud(e)) return
+  despeje.arrastrando = true
+  despeje.ancla = null          // la pone el primer GRID_TAP, que llega enseguida
+  despeje.zona = null
+  despeje.previa = null
+  crearMarcoZona(e.clientX, e.clientY)
+}
+
+function alMoverZona (e) {
+  if (!despeje || !despeje.arrastrando) return
+  moverMarcoZona(e.clientX, e.clientY)
+}
+
+function alSubirZona () {
+  if (!despeje || !despeje.arrastrando) return
+  despeje.arrastrando = false
+  quitarMarcoZona()
+  if (despeje.zona) navigator.vibrate?.(12)
+  refrescarBarraDespeje()
+}
+
+/** Una casilla más del arrastre: crece el rectángulo y se recalcula el botín. */
+function estirarZona (x, z) {
+  if (!despeje || !despeje.arrastrando) return
+  if (!despeje.ancla) despeje.ancla = { x, z }
+  despeje.zona = simZonaEntre(despeje.ancla.x, despeje.ancla.z, x, z)
+  despeje.previa = simZonaResumen(despeje.zona)
+  despeje.ultimoMotivo = ''
+  refrescarBarraDespeje()
+}
+
+/** Encargar de un gesto todo lo que cayó dentro. */
+function encargarZonaMarcada () {
+  if (!despeje?.zona) return
+  const r = simZonaEncargar(despeje.zona)
+  if (!r.pedidas) {
+    toast('En esa zona no queda nada que talar', 'info')
+  } else {
+    despeje.pedidas += r.pedidas
+    toast(`🪓 ${r.pedidas} casilla${r.pedidas > 1 ? 's' : ''} a la cuadrilla${r.faltan ? ` · ${r.faltan} no caben todavía` : ''}`, 'bien')
+    navigator.vibrate?.(14)
+  }
+  if (!r.faltan) { despeje.zona = null; despeje.previa = null }
+  else despeje.previa = simZonaResumen(despeje.zona)
+  refrescarBarraDespeje()
+}
+
+/* --- el recuadro que sigue al dedo --------------------------------------- */
+
+function crearMarcoZona (px, py) {
+  quitarMarcoZona()
+  const caja = el('div', {
+    estilo: {
+      position: 'fixed', zIndex: '54', pointerEvents: 'none',
+      border: '2px dashed var(--oro, #e0b13a)',
+      background: 'rgba(224,177,58,.16)',
+      borderRadius: '6px', left: `${px}px`, top: `${py}px`, width: '0px', height: '0px'
+    }
+  })
+  ;(document.getElementById('hud') || document.body).appendChild(caja)
+  marcoZona = { caja, x0: px, y0: py }
+}
+
+function moverMarcoZona (px, py) {
+  if (!marcoZona) return
+  const s = marcoZona.caja.style
+  s.left = `${Math.min(marcoZona.x0, px)}px`
+  s.top = `${Math.min(marcoZona.y0, py)}px`
+  s.width = `${Math.abs(px - marcoZona.x0)}px`
+  s.height = `${Math.abs(py - marcoZona.y0)}px`
+}
+
+function quitarMarcoZona () {
+  marcoZona?.caja?.remove()
+  marcoZona = null
 }
 
 function crearBarraDespeje () {
@@ -2022,6 +2160,19 @@ function crearBarraDespeje () {
     botinTxt
   ]))
 
+  // cómo se marca: casilla a casilla con el dedo o un rectángulo de un gesto
+  const modoFila = el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' } })
+  const btnCasilla = el('button', {
+    clase: 'btn btn-piedra', type: 'button', texto: '✏️ Casilla',
+    estilo: { minHeight: '48px' }, onclick: () => cambiarModoDespeje('casilla')
+  })
+  const btnZona = el('button', {
+    clase: 'btn btn-piedra', type: 'button', texto: '▭ Zona',
+    estilo: { minHeight: '48px' }, onclick: () => cambiarModoDespeje('zona')
+  })
+  modoFila.append(btnCasilla, btnZona)
+  caja.appendChild(modoFila)
+
   const fila = el('div', { estilo: { display: 'grid', gridTemplateColumns: 'auto auto 1fr', gap: '8px' } })
   fila.appendChild(el('button', {
     clase: 'btn btn-piedra', type: 'button', texto: '✕', 'aria-label': 'Salir de despejar',
@@ -2037,12 +2188,24 @@ function crearBarraDespeje () {
       refrescarBarraDespeje()
     }
   }))
-  fila.appendChild(el('button', {
+  const principal = el('button', {
     clase: 'btn btn-oro', type: 'button', texto: 'Listo',
     estilo: { minHeight: '56px', width: '100%', fontSize: '1.02em' },
-    onclick: () => salirDeDespeje()
-  }))
+    onclick: () => {
+      if (despeje?.modo === 'zona' && despeje.zona && despeje.previa?.casillas) encargarZonaMarcada()
+      else salirDeDespeje()
+    }
+  })
+  fila.appendChild(principal)
   caja.appendChild(fila)
+
+  // el interruptor del automático: el constructor que se queda sin obra se va a talar
+  const autoBtn = el('button', {
+    clase: 'btn btn-piedra', type: 'button',
+    estilo: { minHeight: '48px', width: '100%', marginTop: '8px', textAlign: 'left' },
+    onclick: () => alternarAuto()
+  })
+  caja.appendChild(autoBtn)
 
   const pista = el('div', {
     clase: 'pequeño tenue',
@@ -2052,8 +2215,49 @@ function crearBarraDespeje () {
   caja.appendChild(pista)
 
   raiz.appendChild(caja)
-  barraDespeje = { caja, estadoTxt, detalleTxt, botinTxt }
+  barraDespeje = { caja, estadoTxt, detalleTxt, botinTxt, btnCasilla, btnZona, principal, autoBtn, pista }
+  pintarModoDespeje()
   refrescarBarraDespeje()
+}
+
+/** Qué pestaña de marcado está encendida y qué dice la pista de abajo. */
+function pintarModoDespeje () {
+  if (!barraDespeje || !despeje) return
+  const zona = despeje.modo === 'zona'
+  barraDespeje.btnZona.className = zona ? 'btn btn-oro' : 'btn btn-piedra'
+  barraDespeje.btnCasilla.className = zona ? 'btn btn-piedra' : 'btn btn-oro'
+  barraDespeje.pista.textContent = zona
+    ? 'Arrastra un rectángulo por el mapa: se encarga de un gesto todo lo que caiga dentro.'
+    : 'Lo talado da madera y piedra. Construir encima también lo quita, pero entonces no cobras nada.'
+}
+
+/**
+ * El automático se enciende con la zona marcada si la hay ("despeja esto cuando
+ * no tengas nada que hacer") y, si no, suelto por todo tu territorio.
+ */
+function alternarAuto () {
+  const a = simAutoEstado()
+  if (a.on) {
+    simAutoPoner(false)
+    toast('🪓 Despeje automático apagado', 'info')
+  } else {
+    const zona = despeje?.modo === 'zona' && despeje.zona && despeje.previa?.casillas ? despeje.zona : null
+    const r = simAutoPoner(true, zona)
+    toast(zona
+      ? `🤖 Automático en la zona marcada · ${r?.quedan || 0} casillas`
+      : `🤖 Automático por todo tu territorio · ${r?.quedan || 0} casillas`, 'bien')
+  }
+  refrescarBarraDespeje()
+}
+
+/** «14 casillas · 86 🪵 · 24 🪨 · unos 6 min», que es lo que se quiere saber. */
+function textoZona (p) {
+  if (!p || !p.casillas) return ''
+  const trozos = [`${p.casillas} casilla${p.casillas > 1 ? 's' : ''}`]
+  if (p.madera) trozos.push(`${p.madera} ${ICONO.madera}`)
+  if (p.piedra) trozos.push(`${p.piedra} ${ICONO.piedra}`)
+  trozos.push(p.minutos < 1 ? 'menos de un minuto' : `unos ${Math.round(p.minutos)} min`)
+  return trozos.join(' · ')
 }
 
 function refrescarBarraDespeje () {
@@ -2061,27 +2265,42 @@ function refrescarBarraDespeje () {
   const r = simDespejeResumen()
   const enMarcha = r ? r.enMarcha.length : 0
   const esperando = r ? r.esperando : 0
+  const zonaViva = despeje.modo === 'zona' && !!despeje.zona
+  // mientras el dedo arrastra, el recuento se recalcula en cada casilla nueva
+  const previa = zonaViva ? despeje.previa : null
 
   const texto = !r || !r.hayInventario
     ? 'El valle todavía se está dibujando…'
     : despeje.ultimoMotivo
       ? `⛔ ${despeje.ultimoMotivo}`
-      : enMarcha
-        ? `🪓 ${enMarcha} cuadrilla${enMarcha > 1 ? 's' : ''} talando${esperando ? ` · ${esperando} en cola` : ''}`
-        : esperando
-          ? `⏳ ${esperando} encargo${esperando > 1 ? 's' : ''} esperando constructor`
-          : '👆 Arrastra el dedo por los árboles y las rocas'
+      : previa && previa.casillas
+        ? `▭ ${textoZona(previa)}`
+        : previa
+          ? '▭ Aquí dentro no hay nada que talar'
+          : enMarcha
+            ? `🪓 ${enMarcha} cuadrilla${enMarcha > 1 ? 's' : ''} talando${esperando ? ` · ${esperando} en cola` : ''}`
+            : esperando
+              ? `⏳ ${esperando} encargo${esperando > 1 ? 's' : ''} esperando constructor`
+              : despeje.modo === 'zona'
+                ? '👆 Arrastra un rectángulo sobre el bosque'
+                : '👆 Arrastra el dedo por los árboles y las rocas'
   if (barraDespeje.estadoTxt.textContent !== texto) barraDespeje.estadoTxt.textContent = texto
-  barraDespeje.estadoTxt.style.color = despeje.ultimoMotivo ? 'var(--rojo)' : enMarcha ? 'var(--verde-oscuro)' : ''
+  barraDespeje.estadoTxt.style.color = despeje.ultimoMotivo
+    ? 'var(--rojo)'
+    : (previa?.casillas || enMarcha) ? 'var(--verde-oscuro)' : ''
 
   const restan = enMarcha ? Math.max(0, Math.min(...r.enMarcha.map(f => f.restan))) : 0
-  const detalle = despeje.ultimoTexto
-    ? `Aquí hay ${despeje.ultimoTexto}`
-    : enMarcha
-      ? `La primera cae en ${formatoTiempo(restan)} · ${r.plazas} constructor${r.plazas > 1 ? 'es' : ''} en la aldea`
-      : r && r.despejadas
-        ? `${r.despejadas} casillas ya limpias`
-        : ''
+  const detalle = previa && previa.casillas
+    ? (previa.cabe < previa.casillas
+        ? `Caben ${previa.cabe} de golpe: el resto, en otro gesto`
+        : `${despeje.arrastrando ? 'Suelta para marcarla' : 'Pulsa Encargar o déjasela al automático'}`)
+    : despeje.ultimoTexto
+      ? `Aquí hay ${despeje.ultimoTexto}`
+      : enMarcha
+        ? `La primera cae en ${formatoTiempo(restan)} · ${r.plazas} constructor${r.plazas > 1 ? 'es' : ''} en la aldea`
+        : r && r.despejadas
+          ? `${r.despejadas} casillas ya limpias`
+          : ''
   if (barraDespeje.detalleTxt.textContent !== detalle) barraDespeje.detalleTxt.textContent = detalle
 
   const p = r ? r.pendiente : { madera: 0, piedra: 0 }
@@ -2090,6 +2309,23 @@ function refrescarBarraDespeje () {
   if (p.piedra) trozos.push(`${ICONO.piedra} ${p.piedra}`)
   const botin = trozos.join(' ')
   if (barraDespeje.botinTxt.textContent !== botin) barraDespeje.botinTxt.textContent = botin
+
+  const puedeEncargar = !!(previa && previa.casillas)
+  const txtPrincipal = puedeEncargar ? `🪓 Encargar ${previa.casillas}` : 'Listo'
+  if (barraDespeje.principal.textContent !== txtPrincipal) barraDespeje.principal.textContent = txtPrincipal
+
+  // el automático: qué está haciendo y cómo se para
+  const a = r?.auto || simAutoEstado()
+  const txtAuto = a.on && a.esperaAlmacen
+    ? '🤖 Automático en pausa: el almacén está lleno — tocar para parar'
+    : a.on
+      ? `🤖 Automático encendido · ${a.zonaTexto} · ${a.quedan} por talar — tocar para parar`
+      : puedeEncargar
+        ? '🤖 Dejar esta zona en automático'
+        : '🤖 Despeje automático: que talen cuando no tengan obra'
+  if (barraDespeje.autoBtn.textContent !== txtAuto) barraDespeje.autoBtn.textContent = txtAuto
+  const claseAuto = a.on ? 'btn btn-oro' : 'btn btn-piedra'
+  if (barraDespeje.autoBtn.className !== claseAuto) barraDespeje.autoBtn.className = claseAuto
 }
 
 /* ===========================================================================
@@ -2100,6 +2336,13 @@ export function init () {
   events.on(EV.UI_PANEL, (p) => {
     const cual = p?.panel
     if (!cual) { cerrar(); return }
+    // atajo desde la hoja de constructores del HUD: se entra a despejar sin
+    // pasar por el taller, que es donde el jugador ve que tiene gente parada
+    if (cual === 'despejar' || cual === 'despeje') {
+      salirDeColocacion(true); cerrar()
+      entrarEnDespeje(p?.datos?.modo || 'zona')
+      return
+    }
     if (cual === 'construir' || cual === 'taller') { salirDeColocacion(true); abrir(p?.datos?.vista || 'construir') }
     else if (cual === 'mejorar' || cual === 'mejoras') { salirDeColocacion(true); abrir('mejorar') }
     else if (cual === 'territorio' || cual === 'parcelas') { salirDeColocacion(true); abrir('territorio') }
@@ -2147,7 +2390,21 @@ export function init () {
   // atajo de pruebas en el navegador: baluarte.taller.abrir('mejorar')
   if (typeof window !== 'undefined') {
     window.taller = {
-      abrir, cerrar, colocar: entrarEnColocacion, despejar: entrarEnDespeje,
+      abrir,
+      cerrar,
+      colocar: entrarEnColocacion,
+      despejar: entrarEnDespeje,
+      // para las pruebas: marcar la zona sin dedo y encargarla
+      marcarZona: (ax, az, bx, bz) => {
+        if (!despeje) entrarEnDespeje('zona')
+        cambiarModoDespeje('zona')
+        despeje.arrastrando = true
+        despeje.ancla = { x: ax, z: az }
+        estirarZona(bx, bz)
+        despeje.arrastrando = false
+        refrescarBarraDespeje()
+        return despeje.previa
+      },
       get modo () { return puesta },
       get despeje () { return despeje }
     }

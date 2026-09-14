@@ -1,11 +1,12 @@
 import { events, EV } from '../core/events.js'
 import { game, nuevoId } from '../core/state.js'
 import { dentro, esTerritorio, gridAMundo } from '../core/grid.js'
+import { CONFIG } from '../core/config.js'
 import { makeRng } from '../core/rng.js'
 import { def } from '../data/buildings.js'
 // Única importación pactada fuera de core/ y data/: el banco. Lo que se saca de
 // talar entra por aquí, con sus topes de almacén, como cualquier otro ingreso.
-import { ingresar } from './resources.js'
+import { ingresar, capacidadDe } from './resources.js'
 
 /**
  * DESPEJAR EL VALLE. Los árboles, las rocas y los matorrales dejan de ser
@@ -103,7 +104,22 @@ function bloque () {
   if (!Array.isArray(d.hechas)) d.hechas = []
   if (!Array.isArray(d.faenas)) d.faenas = []
   if (!Array.isArray(d.cola)) d.cola = []
+  // `auto` nació después: una partida empezada llega sin él y se le pone apagado.
+  if (!d.auto || typeof d.auto !== 'object') d.auto = { on: false, zona: null, hechas: 0 }
+  d.auto.on = !!d.auto.on
+  d.auto.zona = zonaSana(d.auto.zona)
+  if (!Number.isFinite(d.auto.hechas)) d.auto.hechas = 0
   return d
+}
+
+/** Un rectángulo de casillas creíble: enteros, ordenado y dentro del valle. o null. */
+function zonaSana (z) {
+  if (!z || typeof z !== 'object') return null
+  const n = (v) => Math.max(0, Math.min(CONFIG.GRID - 1, Math.round(Number(v) || 0)))
+  const x0 = n(Math.min(z.x0, z.x1)); const x1 = n(Math.max(z.x0, z.x1))
+  const z0 = n(Math.min(z.z0, z.z1)); const z1 = n(Math.max(z.z0, z.z1))
+  if (!Number.isFinite(x0) || !Number.isFinite(z0)) return null
+  return { x0, z0, x1, z1 }
 }
 
 const hechas = () => new Set(bloque().hechas)
@@ -191,7 +207,7 @@ function libres () {
  * espera su turno en la cola, igual que las obras.
  * @returns {{ok:boolean, motivo:string, causa:string}}
  */
-export function encargar (x, z) {
+export function encargar (x, z, porAuto = false) {
   const gx = x | 0; const gz = z | 0
   if (!dentro(gx, gz)) return { ok: false, motivo: 'Eso se sale del valle', causa: 'fuera' }
   if (!esTerritorio(game.state, gx, gz)) {
@@ -210,7 +226,9 @@ export function encargar (x, z) {
   const entrada = {
     id: nuevoId('dsp'), x: gx, z: gz,
     piezas: r.piezas, segundos: r.segundos,
-    madera: r.madera, piedra: r.piedra
+    madera: r.madera, piedra: r.piedra,
+    texto: r.texto,            // «2 robles y 1 roca», para la hoja de constructores
+    auto: !!porAuto            // para distinguir en la interfaz lo que va solo
   }
   d.cola.push(entrada)
   events.emit(EV.DESPEJE_ENCARGADO, {
@@ -272,14 +290,24 @@ function revisarFaenas () {
 
     total.madera += recompensa.madera
     total.piedra += recompensa.piedra
-    avisos.push({ f, recompensa, hallazgo })
+    // Lo que va solo no interrumpe: un toast cada veinte segundos durante horas
+    // sería insufrible. Se cuenta aparte y se resume de diez en diez.
+    if (f.auto) {
+      d.auto.hechas++
+      autoBotin.casillas++
+      autoBotin.madera += recompensa.madera
+      autoBotin.piedra += recompensa.piedra
+    } else {
+      avisos.push({ f, recompensa, hallazgo })
+    }
 
     events.emit(EV.DESPEJE_TERMINADO, {
-      id: f.id, x: f.x, z: f.z, piezas: f.piezas, recompensa, hallazgo
+      id: f.id, x: f.x, z: f.z, piezas: f.piezas, recompensa, hallazgo, auto: !!f.auto
     })
   }
 
   anunciar(avisos, total)
+  resumirAuto()
   arrancarCola()
   return vencidas.length
 }
@@ -305,6 +333,16 @@ function anunciar (avisos, total) {
   if (total.oro) trozos.push(`+${total.oro} 🪙`)
   toast(`🪓 ${avisos.length} casillas despejadas: ${trozos.join(' ') || 'nada aprovechable'}`, 'bien')
   events.emit(EV.SFX, { nombre: 'listo' })
+}
+
+/** El parte del automático, de diez en diez casillas: se nota sin dar la lata. */
+function resumirAuto () {
+  if (autoBotin.casillas < 10) return
+  const trozos = []
+  if (autoBotin.madera) trozos.push(`+${autoBotin.madera} 🪵`)
+  if (autoBotin.piedra) trozos.push(`+${autoBotin.piedra} 🪨`)
+  toast(`🪓 Despeje automático: ${autoBotin.casillas} casillas · ${trozos.join(' ') || 'nada aprovechable'}`, 'bien')
+  autoBotin.casillas = 0; autoBotin.madera = 0; autoBotin.piedra = 0
 }
 
 // ── Cancelar ─────────────────────────────────────────────────────────────
@@ -335,6 +373,254 @@ export function cancelarEspera () {
   return n
 }
 
+// ── Marcar una zona: un gesto en vez de cuarenta toques ──────────────────
+
+/** Rectángulo de casillas a partir de las dos esquinas que marca el dedo. */
+export function zonaEntre (ax, az, bx, bz) {
+  return zonaSana({ x0: ax, z0: az, x1: bx, z1: bz })
+}
+
+const enZona = (z, x, zz) => x >= z.x0 && x <= z.x1 && zz >= z.z0 && zz <= z.z1
+
+/** El corazón de la aldea: por ahí es donde un roble estorba de verdad. */
+function centroAldea () {
+  const bs = game.state.buildings || []
+  const ayto = bs.find(b => b.tipo === 'ayuntamiento')
+  if (ayto) return { x: ayto.x + ((ayto.ancho ?? 2) - 1) / 2, z: ayto.z + ((ayto.alto ?? 2) - 1) / 2 }
+  if (bs.length) {
+    let x = 0; let z = 0
+    for (const b of bs) { x += b.x; z += b.z }
+    return { x: x / bs.length, z: z / bs.length }
+  }
+  const m = (CONFIG.GRID - 1) / 2
+  return { x: m, z: m }
+}
+
+/** La piedra cuesta más de conseguir que la madera (el taller usa el mismo 1,3). */
+const PESO_PIEDRA = 1.3
+
+/**
+ * Talar con cabeza: primero lo que estorba cerca de casa y, a igualdad de
+ * distancia, lo que más rinde por segundo de cuadrilla. El divisor hace que un
+ * roble a 24 casillas del ayuntamiento valga la cuarta parte que uno pegado a
+ * la plaza, así que la aldea se limpia antes que el quinto pino.
+ */
+function puntuacion (r, centro) {
+  const rinde = (r.madera + r.piedra * PESO_PIEDRA) / Math.max(3, r.segundos)
+  const dist = Math.hypot(r.x - centro.x, r.z - centro.z)
+  return (rinde * 60) / (1 + dist / 8)
+}
+
+/**
+ * Lo talable de una zona (null = todo tu territorio), ya ordenado por prioridad.
+ * Se recorre el INVENTARIO y no el rectángulo: una zona de 40x40 son 1.600
+ * casillas y en el valle entero no llegan a 600 las que tienen algo plantado.
+ */
+export function casillasDeZona (zona) {
+  if (!hayInventario) return []
+  const z = zonaSana(zona)
+  const d = bloque()
+  const ocupadas = new Set([...d.faenas, ...d.cola].map(f => clave(f.x, f.z)))
+  const centro = centroAldea()
+  const lista = []
+  for (const k of inventario.keys()) {
+    const p = k.split('|'); const x = +p[0]; const zz = +p[1]
+    if (z && !enZona(z, x, zz)) continue
+    if (ocupadas.has(k)) continue
+    if (!esTerritorio(game.state, x, zz)) continue
+    const r = resumenDe(x, zz)
+    if (!r) continue
+    r.puntos = puntuacion(r, centro)
+    lista.push(r)
+  }
+  lista.sort((a, b) => b.puntos - a.puntos)
+  return lista
+}
+
+/**
+ * Lo que se saca de la zona y lo que va a costar: es lo que lee la barra
+ * mientras el dedo arrastra («14 casillas · 86 🪵 · 24 🪨 · unos 6 min»).
+ */
+export function resumenZona (zona) {
+  const lista = casillasDeZona(zona)
+  let madera = 0; let piedra = 0; let segundos = 0
+  for (const r of lista) { madera += r.madera; piedra += r.piedra; segundos += r.segundos }
+  const plazas = Math.max(1, plazasDeObra())
+  const d = bloque()
+  return {
+    casillas: lista.length,
+    madera,
+    piedra,
+    segundos,
+    // con dos cuadrillas se tarda la mitad: es lo que el jugador quiere saber
+    minutos: segundos / plazas / 60,
+    cabe: Math.max(0, Math.min(lista.length, MAX_COLA - d.cola.length))
+  }
+}
+
+/** Encarga la zona entera de un gesto, de lo más jugoso a lo más lejano. */
+export function encargarZona (zona) {
+  const lista = casillasDeZona(zona)
+  const d = bloque()
+  let pedidas = 0; let madera = 0; let piedra = 0
+  for (const r of lista) {
+    if (d.cola.length >= MAX_COLA) break
+    if (!encargar(r.x, r.z).ok) continue
+    pedidas++; madera += r.madera; piedra += r.piedra
+  }
+  return { pedidas, madera, piedra, total: lista.length, faltan: lista.length - pedidas }
+}
+
+// ── Despeje automático ───────────────────────────────────────────────────
+/**
+ * «Cuando no tengas obra, vete a talar». El interruptor no crea constructores
+ * nuevos ni cambia lo que rinde un árbol: solo evita que una plaza de obra se
+ * quede parada. Las tres reglas que lo mantienen honrado:
+ *
+ *   1. CONSTRUIR MANDA. En cuanto el jugador encarga un edificio o una mejora,
+ *      `cuadrarPlazas()` desaloja la cuadrilla que más le queda y la devuelve a
+ *      la cola. Se pierde el rato talado, nunca el encargo.
+ *   2. Los encargos a dedo del jugador van primero: mientras quede cola suya,
+ *      el automático no mete faena nueva.
+ *   3. Se agota y se apaga solo. No hay granja infinita: el valle tiene lo que
+ *      tiene, y con la app cerrada solo terminan las faenas que ya estaban en
+ *      marcha (la cola no avanza sola), así que dormir no da madera.
+ */
+const AUTO_CADA = 2       // segundos entre revisiones: más a menudo no aporta nada
+let autoReloj = 0
+const autoBotin = { madera: 0, piedra: 0, casillas: 0 }
+
+/** Enciende o apaga. `zona` undefined deja la que hubiera; null = todo el territorio. */
+export function ponerAuto (on, zona) {
+  const d = bloque()
+  d.auto.on = !!on
+  if (zona !== undefined) d.auto.zona = zonaSana(zona)
+  if (d.auto.on) { autoReloj = AUTO_CADA; tickAuto(0) }
+  return autoEstado()
+}
+
+/** Marca la zona del automático y lo enciende de paso. */
+export const ponerZonaAuto = (zona) => ponerAuto(true, zona)
+/** Suelta la correa: a partir de ahora tala por todo lo tuyo. */
+export const soltarZonaAuto = () => ponerAuto(bloque().auto.on, null)
+/** Parar en cualquier momento. Lo que ya está talándose se respeta. */
+export const pararAuto = () => ponerAuto(false)
+
+/** Foto del automático para la interfaz: si anda, dónde y qué le queda. */
+export function autoEstado () {
+  const d = bloque()
+  const z = d.auto.zona
+  const enMarcha = d.faenas.filter(f => f.auto)
+  return {
+    on: d.auto.on,
+    zona: z ? { ...z } : null,
+    zonaTexto: z ? `zona de ${z.x1 - z.x0 + 1}×${z.z1 - z.z0 + 1}` : 'todo tu territorio',
+    hechas: d.auto.hechas,
+    quedan: quedanPorTalar(z),
+    haciendo: enMarcha.length,
+    esperaAlmacen: d.auto.on && almacenLleno(),
+    faenas: enMarcha.map(f => ({
+      id: f.id, x: f.x, z: f.z, piezas: f.piezas,
+      restan: Math.max(0, (f.fin - Date.now()) / 1000)
+    }))
+  }
+}
+
+// Contar lo que queda recorre el inventario entero: se guarda un segundo, que
+// es lo que tarda la interfaz en volver a preguntar.
+let memoQuedan = { firma: '', cuando: 0, n: 0 }
+function quedanPorTalar (z) {
+  if (!hayInventario) return 0
+  const firma = z ? `${z.x0},${z.z0},${z.x1},${z.z1}` : '*'
+  const ahora = Date.now()
+  if (memoQuedan.firma === firma && ahora - memoQuedan.cuando < 1000) return memoQuedan.n
+  let n = 0
+  for (const k of inventario.keys()) {
+    const p = k.split('|'); const x = +p[0]; const zz = +p[1]
+    if (z && !enZona(z, x, zz)) continue
+    if (!esTerritorio(game.state, x, zz)) continue
+    n++
+  }
+  memoQuedan = { firma, cuando: ahora, n }
+  return n
+}
+
+/**
+ * Con la madera Y la piedra a tope, seguir talando es tirar el material (solo se
+ * aparta una cuarta parte en el montón de fuera). El automático espera a que
+ * haya sitio: es el freno que impide que el valle se evapore mientras el
+ * jugador duerme con el almacén lleno.
+ */
+const huecoDe = (tipo) => Math.max(0, capacidadDe(tipo) - (game.state.recursos?.[tipo] || 0))
+function almacenLleno () {
+  return huecoDe('madera') <= 0 && huecoDe('piedra') <= 0
+}
+/** ¿Esa casilla da algo que TODAVÍA quepa en la caja? Con la madera a tope, el
+ *  automático se va a las rocas en vez de tirar troncos al suelo. */
+const rindeAlgo = (r) => (r.madera > 0 && huecoDe('madera') > 0) || (r.piedra > 0 && huecoDe('piedra') > 0)
+
+function tickAuto (dt) {
+  const d = bloque()
+  if (!d.auto.on) return
+  autoReloj += dt || 0
+  if (autoReloj < AUTO_CADA) return
+  autoReloj = 0
+  if (!hayInventario) return
+  if (almacenLleno()) return             // talar para tirarlo no es ganar nada
+  if (d.cola.length) return              // lo que mandó el jugador a dedo va primero
+  let hueco = libres()
+  if (hueco <= 0) return
+  const candidatas = casillasDeZona(d.auto.zona)
+  if (!candidatas.length) {
+    if (!d.faenas.length) agotado()      // con faenas vivas todavía no está acabado
+    return
+  }
+  // lo que solo daría material que ya no cabe se deja en pie: talar y tirar no
+  // es ganar, y así el árbol sigue ahí para cuando amplíes el almacén
+  const utiles = candidatas.filter(rindeAlgo)
+  if (!utiles.length) return
+  for (const r of utiles) {
+    if (hueco <= 0) break
+    if (encargar(r.x, r.z, true).ok) hueco--
+  }
+}
+
+/** Se acabó lo que había: el automático se apaga solo y lo dice. */
+function agotado () {
+  const d = bloque()
+  const habiaZona = !!d.auto.zona
+  d.auto.on = false
+  toast(habiaZona ? '🪓 Zona despejada del todo' : '🪓 Ya no queda nada que talar en tu terreno', 'bien')
+}
+
+/**
+ * CONSTRUIR MANDA SIEMPRE. sim/buildings.js reparte las plazas mirando solo
+ * `state.obras`, así que arranca su obra sin preguntar y aquí puede quedar una
+ * cuadrilla de más. Esa se desaloja: vuelve al PRINCIPIO de la cola (el encargo
+ * no se pierde, solo el rato) y se retira la que más le quedaba, para tirar lo
+ * menos posible.
+ * @returns {number} cuadrillas que sueltan el hacha
+ */
+function cuadrarPlazas () {
+  const d = bloque()
+  let sobran = (game.state.obras || []).length + d.faenas.length - plazasDeObra()
+  if (sobran <= 0) return 0
+  const orden = [...d.faenas].sort((a, b) => b.fin - a.fin)
+  let n = 0
+  for (const f of orden) {
+    if (sobran <= 0) break
+    d.faenas = d.faenas.filter(x => x.id !== f.id)
+    d.cola.unshift({
+      id: f.id, x: f.x, z: f.z, piezas: f.piezas, texto: f.texto,
+      segundos: f.segundos, madera: f.madera, piedra: f.piedra, auto: !!f.auto
+    })
+    events.emit(EV.DESPEJE_CANCELADO, { id: f.id, x: f.x, z: f.z, motivo: 'obra' })
+    sobran--; n++
+  }
+  if (n) toast(n === 1 ? '🔨 Un constructor suelta el hacha: hay obra' : `🔨 ${n} constructores sueltan el hacha: hay obra`, 'info')
+  return n
+}
+
 // ── Lo que la interfaz necesita saber ────────────────────────────────────
 
 /** Foto para la barra del taller: faenas vivas, cola, plazas y lo que va a entrar. */
@@ -349,12 +635,17 @@ export function resumen () {
     obras: (game.state.obras || []).length,
     libres: libres(),
     enMarcha: d.faenas.map(f => ({
-      id: f.id, x: f.x, z: f.z, piezas: f.piezas,
+      id: f.id, x: f.x, z: f.z, piezas: f.piezas, auto: !!f.auto,
+      texto: f.texto || 'lo que estorba',
+      segundos: f.segundos || 1,
+      madera: f.madera || 0,
+      piedra: f.piedra || 0,
       restan: Math.max(0, (f.fin - ahora) / 1000)
     })),
     esperando: d.cola.length,
     despejadas: d.hechas.length,
-    pendiente
+    pendiente,
+    auto: autoEstado()
   }
 }
 
@@ -398,12 +689,25 @@ function recogerInventario (p) {
 export function init () {
   bloque()
   events.on(EV.DECO_INVENTARIO, recogerInventario)
-  events.on(EV.TICK, revisarFaenas)
+  // El orden importa: primero se desaloja lo que le quita la plaza a una obra,
+  // luego se cobran las faenas vencidas y al final el automático busca faena.
+  events.on(EV.TICK, ({ dt } = {}) => {
+    cuadrarPlazas()
+    revisarFaenas()
+    // La cola también arranca en el tick: cuando una OBRA termina y libera la
+    // plaza, nadie avisa aquí, y lo que se desalojó al empezarla se quedaba
+    // esperando para siempre.
+    arrancarCola()
+    tickAuto(dt || 0.25)
+  })
 
   // Construir encima sigue despejando gratis (lo hace render/terrain): aquí solo
   // se apunta para no ofrecer una tala donde ya no hay árbol.
   events.on(EV.BUILD_PLACED, ({ building } = {}) => {
     if (!building) return
+    // La obra manda: si por su culpa sobra cuadrilla, suelta el hacha AHORA y no
+    // al tick siguiente. Así el jugador ve el relevo en el momento de encargar.
+    cuadrarPlazas()
     const an = building.ancho ?? 2; const al = building.alto ?? 2
     const d = bloque()
     for (let i = 0; i < an; i++) {
@@ -421,6 +725,9 @@ export function init () {
   events.on(EV.STATE_LOADED, () => {
     inventario.clear()
     hayInventario = false
+    memoQuedan = { firma: '', cuando: 0, n: 0 }
+    autoBotin.casillas = 0; autoBotin.madera = 0; autoBotin.piedra = 0
+    autoReloj = 0
     bloque()
   })
 }

@@ -33,7 +33,7 @@ import {
    funcionando con lo que tenga. Nunca se cae la interfaz por una pieza que falte.
    =========================================================================== */
 
-const M = { recursos: null, edificios: null, aldeanos: null, ejercito: null, ciencia: null, encargos: null }
+const M = { recursos: null, edificios: null, aldeanos: null, ejercito: null, ciencia: null, encargos: null, despeje: null }
 
 const CARGADORES = {
   recursos: () => import('../sim/resources.js'),
@@ -41,7 +41,8 @@ const CARGADORES = {
   aldeanos: () => import('../sim/villagers.js'),
   ejercito: () => import('../sim/army.js'),
   ciencia: () => import('../sim/research.js'),
-  encargos: () => import('../sim/quests.js')
+  encargos: () => import('../sim/quests.js'),
+  despeje: () => import('../sim/despeje.js')
 }
 
 async function engancharSim () {
@@ -1205,12 +1206,31 @@ function constructores () {
   }
   obras.sort((a, b) => a.restante - b.restante)
 
-  const ocupados = Math.min(plazas, obras.length)
+  // Talar OCUPA una plaza de obra igual que construir: si no se cuenta aquí, la
+  // pastilla dice «2 libres» con los dos constructores hacha en mano.
+  const dsp = pedir('despeje', 'resumen', null)
+  const talas = (dsp?.enMarcha || []).map(f => ({
+    clave: `tala-${f.id}`,
+    icono: '🪓',
+    nombre: `${f.auto ? 'Despeja solo' : 'Despejando'}: ${f.texto}`,
+    restante: f.restan || 0,
+    pct: Math.min(100, Math.max(0, (1 - (f.restan || 0) / Math.max(1, f.segundos || 1)) * 100)),
+    barra: true,
+    gemas: 0,
+    boton: { texto: 'Parar', accion: () => { pedir('despeje', 'cancelar', false, f.id); pintarObras() } },
+    alTocar: () => events.emit(EV.CAMERA_FOCUS, { x: f.x, z: f.z })
+  }))
+  talas.sort((a, b) => a.restante - b.restante)
+
+  const ocupados = Math.min(plazas, obras.length + talas.length)
   return {
     plazas,
     obras,
+    talas,
+    tareas: [...obras, ...talas].sort((a, b) => a.restante - b.restante),
     ocupados,
     libres: Math.max(0, plazas - ocupados),
+    auto: dsp?.auto || { on: false, zonaTexto: '', quedan: 0 },
     espera: pedir('edificios', 'obrasEnEspera', [])
   }
 }
@@ -1300,14 +1320,18 @@ function tarjetaObra (t) {
     el('div', { clase: 'obra-pie' }, [
       // Lo que espera turno no se acelera con gemas: todavía no ha empezado.
       // En su sitio va el motivo, que es lo que el jugador necesita saber.
-      t.acelerar ? barra.nodo : el('span', { clase: 'tenue', texto: t.nota || 'Esperando turno' }),
+      (t.acelerar || t.barra) ? barra.nodo : el('span', { clase: 'tenue', texto: t.nota || 'Esperando turno' }),
       t.acelerar
         ? el('button', {
           clase: 'btn btn-oro btn-gema', type: 'button', 'aria-label': 'Acelerar con gemas',
           html: `${ICONO.gemas}<br>${t.gemas}`,
           onclick: () => { t.acelerar(); pintarObras(); pintarRecursos() }
         })
-        : el('button', { clase: 'btn btn-piedra', type: 'button', texto: 'Ver', onclick: t.alTocar })
+        : el('button', {
+        clase: t.boton?.clase || 'btn btn-piedra', type: 'button',
+        texto: t.boton?.texto || 'Ver',
+        onclick: t.boton?.accion || t.alTocar
+      })
     ])
   ])
   caja._fijar = barra.fijar
@@ -1361,7 +1385,7 @@ function pintarObras () {
   if (!nodos.constructores) return
 
   const c = constructores()
-  const proxima = c.obras[0]
+  const proxima = c.tareas[0]
   const enCola = c.espera.length ? ` · ${c.espera.length} en cola` : ''
   // la cifra es siempre «ocupados/plazas»: es lo que pidió el dueño (🔨 2/3) y
   // así el ancho no cambia cuando un constructor se queda libre
@@ -1454,15 +1478,63 @@ function sincronizarEspera (cont, lista, repintar) {
  */
 let hojaConstructores = null
 
+/**
+ * 🪓 DESPEJAR, DESDE LOS CONSTRUCTORES. Es el sitio al que se mira cuando se ve
+ * gente parada, así que la opción tiene que estar AQUÍ y no escondida en el
+ * taller. Sale con un constructor libre (o con el automático ya encendido, para
+ * poder apagarlo). El interruptor manda a sim/despeje.js: el HUD no decide nada.
+ */
+function pintarDespejeConstructores (cont, c, panel) {
+  const a = c.auto || { on: false, zonaTexto: '', quedan: 0 }
+  const util = c.libres > 0 || a.on || c.talas.length
+  const firma = `${util}|${a.on}|${a.zonaTexto}|${Math.ceil(a.quedan / 5)}`
+  if (cont.dataset.firma === firma) return
+  cont.dataset.firma = firma
+  vaciar(cont)
+  if (!util) return
+
+  const nota = a.on
+    ? `Talando en ${a.zonaTexto}: ${a.quedan} casilla${a.quedan === 1 ? '' : 's'} por delante. Si encargas una obra, sueltan el hacha y van a ella.`
+    : 'Que no estén de brazos cruzados: mientras no haya obra, a talar y a picar piedra.'
+
+  cont.appendChild(el('div', { clase: 'aviso aviso-info' }, [
+    el('i', { texto: '🪓' }),
+    el('span', { texto: nota })
+  ]))
+
+  const fila = el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
+    el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '▭ Marcar zona',
+      estilo: { minHeight: '48px' },
+      onclick: () => { panel.cerrar(); events.emit(EV.UI_PANEL, { panel: 'despejar', datos: { modo: 'zona' } }) }
+    }),
+    el('button', {
+      clase: a.on ? 'btn btn-oro' : 'btn btn-piedra', type: 'button',
+      texto: a.on ? '🤖 Parar automático' : '🤖 Mandarlos a despejar',
+      estilo: { minHeight: '48px' },
+      onclick: () => {
+        const r = pedir('despeje', 'ponerAuto', null, !a.on)
+        toast(a.on
+          ? '🪓 Despeje automático apagado'
+          : `🤖 A despejar: ${r?.quedan || 0} casillas por ${r?.zonaTexto || 'tu territorio'}`, a.on ? 'info' : 'bien')
+        cont.dataset.firma = ''
+        pintarObras()
+      }
+    })
+  ])
+  cont.appendChild(fila)
+}
+
 function abrirConstructores () {
   if (hojaConstructores) { hojaConstructores.cerrar(); return hojaConstructores }
 
   const resumen = el('div', { clase: 'aviso' })
   const enMarcha = el('div', { clase: 'col' })
   const libres = el('div', { clase: 'col' })
+  const despejeCaja = el('div', { clase: 'col' })
   const titEspera = el('div', { clase: 'titular', texto: '⏳ Esperando turno' })
   const enEspera = el('div', { clase: 'col' })
-  const cuerpo = el('div', { clase: 'col' }, [resumen, enMarcha, libres, titEspera, enEspera])
+  const cuerpo = el('div', { clase: 'col' }, [resumen, enMarcha, libres, despejeCaja, titEspera, enEspera])
 
   const panel = hoja({
     titulo: '🔨 Tus constructores',
@@ -1488,7 +1560,7 @@ function abrirConstructores () {
       resumen.append(el('i', { texto: c.libres > 0 ? '🙋' : '🔨' }), el('span', { texto }))
     }
 
-    sincronizarTareas(enMarcha, c.obras)
+    sincronizarTareas(enMarcha, c.tareas)
 
     // los libres: uno por fila, con su botón para mandarles algo
     const quiero = c.libres
@@ -1508,6 +1580,8 @@ function abrirConstructores () {
         ]))
       }
     }
+
+    pintarDespejeConstructores(despejeCaja, c, panel)
 
     titEspera.style.display = c.espera.length ? '' : 'none'
     sincronizarEspera(enEspera, c.espera, pintar)
