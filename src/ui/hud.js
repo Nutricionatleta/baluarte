@@ -1385,7 +1385,11 @@ function montarAbajo () {
     ]))
   }
 
-  nodos.abajo = el('div', { clase: 'hud-abajo' }, [nodos.consejoCaja, botonera])
+  // La tira del mayordomo ya NO se monta: se comía una franja entera encima del
+  // menú y el dueño la quitó. El consejo sigue vivo (se actualiza y se usa en
+  // el panel de Encargos, que lo enseña arriba con su botón), pero no ocupa
+  // sitio en la pantalla de juego.
+  nodos.abajo = el('div', { clase: 'hud-abajo' }, [botonera])
   raiz().appendChild(nodos.abajo)
 }
 

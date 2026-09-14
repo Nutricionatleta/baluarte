@@ -318,10 +318,11 @@ let tira = null
 const filasTira = new Map()   // id -> { nodo, nombre, detalle, barra }
 
 function montarTira () {
-  if (tira) return
-  tira = el('div', { clase: 'mundo-tira' })
-  raizHud().appendChild(tira)
-  refrescarTira()
+  // La tira ya NO se monta. Estaba flotando en mitad de la pantalla con la
+  // cuenta atrás de cada explorador, y esa misma cuenta atrás ya sale en el
+  // botón del caballo 🐎 de la esquina derecha del HUD, que además abre esto.
+  // Duplicarla solo servía para tapar el juego (queja del dueño).
+  // El resto del módulo tolera `tira = null`: todas sus funciones lo comprueban.
 }
 
 function refrescarTira () {
