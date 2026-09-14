@@ -36,6 +36,34 @@ const MARGEN_CAMPO = 6
  *  pesada pega fuerte pero lento, y así el asedio no se come una muralla de un tirón. */
 const CADENCIA = { infanteria: 1.0, distancia: 0.85, caballeria: 1.1, asedio: 0.5, civil: 1.0 }
 
+/**
+ * LA POSICIÓN DE LA TROPA IMPORTA DE VERDAD.
+ *
+ * Cuando defiendes TU aldea, sim/army.js dice dónde está plantado cada
+ * escuadrón. El que guarda el flanco por el que entran pelea desde el primer
+ * segundo; al que está en la otra punta primero le tiene que llegar el aviso
+ * —corre a `AVISO_CASILLAS_SEG` casillas por segundo, o sea un jinete cruzando
+ * la aldea— y DESPUÉS cruzar él la aldea a pie. Nada oculto: el parte de la
+ * defensa dice cuántos segundos tardó cada escuadrón en entrar en batalla.
+ *
+ * 1,6 casillas/s sobre un valle de 36 casillas = 22 s en el peor caso. En una
+ * batalla que dura entre uno y dos minutos, eso es la diferencia entre llegar
+ * a la muralla o llegar a las ruinas.
+ */
+const AVISO_CASILLAS_SEG = 1.6
+const REACCION_MAX = 45
+/**
+ * Un escuadrón GUARDA SU ZONA. Sale a por el que se le acerca al puesto hasta
+ * `LEASH_PUESTO` casillas, pero no cruza la aldea a la primera: si lo hiciera,
+ * plantar la tropa en el flanco bueno sería peor que plantarla mal (se salían a
+ * campo abierto, lejos de sus torres, y se los comían). Solo cuando lleva
+ * `MARCHA_SEG` avisado y la pelea le sigue quedando lejos levanta el campo y
+ * marcha al fuego… cruzando la aldea a pie, que es justo lo que se paga por
+ * tener la tropa donde no toca.
+ */
+const LEASH_PUESTO = 10
+const MARCHA_SEG = 18
+
 /** A quién va cada clase. Es lo que hace que un ejército "se comporte" sin órdenes. */
 const PRODUCTIVOS = new Set(['serreria', 'cantera', 'granja', 'mina_oro', 'almacen', 'granero', 'molino', 'mercado'])
 const DEFENSIVOS = new Set(['torre_vigia', 'torre_ballesta', 'castillo'])
@@ -317,7 +345,9 @@ function crearTropas (tropas, ladoEntrada, esc, rng, propias) {
  * pelea de verdad: es lo que hace que `PIEDRA_PAPEL` y el `poder` del rival
  * signifiquen algo.
  */
-function crearGuarnicion (tropas, esc, rng, propias) {
+function crearGuarnicion (tropas, esc, rng, propias, despliegue = null, ladoEntrada = 'sur') {
+  // Si la defensa viene repartida en escuadrones (tu aldea), manda el despliegue.
+  if (despliegue && despliegue.length) return crearGuarnicionDesplegada(despliegue, esc, rng, propias, ladoEntrada)
   const unidades = []
   const tipos = Object.keys(tropas || {}).filter(t => (tropas[t] | 0) > 0 && defUnidad(t))
   tipos.sort()                               // determinismo: el orden no cambia nunca
@@ -347,6 +377,85 @@ function crearGuarnicion (tropas, esc, rng, propias) {
     }
   }
   return unidades
+}
+
+/**
+ * LA GUARNICIÓN, POR ESCUADRONES. Cada uno se planta DONDE EL JUGADOR LO DEJÓ
+ * (sim/army.js manda el despliegue) y desde ahí defiende. El frente por el que
+ * entra la hueste decide cuánto tarda en llegarle el aviso: el escuadrón que
+ * guarda ese flanco pelea desde el primer segundo, el de la otra punta se entera
+ * tarde y encima tiene que cruzar la aldea. Eso —y no un número escondido— es lo
+ * que hace que colocar la tropa sea una decisión.
+ */
+function crearGuarnicionDesplegada (despliegue, esc, rng, propias, ladoEntrada) {
+  const unidades = []
+  const frente = puntoEntrada(ladoEntrada, esc, 0, 0)
+  let i = 0
+  for (const bloque of despliegue) {
+    const tropas = bloque.tropas || {}
+    const tipos = Object.keys(tropas).filter(t => (tropas[t] | 0) > 0 && defUnidad(t))
+    tipos.sort()                             // determinismo: el orden no cambia nunca
+    if (!tipos.length) continue
+    const px = clamp(bloque.x, esc.caja.x0 + 0.5, esc.caja.x1 - 0.5)
+    const pz = clamp(bloque.z, esc.caja.z0 + 0.5, esc.caja.z1 - 0.5)
+    const lejos = Math.hypot(px - frente.x, pz - frente.z)
+    const reaccion = Math.min(REACCION_MAX, lejos / AVISO_CASILLAS_SEG)
+    let n = 0
+    for (const tipo of tipos) {
+      const u = statsDe(tipo, propias)
+      if (!u || u.espacio === 0) continue
+      for (let k = 0; k < (tropas[tipo] | 0); k++) {
+        // en corro alrededor de su estandarte, no en un montón encima de él
+        const anillo = 0.8 + Math.floor(n / 6) * 0.9
+        const giro = (n % 6) * (Math.PI / 3) + Math.floor(n / 6) * 0.5
+        unidades.push({
+          id: `g${i}`, tipo, nombre: u.nombre, icono: u.icono, clase: u.clase,
+          hp: u.hp, hpMax: u.hp, atk: u.ataque, arm: u.armadura,
+          vel: u.velocidad, alcance: u.alcance || 0,
+          x: clamp(px + Math.cos(giro) * anillo + rng.float(-0.2, 0.2), esc.caja.x0 + 0.5, esc.caja.x1 - 0.5),
+          z: clamp(pz + Math.sin(giro) * anillo + rng.float(-0.2, 0.2), esc.caja.z0 + 0.5, esc.caja.z1 - 0.5),
+          cd: rng.float(0, 0.4), viva: true, defensor: true,
+          casa: { x: px, z: pz },
+          // de quién es y cuándo se entera de que hay batalla
+          escuadron: bloque.id, escuadronNombre: bloque.nombre, flanco: bloque.flanco,
+          reaccion,
+          objetivo: null, revisar: 0
+        })
+        i++; n++
+      }
+    }
+  }
+  return unidades
+}
+
+/** Cómo le fue a cada escuadrón: es lo que el jugador lee en el parte. */
+function resumirEscuadrones (guarnicion) {
+  const por = new Map()
+  for (const g of guarnicion) {
+    if (!g.escuadron) continue
+    let e = por.get(g.escuadron)
+    if (!e) {
+      e = {
+        id: g.escuadron, nombre: g.escuadronNombre || 'Escuadrón', flanco: g.flanco || '',
+        x: Math.round(g.casa.x), z: Math.round(g.casa.z),
+        reaccion: Math.round((g.reaccion || 0) * 10) / 10,
+        total: 0, vivos: 0, bajas: 0, pelearon: 0
+      }
+      por.set(g.escuadron, e)
+    }
+    e.total++
+    if (g.viva) e.vivos++; else e.bajas++
+    if (g.peleo) e.pelearon++
+  }
+  for (const e of por.values()) {
+    e.llegoATiempo = e.reaccion <= 6
+    e.texto = !e.pelearon
+      ? `${e.nombre} guardaba el flanco ${e.flanco} y no llegó a entrar en combate.`
+      : e.reaccion <= 6
+        ? `${e.nombre} estaba justo donde entraron: peleó desde el primer momento.`
+        : `${e.nombre} venía del flanco ${e.flanco}: tardó ${Math.round(e.reaccion)} s en llegar a la pelea.`
+  }
+  return [...por.values()]
 }
 
 /**
@@ -491,7 +600,7 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
   const unidades = crearTropas(tropas, ladoEntrada, esc, rng, propias)
   // La guarnición usa las mejoras del OTRO bando: si el que ataca eres tú, la
   // herrería del rival no es la tuya, y al revés cuando defiendes tu aldea.
-  const guarnicion = crearGuarnicion(base?.guarnicion, esc, rng, !propias)
+  const guarnicion = crearGuarnicion(base?.guarnicion, esc, rng, !propias, base?.despliegue, ladoEntrada)
   const sucesos = []
   const bajas = {}
   const bajasDefensa = {}
@@ -533,6 +642,7 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
 
   /** Un golpe de tropa contra tropa. Devuelve true si la víctima cae. */
   const duelo = (atacante, victima) => {
+    atacante.peleo = true            // para el parte: qué escuadrón llegó a pegar
     victima.hp -= golpe(atacante.tipo, atacante.atk, victima.clase, victima.arm, rng)
     if (victima.hp > 0) return false
     victima.viva = false
@@ -707,8 +817,18 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
       const p = g.objetivo
       if (!p || !p.viva) continue
       const d = Math.hypot(p.x - g.x, p.z - g.z)
+      // Aún no les ha llegado el aviso: siguen en su puesto (salvo que les
+      // entren encima, que entonces sí pelean). Cuanto más lejos del flanco por
+      // el que atacan, más tardan. Ahí está el precio de mirar al lado que no es.
+      const avisado = !g.reaccion || t >= g.reaccion
       if (d <= g.alcance + 0.8) {
         if (g.cd <= 0) { g.cd = 1 / (CADENCIA[g.clase] || 1); duelo(g, p) }
+      } else if (g.escuadron) {
+        // Escuadrón del jugador: guarda su zona y solo marcha si la pelea se le
+        // queda lejos y ya lleva un rato avisado (ver LEASH_PUESTO / MARCHA_SEG).
+        const suZona = Math.hypot(p.x - g.casa.x, p.z - g.casa.z) <= LEASH_PUESTO
+        if (avisado && (suZona || t >= g.reaccion + MARCHA_SEG)) irHacia(g, p.x, p.z)
+        else irHacia(g, g.casa.x, g.casa.z)
       } else if (d <= 9) {
         irHacia(g, p.x, p.z)                 // salen a recibirlos
       } else {
@@ -811,6 +931,8 @@ function rematar ({ esc, sucesos, bajas, bajasDefensa = {}, guarnicion = [], t, 
     bajasDefensa,
     defensores: guarnicion.length,
     defensoresVivos: guarnicion.filter(g => g.viva).length,
+    // qué escuadrón guardaba qué flanco y cuánto tardó en entrar en la pelea
+    escuadrones: resumirEscuadrones(guarnicion),
     edificiosDestruidos: esc.edificios.filter(e => !e.vivo).map(e => e.id),
     // quién disparó y a cuántos se llevó: es lo que convierte "tengo torres"
     // en "mis torres sirvieron para esto" cuando se defiende la aldea
@@ -965,7 +1087,16 @@ export function reproducir (resultado, alSuceso, opciones = {}) {
 
 /** Lanza un asalto de verdad: simula, cobra el botín, apunta las bajas y avisa. */
 export function lanzarAsalto ({ base, tropas, ladoEntrada = 'sur', semilla }) {
-  const enviadas = tropas && sumaTropas(tropas) ? tropas : { ...(game.state.ejercito?.tropas || {}) }
+  // Si no te dicen a quién mandas, salen SOLO los escuadrones de ataque: los de
+  // defensa se quedan guardando la aldea aunque tú andes fuera.
+  let porDefecto = { ...(game.state.ejercito?.tropas || {}) }
+  if (modArmy && typeof modArmy.tropasDeAsalto === 'function') {
+    try {
+      const q = modArmy.tropasDeAsalto()
+      if (sumaTropas(q)) porDefecto = q
+    } catch { /* nos quedamos con la hueste entera */ }
+  }
+  const enviadas = tropas && sumaTropas(tropas) ? tropas : porDefecto
   events.emit(EV.RAID_STARTED, { enemyBase: base, ejercito: { ...enviadas }, ladoEntrada })
 
   const resultado = simularAsalto({ base, tropas: enviadas, ladoEntrada, semilla, propias: true })
@@ -1050,7 +1181,7 @@ function aplicarDaños (daños) {
  * Al perder, los edificios quedan tocados (lo avisamos por evento para que
  * sim/buildings les baje la vida) y se llevan recursos. Después, escudo.
  */
-export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } = {}) {
+export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla, mientrasFuera = false } = {}) {
   const s = game.state
   const escudoActivo = (s.escudo?.hasta || 0) > Date.now()
   if (escudoActivo) {
@@ -1064,6 +1195,13 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
   if (modArmy && typeof modArmy.tropasDisponibles === 'function') {
     try { enCasa = modArmy.tropasDisponibles() } catch { /* nos quedamos con todas */ }
   }
+  // CÓMO ESTÁ REPARTIDA: cada escuadrón en su puesto. Si army.js no lo da
+  // (partida sin escuadrones), la guarnición se planta como siempre, alrededor
+  // de los edificios, y no cambia nada de lo de antes.
+  let despliegue = null
+  if (modArmy && typeof modArmy.defensaDesplegada === 'function') {
+    try { despliegue = modArmy.defensaDesplegada() } catch { despliegue = null }
+  }
   const base = {
     id: 'aldea',
     mia: true,
@@ -1071,6 +1209,7 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
     nivel: nivelDe(s.buildings || [], 'ayuntamiento') || 1,
     buildings: s.buildings || [],
     guarnicion: enCasa,
+    despliegue,
     recursos: s.recursos
   }
   const lado = atacante.lado || ['norte', 'sur', 'este', 'oeste'][hashCadena(`${atacante.nombre || 'enemigo'}`) % 4]
@@ -1115,9 +1254,14 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
   if (!defendida) {
     saquear(perdidas)
     aplicarDaños(daños)
-    s.escudo = { hasta: Date.now() + HORAS_ESCUDO * 3600 * 1000, horas: HORAS_ESCUDO }
-    events.emit(EV.SHIELD_STARTED, { hasta: s.escudo.hasta, horas: HORAS_ESCUDO })
-    events.emit(EV.UI_TOAST, { texto: `Te han asaltado. Escudo de protección: ${HORAS_ESCUDO} h sin que puedan atacarte`, tipo: 'mal' })
+    // El escudo crece con lo que te han roto: 4 h por un rasguño y hasta 12 h si
+    // te arrasan la aldea. Cuanto peor te va, más tiempo para levantarte — si no,
+    // te encadenan asaltos mientras reconstruyes y la partida se atasca.
+    const arrasado = Math.max(0, Math.min(1, (r.porcentajeDestruido || 0) / 100))
+    const horas = Math.round(HORAS_ESCUDO + arrasado * 8)
+    s.escudo = { hasta: Date.now() + horas * 3600 * 1000, horas }
+    events.emit(EV.SHIELD_STARTED, { hasta: s.escudo.hasta, horas })
+    events.emit(EV.UI_TOAST, { texto: `Te han asaltado. Escudo de protección: ${horas} h sin que puedan atacarte`, tipo: 'mal' })
     s.stats.batallasPerdidas = (s.stats.batallasPerdidas || 0) + 1
   } else {
     aplicarDaños(daños)
@@ -1125,15 +1269,16 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
     s.stats.batallasGanadas = (s.stats.batallasGanadas || 0) + 1
   }
 
-  const parte = parteDefensa({ r, defendida, perdidas, daños, atacante, tropasEnemigas, parteBajas })
+  const parte = parteDefensa({ r, defendida, perdidas, daños, atacante, tropasEnemigas, parteBajas, mientrasFuera })
 
   events.emit(EV.DEFENSE_RESOLVED, {
-    victoria: defendida, perdidas, log: r.sucesos, daños, parte,
+    victoria: defendida, perdidas, log: r.sucesos, daños, parte, mientrasFuera,
+    escuadrones: r.escuadrones || [], ladoEntrada: r.ladoEntrada,
     // Defender también deja heridos, no solo muertos: la enfermería se llena igual.
     heridos: r.heridos || 0, heridosTropas: r.heridosTropas || {}, muertos: r.muertos || 0,
     atacante, estrellas: r.estrellas, porcentajeDestruido: r.porcentajeDestruido, resultado: r
   })
-  return { ...r, victoria: defendida, perdidas, daños, parte }
+  return { ...r, victoria: defendida, perdidas, daños, parte, mientrasFuera }
 }
 
 /**
@@ -1143,7 +1288,7 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
  * @returns {{titular:string, resumen:string, torres:Array, rotos:Array, robado:object,
  *            bajasEnemigas:number, atacantes:number, coste:object, agujeros:Array, escudoHasta:number}}
  */
-function parteDefensa ({ r, defendida, perdidas, daños, atacante, tropasEnemigas, parteBajas }) {
+function parteDefensa ({ r, defendida, perdidas, daños, atacante, tropasEnemigas, parteBajas, mientrasFuera = false }) {
   const s = game.state
   const atacantes = sumaTropas(tropasEnemigas)
   const bajasEnemigas = sumaTropas(r.bajas)
@@ -1180,6 +1325,19 @@ function parteDefensa ({ r, defendida, perdidas, daños, atacante, tropasEnemiga
   } else {
     partes.push('No tenías un solo soldado en casa: solo defendieron las piedras.')
   }
+  // LOS ESCUADRONES: por dónde entraron y a quién le pilló lejos. Es lo que hace
+  // que el jugador entienda que colocar la tropa sirve para algo.
+  const escuadrones = r.escuadrones || []
+  if (escuadrones.length) {
+    partes.push(`Entraron por el ${r.ladoEntrada}.`)
+    const aTiempo = escuadrones.filter(e => e.llegoATiempo && e.pelearon)
+    const tarde = escuadrones.filter(e => !e.llegoATiempo)
+    if (aTiempo.length) partes.push(aTiempo[0].texto)
+    if (tarde.length) partes.push(tarde[0].texto)
+    if (!aTiempo.length && escuadrones.length > 1) {
+      partes.push('Ningún escuadrón guardaba ese flanco: llegaron todos con la batalla empezada.')
+    }
+  }
   if (trabajaron.length) {
     const mejor = trabajaron[0]
     partes.push(`${mejor.nombre} nivel ${mejor.nivel} se llevó por delante a ${plural(mejor.bajas, 'atacante', 'atacantes')}.`)
@@ -1191,9 +1349,12 @@ function parteDefensa ({ r, defendida, perdidas, daños, atacante, tropasEnemiga
   if (!defendida) partes.push(`Escudo de protección de ${HORAS_ESCUDO} h para rehacerte.`)
 
   return {
-    titular,
-    resumen: partes.join(' '),
+    titular: mientrasFuera ? `${titular} (mientras no estabas)` : titular,
+    resumen: (mientrasFuera ? 'Pasó con la aldea sola, sin ti delante. ' : '') + partes.join(' '),
     victoria: defendida,
+    mientrasFuera,
+    // por dónde entraron y cómo respondió cada escuadrón
+    ladoEntrada: r.ladoEntrada, escuadrones,
     torres, trabajaron: trabajaron.length, rotos, robado,
     bajasEnemigas, atacantes, coste, agujeros,
     misBajas, misCaidos, defensores: r.defensores || 0, curadas: parteBajas?.curadas || null,
@@ -1380,7 +1541,8 @@ export async function init () {
     pendientes.push({
       atacante: p.enemigo || p.atacante || { nombre: 'Bandidos' },
       tropas: p.tropas || p.tropasEnemigas || {},
-      cuando: Date.now() + Math.max(0, (p.llegaEn || 0)) * 1000
+      cuando: Date.now() + Math.max(0, (p.llegaEn || 0)) * 1000,
+      mientrasFuera: !!p.mientrasFuera        // asedio que pasó con la app cerrada
     })
   })
 
@@ -1390,7 +1552,7 @@ export async function init () {
     for (let i = pendientes.length - 1; i >= 0; i--) {
       if (pendientes[i].cuando > ahora) continue
       const a = pendientes.splice(i, 1)[0]
-      simularDefensa({ atacante: a.atacante, tropasEnemigas: a.tropas })
+      simularDefensa({ atacante: a.atacante, tropasEnemigas: a.tropas, mientrasFuera: a.mientrasFuera })
     }
   })
 }

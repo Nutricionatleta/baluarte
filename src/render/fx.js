@@ -37,6 +37,11 @@ let calidad = 'medio'
 let escala = 1                   // multiplicador de partículas según calidad
 let ambiente = true              // nubes, pájaros y mariposas
 
+/** ¿Estamos en el campo de batalla? Cambia la luz, el cielo y quién puede emitir. */
+let enBatalla = false
+let tinteBatalla = 0             // 0 aldea, 1 batalla: se mezcla suave, sin corte
+let emisoresAldea = null         // chimeneas de la aldea, aparcadas mientras hay batalla
+
 // temporales: se reutilizan en cada frame para no generar basura
 const _v3 = new THREE.Vector3()
 const _desvioCam = new THREE.Vector3()
@@ -56,6 +61,13 @@ const mezcla = THREE.MathUtils.lerp
 
 /** Casillas -> mundo. Para quien tenga coordenadas del estado. */
 export function mundoDe (gx, gz) { return gridAMundo(gx, gz) }
+
+/**
+ * Cuelga de la ESCENA, no de la aldea. Lo que tiene que verse también durante
+ * una batalla (partículas, aros de impacto, haces de luz) no puede colgar de
+ * `ctx.raizAldea`, que se apaga entera mientras se pelea.
+ */
+const aLaEscena = (obj) => { if (ctx.scene) ctx.scene.add(obj); else aEscena(obj); return obj }
 
 /** Centro en mundo de un edificio del estado (tiene en cuenta su tamaño). */
 function centroMundo (b) {
@@ -351,6 +363,76 @@ export function explosion (x, z, fuerza = 1) {
   temblor(0.12 * f)
 }
 
+// ── lo que hace falta para que una batalla se vea ─────────────────────────
+
+/**
+ * Astillas: el ariete contra la puerta, la viga que se parte. Salen disparadas
+ * hacia el atacante (por eso lleva dirección) y caen pesadas: es madera.
+ */
+export function astillas (x, y, z, dx = 0, dz = 1, cantidad = 10) {
+  if (!humos) return
+  const largo = Math.hypot(dx, dz) || 1
+  const ux = dx / largo; const uz = dz / largo
+  const n = cant(cantidad)
+  for (let i = 0; i < n; i++) {
+    const abre = azar(-0.9, 0.9)
+    const v = azar(1.2, 3.4)
+    humos.emitir(x, y, z, {
+      color: Math.random() < 0.35 ? PALETA.maderaClara : PALETA.madera,
+      vx: (ux * Math.cos(abre) - uz * Math.sin(abre)) * v,
+      vy: azar(1.2, 3.2),
+      vz: (uz * Math.cos(abre) + ux * Math.sin(abre)) * v,
+      vida: azar(0.5, 1.1), grav: -7, roce: 0.5,
+      tam0: azar(0.08, 0.16), tam1: azar(0.05, 0.1), alfa: 1
+    })
+  }
+}
+
+/**
+ * Un punto de estela para un proyectil en vuelo. Una flecha sin rastro es un
+ * palo que aparece y desaparece; con rastro se ve DE DÓNDE salió el disparo,
+ * que es lo que enseña qué torre está trabajando.
+ */
+export function estela (x, y, z, color = PALETA.brasa, gordo = 0.12) {
+  if (!brillos) return
+  brillos.emitir(x, y, z, {
+    color, vx: 0, vy: 0.1, vz: 0,
+    vida: azar(0.16, 0.3), grav: 0, roce: 2,
+    tam0: gordo, tam1: 0.01, alfa: 0.85
+  })
+}
+
+/** Chispazo de acero contra acero (o contra piedra) a la altura del golpe. */
+export function impacto (x, y, z, color = PALETA.aceroClaro, fuerza = 1) {
+  if (!brillos) return
+  const n = cant(5 * fuerza)
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2
+    const v = azar(0.6, 2) * fuerza
+    brillos.emitir(x, y, z, {
+      color: Math.random() < 0.3 ? PALETA.brasa : color,
+      vx: Math.cos(a) * v, vy: azar(0.8, 2.4), vz: Math.sin(a) * v,
+      vida: azar(0.2, 0.45), grav: -7, roce: 0.5,
+      tam0: azar(0.07, 0.13), tam1: 0.01, alfa: 1
+    })
+  }
+}
+
+/** El puñado de polvo del que se desploma: sin él, la figura se cae en el vacío. */
+export function caida (x, z, y = 0.1) {
+  if (!humos) return
+  const n = cant(5)
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2
+    humos.emitir(x, y, z, {
+      color: Math.random() < 0.5 ? PALETA.camino : PALETA.tierra,
+      vx: Math.cos(a) * azar(0.3, 0.9), vy: azar(0.2, 0.7), vz: Math.sin(a) * azar(0.3, 0.9),
+      vida: azar(0.5, 0.9), grav: -1, roce: 2,
+      tam0: azar(0.12, 0.22), tam1: azar(0.25, 0.4), alfa: 0.6
+    })
+  }
+}
+
 /** Confeti de celebración: cae con gravedad y da color al momento. */
 function confeti (x, z, cantidad = 22) {
   if (!humos) return
@@ -365,6 +447,7 @@ function confeti (x, z, cantidad = 22) {
     })
   }
 }
+export { confeti }
 
 /** Motita de recurso que sale del edificio y sube: el "+5 madera" en 3D. */
 export function motaRecurso (x, z, tipo) {
@@ -518,26 +601,48 @@ function actualizarDia (dt) {
   momento = (momento + dt / SEG_POR_DIA) % 1
   const { a, b, k } = faseActual(momento)
 
+  // el tinte de batalla entra y sale suave: un corte seco de luz canta muchísimo
+  const destinoTinte = enBatalla ? 1 : 0
+  if (tinteBatalla !== destinoTinte) {
+    tinteBatalla += Math.sign(destinoTinte - tinteBatalla) * Math.min(dt * 1.6, Math.abs(destinoTinte - tinteBatalla))
+  }
+  const tb = tinteBatalla
+
   _col.setHex(a.sol); _colB.setHex(b.sol); _col.lerp(_colB, k)
-  const intensidad = mezcla(a.int, b.int, k)
+  let intensidad = mezcla(a.int, b.int, k)
   factorNoche = mezcla(a.noche, b.noche, k)
+  if (tb > 0) {
+    _colB.setHex(PALETA.solBatalla)
+    _col.lerp(_colB, tb * 0.7)
+    // sol bajo y fuerte: sombras largas y contraluz. La aldea es plana y amable;
+    // el campo de batalla tiene que tener relieve y bulto. Pero sin pasarse: si
+    // los edificios se van a negro no se distingue cuál está cayendo.
+    intensidad = mezcla(intensidad, 1.3, tb)
+  }
 
   if (ctx.sol) {
     const ang = (momento - 0.25) * Math.PI * 2
-    ctx.sol.position.set(Math.cos(ang) * RADIO_SOL, Math.max(Math.sin(ang) * RADIO_SOL, -12), 16)
+    const sx = Math.cos(ang) * RADIO_SOL
+    const sy = Math.max(Math.sin(ang) * RADIO_SOL, -12)
+    // en batalla el sol se baja al horizonte del lado contrario: luz rasante
+    ctx.sol.position.set(mezcla(sx, -28, tb), mezcla(sy, 17, tb), mezcla(16, 30, tb))
     ctx.sol.color.copy(_col)
     ctx.sol.intensity = intensidad
   }
 
-  if (luzAmbiente) luzAmbiente.intensity = intensidadAmbBase * mezcla(a.amb, b.amb, k)
+  if (luzAmbiente) {
+    // baja, pero no tanto que no se lea quién es quién: la legibilidad manda
+    luzAmbiente.intensity = intensidadAmbBase * mezcla(mezcla(a.amb, b.amb, k), 0.74, tb)
+  }
 
   // cielo y niebla: la niebla tira hacia PALETA.niebla de día para dar aire
   _colC.setHex(a.cielo); _colB.setHex(b.cielo); _colC.lerp(_colB, k)
+  if (tb > 0) { _colB.setHex(PALETA.cieloBatalla); _colC.lerp(_colB, tb) }
   const scene = ctx.scene
   if (scene) {
     if (scene.background && scene.background.isColor) scene.background.copy(_colC)
     if (scene.fog) {
-      _colB.setHex(PALETA.niebla)
+      _colB.setHex(tb > 0 ? PALETA.nieblaBatalla : PALETA.niebla)
       scene.fog.color.copy(_colC).lerp(_colB, (1 - factorNoche) * 0.5)
     }
   }
@@ -642,7 +747,7 @@ function montarAnillos () {
     malla.renderOrder = 3
     malla.visible = false
     malla.userData = { libre: true, modo: 'pulso', radio: 1, vida: 0, vidaMax: 1, base: 0.6 }
-    aEscena(malla)
+    aLaEscena(malla)
     anillos.push(malla)
   }
 }
@@ -724,7 +829,7 @@ function montarRayos () {
     malla.renderOrder = 4
     malla.visible = false
     malla.userData = { libre: true, vida: 0, vidaMax: 1 }
-    aEscena(malla)
+    aLaEscena(malla)
     rayos.push(malla)
   }
 }
@@ -811,6 +916,23 @@ function actualizarIndicadores (dt, t) {
 let sacudida = 0
 function temblor (fuerza = 0.15) { sacudida = Math.min(0.5, sacudida + fuerza) }
 export { temblor }
+
+/**
+ * Entra (o sale) del modo batalla: luz rasante y anaranjada, cielo cargado,
+ * niebla sucia, y la aldea callada — sus chimeneas y sus destellos de obra se
+ * aparcan para que en el campo solo se vea lo que pasa en el campo.
+ */
+export function batalla (si) {
+  const nuevo = !!si
+  if (nuevo === enBatalla) return
+  enBatalla = nuevo
+  if (nuevo) {
+    emisoresAldea = emisores.splice(0)          // las chimeneas de casa, a esperar
+  } else {
+    emisores.length = 0                          // el humo de las ruinas se va con la batalla
+    if (emisoresAldea) { emisores.push(...emisoresAldea); emisoresAldea = null }
+  }
+}
 
 // ══ AMBIENTE: nubes, pájaros y mariposas ════════════════════════════════
 const nubes = []
@@ -947,6 +1069,15 @@ function recolocarMariposas () {
 
 function actualizarAmbiente (dt, t) {
   if (!ambiente) return
+  // pájaros y mariposas son de la aldea en paz: en un asalto sobran, y de paso
+  // se ahorran dos llamadas de dibujo justo cuando más falta hacen
+  if (enBatalla) {
+    if (mallaPajaros) mallaPajaros.visible = false
+    if (mallaMariposas) mallaMariposas.visible = false
+    return
+  }
+  if (mallaPajaros) mallaPajaros.visible = true
+  if (mallaMariposas) mallaMariposas.visible = true
   let mueveNubes = false
   for (const n of nubes) {
     n.x += n.v * dt
@@ -987,8 +1118,15 @@ function actualizarAmbiente (dt, t) {
 
 let ultimaMota = 0
 
+/**
+ * Los efectos de la ALDEA se apagan mientras se juega una batalla: el campo de
+ * batalla está en la misma escena, y una mota de trigo o un destello de obra
+ * terminada saliendo entre los soldados no se entiende ni se perdona.
+ */
+const on = (ev, fn) => events.on(ev, (p) => { if (!enBatalla) fn(p) })
+
 function escucharEventos () {
-  events.on(EV.BUILD_PLACED, (p) => {
+  on(EV.BUILD_PLACED, (p) => {
     const b = p?.building
     if (!b) return
     const c = centroMundo(b)
@@ -997,7 +1135,7 @@ function escucharEventos () {
     ventanasSucias = true
   })
 
-  events.on(EV.BUILD_COMPLETED, (p) => {
+  on(EV.BUILD_COMPLETED, (p) => {
     const b = p?.building
     if (!b) return
     const c = centroMundo(b)
@@ -1010,7 +1148,7 @@ function escucharEventos () {
     recolocarMariposas()
   })
 
-  events.on(EV.BUILD_UPGRADED, (p) => {
+  on(EV.BUILD_UPGRADED, (p) => {
     const b = p?.building
     if (!b) return
     const c = centroMundo(b)
@@ -1019,13 +1157,13 @@ function escucharEventos () {
     aro(c.x, c.z, 2.4, PALETA.oro, 0.8)
   })
 
-  events.on(EV.BUILD_DEMOLISHED, (p) => {
+  on(EV.BUILD_DEMOLISHED, (p) => {
     const b = (game.state?.buildings || []).find(x => x.id === p?.buildingId)
     if (b) { const c = centroMundo(b); explosion(c.x, c.z, 0.7) }
     ventanasSucias = true
   })
 
-  events.on(EV.RESOURCE_GAINED, (p) => {
+  on(EV.RESOURCE_GAINED, (p) => {
     if (!p || p.x == null || p.z == null) return
     if (ctx.tiempo - ultimaMota < 0.05) return    // llueven: no hace falta una por cada grano
     ultimaMota = ctx.tiempo
@@ -1047,9 +1185,9 @@ function escucharEventos () {
     aro(0, 0, 9, PALETA.oro, 1.6)
     if (n === 0) destello(0, 0, PALETA.oro, 1.2)
   }
-  events.on(EV.AGE_ADVANCED, celebrar)
-  events.on(EV.LEVEL_UP, celebrar)
-  events.on(EV.QUEST_COMPLETED, () => { destello(0, 0, PALETA.oro, 1.4); confeti(0, 0, 16) })
+  on(EV.AGE_ADVANCED, celebrar)
+  on(EV.LEVEL_UP, celebrar)
+  on(EV.QUEST_COMPLETED, () => { destello(0, 0, PALETA.oro, 1.4); confeti(0, 0, 16) })
 
   const destrozos = (p) => {
     // si se perdió o hubo bajas, la aldea humea un rato
@@ -1064,11 +1202,11 @@ function escucharEventos () {
       fuego(c.x, c.z, azar(10, 18))
     }
   }
-  events.on(EV.DEFENSE_RESOLVED, destrozos)
-  events.on(EV.RAID_RESOLVED, destrozos)
+  on(EV.DEFENSE_RESOLVED, destrozos)
+  on(EV.RAID_RESOLVED, destrozos)
 
-  events.on(EV.STATE_LOADED, () => { ventanasSucias = true; recolocarMariposas() })
-  events.on(EV.VILLAGER_SPAWNED, (p) => {
+  on(EV.STATE_LOADED, () => { ventanasSucias = true; recolocarMariposas() })
+  on(EV.VILLAGER_SPAWNED, (p) => {
     const v = p?.villager
     if (!v) return
     const c = gridAMundo(v.x ?? 0, v.z ?? 0)
@@ -1082,7 +1220,8 @@ function escucharEventos () {
 const API = {
   polvo, humo, humoContinuo, fuego, chispas, destello, hojas, explosion,
   motaRecurso, marcarCasillas, anillo, aro, rayoDeLuz, marcarEdificio,
-  temblor, mundoDe,
+  temblor, mundoDe, astillas, estela, impacto, caida, confeti, batalla,
+  get enBatalla () { return enBatalla },
   get momentoDelDia () { return momento },
   get esDeNoche () { return factorNoche > 0.5 },
   /** Salta a un momento del día (0..1). Útil para depurar. */
@@ -1098,8 +1237,11 @@ export function init () {
     const max = calidad === 'bajo' ? 320 : calidad === 'alto' ? 1100 : 700
     humos = crearSistema(max, false)
     brillos = crearSistema(Math.round(max * 0.6), true)
-    aEscena(humos.puntos)
-    aEscena(brillos.puntos)
+    // A LA ESCENA, no a la aldea: durante una batalla la aldea entera se apaga
+    // (`ctx.raizAldea.visible = false`) y con ella se apagaban el polvo, las
+    // chispas y el humo. El campo de batalla se quedaba sin una sola partícula.
+    const padre = c.scene || null
+    if (padre) { padre.add(humos.puntos); padre.add(brillos.puntos) } else { aEscena(humos.puntos); aEscena(brillos.puntos) }
 
     montarCasillas()
     montarAnillos()

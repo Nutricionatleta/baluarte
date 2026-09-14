@@ -35,8 +35,14 @@ import { reproducir } from '../sim/combat.js'
 // ── cuántos muñecos caben a la vez según lo que aguante el móvil ────────────
 const TOPE_ACTORES = { bajo: 16, medio: 28, alto: 40 }
 const TOPE_DEFENSORES = { bajo: 6, medio: 10, alto: 14 }
+// Barras de vida a la vez. Con setenta edificios y todos tocados la pantalla se
+// llenaba de rayitas y no se leía ninguna: manda la que está recibiendo AHORA.
+const TOPE_BARRAS = { bajo: 5, medio: 7, alto: 9 }
+const TOPE_FUEGOS = { bajo: 2, medio: 4, alto: 6 }   // columnas de humo/fuego en ruinas
 const PASO_IA = 0.34          // cada cuántos segundos de batalla se repiensa el rumbo
 const SEG_FINAL = 1.1         // respiro entre el último suceso y el parte
+const SEG_BARRIDO = 3.6       // el plano de presentación sobre la base enemiga
+const SEG_FUNDIDO = 0.45      // el negro que tapa el salto aldea <-> campo
 
 const OPUESTO = { norte: 'sur', sur: 'norte', este: 'oeste', oeste: 'este' }
 
@@ -114,6 +120,7 @@ const CSS = `
 .bat-aviso button { min-height: 40px; border-radius: var(--r-s, 8px); border: 0; font-weight: 800;
   background: var(--oro, #d4a437); color: #2d1b0e; padding: 0 12px; font-family: inherit; cursor: pointer; }
 .bat-aviso .cerrar { background: transparent; color: #fff5e8; padding: 0 6px; font-size: 1.1em; }
+.bat-velo { position: fixed; inset: 0; z-index: 90; background: #0b0705; opacity: 0; pointer-events: none; }
 `
 
 function ponerEstilo () {
@@ -146,23 +153,46 @@ const boton = (icono, texto, alPulsar) => {
 
 let geoAnillo = null
 const anilloGeo = () => (geoAnillo ||= new THREE.TorusGeometry(0.5, 0.055, 3, 18))
+let geoAro = null
+/** Aro fino para la peana: el borde claro es lo que separa un bando del otro. */
+const aroGeo = () => (geoAro ||= new THREE.TorusGeometry(0.5, 0.085, 3, 12))
+let geoDisco = null
+const discoGeo = () => (geoDisco ||= new THREE.CylinderGeometry(0.5, 0.5, 1, 10))
+let geoExplanada = null
+/** La explanada sí necesita cantos: con diez lados se veía el polígono. */
+const explanadaGeo = () => (geoExplanada ||= new THREE.CylinderGeometry(0.5, 0.5, 1, 26))
 
 const MB = {
-  get suelo () { return mat(PALETA.hierba) },
-  get bordeSuelo () { return mat(PALETA.hierbaOscura) },
-  get barraFondo () { return mat(PALETA.carbon, { transparente: 0.85 }) },
+  get suelo () { return mat(PALETA.hierbaOscura) },
+  get bordeSuelo () { return mat(PALETA.quemado) },
+  get tierraPisada () { return mat(PALETA.tierraPisada) },
+  // las quemaduras van traslúcidas: opacas parecían agujeros negros en el prado
+  get quemado () { return mat(PALETA.quemado, { transparente: 0.3 }) },
+  get estaca () { return mat(PALETA.carbon) },
+  get barraFondo () { return mat(PALETA.carbon, { transparente: 0.9 }) },
   get barraAlta () { return mat(PALETA.hierbaClara) },
   get barraMedia () { return mat(PALETA.brasa) },
   get barraBaja () { return mat(PALETA.tela) },
   // dorado y luminoso: sobre hierba verde y piedra gris, lo único que se lee a 40 m
   get flecha () { return mat(PALETA.brasa, { emisivo: 0x996600 }) },
-  get humo () { return mat(PALETA.ceniza, { transparente: 0.62 }) },
+  get virote () { return mat(PALETA.aceroClaro, { emisivo: 0x6688aa }) },
+  get piedraTiro () { return mat(PALETA.piedraOscura) },
   get brecha () { return mat(PALETA.enemigo, { transparente: 0.42 }) },
   get descubierto () { return mat(PALETA.oro, { transparente: 0.34 }) },
+  // el aro que dice A QUÉ le están pegando ahora mismo
+  get objetivo () { return mat(PALETA.oro, { emisivo: 0x664400, transparente: 0.88 }) },
   // el disco bajo los pies: desde arriba la cara no se ve, el color del suelo sí
-  get peanaNuestra () { return mat(PALETA.estandarte, { transparente: 0.85 }) },
-  get peanaSuya () { return mat(PALETA.enemigo, { transparente: 0.85 }) }
+  get peanaNuestra () { return mat(PALETA.estandarte, { transparente: 0.9 }) },
+  get peanaSuya () { return mat(PALETA.enemigo, { transparente: 0.9 }) },
+  get bordeNuestro () { return mat(PALETA.estandarteClaro) },
+  get bordeSuyo () { return mat(PALETA.enemigoClaro) },
+  get astaEstandarte () { return mat(PALETA.madera) },
+  get telaNuestra () { return mat(PALETA.estandarte) },
+  get telaSuya () { return mat(PALETA.enemigo) }
 }
+
+/** Atajo a los efectos compartidos (`ctx.fx`): pueden no estar montados aún. */
+const FX = () => ctx.fx || null
 
 // ════════════════════════════════════════════════════════════════════════
 //  EL ESCENARIO
@@ -220,6 +250,86 @@ function giroDe (e) {
   return rot % 2 ? 0 : -rot * Math.PI / 2
 }
 
+/**
+ * EL CAMPO: esto no es el prado de la aldea.
+ *
+ * Tierra pisada alrededor del recinto, manchas quemadas de asedios anteriores,
+ * estacas rotas y pedruscos. Todo en tres InstancedMesh (tres llamadas de
+ * dibujo para setenta trastos) y con azar fijo, para que la repetición del
+ * mismo asalto se vea igual que la primera vez.
+ */
+const _mAux = new THREE.Matrix4()
+const _pAux = new THREE.Vector3()
+const _qAux = new THREE.Quaternion()
+const _eAux = new THREE.Euler()
+const _sAux = new THREE.Vector3()
+
+function vestirCampo (raiz, anchoBase) {
+  let s = 99173                                     // azar con semilla: el campo no baila entre repeticiones
+  const az = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff)
+  const r0 = anchoBase / 2
+
+  // la explanada pisada: un ruedo de tierra pegado a la muralla, no un secarral
+  // de punta a punta (probado: si se come todo el verde, el campo se ve plano)
+  const explanada = pieza(explanadaGeo(), MB.tierraPisada,
+    { y: -0.02, sx: (r0 + 2.6) * 2, sy: 0.5, sz: (r0 + 2.6) * 2, sombra: false, recibe: true })
+  raiz.add(explanada)
+
+  const poner = (malla, i, x, y, z, sx, sy, sz, ry) => {
+    _pAux.set(x, y, z)
+    _eAux.set(0, ry, 0)
+    _qAux.setFromEuler(_eAux)
+    _sAux.set(sx, sy, sz)
+    _mAux.compose(_pAux, _qAux, _sAux)
+    malla.setMatrixAt(i, _mAux)
+  }
+
+  const nQuemado = ctx.calidad === 'bajo' ? 6 : 14
+  const quemaduras = new THREE.InstancedMesh(discoGeo(), MB.quemado, nQuemado)
+  quemaduras.castShadow = false
+  quemaduras.receiveShadow = false
+  for (let i = 0; i < nQuemado; i++) {
+    const a = az() * Math.PI * 2
+    const d = r0 * 0.55 + az() * (r0 + 4)
+    const r = 0.7 + az() * 1.5
+    poner(quemaduras, i, Math.cos(a) * d, 0.012, Math.sin(a) * d, r * 2, 0.3, r * 1.5, az() * 3)
+  }
+  quemaduras.instanceMatrix.needsUpdate = true
+  raiz.add(quemaduras)
+
+  // estacas quemadas de asaltos viejos: OSCURAS y bajas a propósito, para que
+  // no se confundan con la empalizada del enemigo (probado: con el mismo marrón
+  // parecían otra muralla y no se entendía dónde estaba la defensa de verdad)
+  const nEstacas = ctx.calidad === 'bajo' ? 8 : 18
+  const estacas = new THREE.InstancedMesh(G.cono6, MB.estaca, nEstacas)
+  estacas.receiveShadow = false
+  for (let i = 0; i < nEstacas; i++) {
+    const a = az() * Math.PI * 2
+    const d = r0 + 4.5 + az() * 6
+    const alto = 0.45 + az() * 0.6
+    _pAux.set(Math.cos(a) * d, alto / 2, Math.sin(a) * d)
+    _eAux.set((az() - 0.5) * 0.7, az() * 3, (az() - 0.5) * 0.7)
+    _qAux.setFromEuler(_eAux)
+    _sAux.set(0.16, alto, 0.16)
+    _mAux.compose(_pAux, _qAux, _sAux)
+    estacas.setMatrixAt(i, _mAux)
+  }
+  estacas.instanceMatrix.needsUpdate = true
+  raiz.add(estacas)
+
+  const nRocas = ctx.calidad === 'bajo' ? 6 : 14
+  const rocas = new THREE.InstancedMesh(G.esfera, mat(PALETA.rocaOscura), nRocas)
+  rocas.receiveShadow = false
+  for (let i = 0; i < nRocas; i++) {
+    const a = az() * Math.PI * 2
+    const d = r0 + 1.5 + az() * 7
+    const r = 0.3 + az() * 0.6
+    poner(rocas, i, Math.cos(a) * d, r * 0.35, Math.sin(a) * d, r, r * 0.8, r * 1.2, az() * 3)
+  }
+  rocas.instanceMatrix.needsUpdate = true
+  raiz.add(rocas)
+}
+
 /** Monta el terreno y los edificios. La base queda centrada en el origen del mundo. */
 function montarEscenario (base) {
   const { eds, ocupadas } = leerBase(base)
@@ -243,6 +353,7 @@ function montarEscenario (base) {
   const ladoPrado = anchoBase + 18
   raiz.add(pieza(G.caja, MB.suelo, { y: -0.3, sx: ladoPrado, sy: 0.6, sz: ladoPrado, sombra: false }))
   raiz.add(pieza(G.caja, MB.bordeSuelo, { y: -0.64, sx: ladoPrado + 1.6, sy: 0.5, sz: ladoPrado + 1.6, sombra: false }))
+  vestirCampo(raiz, anchoBase)
 
   // --- los edificios de verdad ---
   const caja = new THREE.Box3()
@@ -329,97 +440,209 @@ function campoHacia (esc, obj) {
 //  EFECTOS: barras de vida, disparos, humo y derrumbes
 // ════════════════════════════════════════════════════════════════════════
 
-function crearBarra (e) {
-  const g = new THREE.Group()
-  const fondo = pieza(G.caja, MB.barraFondo, { sx: 1.25, sy: 0.17, sz: 0.05, sombra: false, recibe: false })
-  const relleno = pieza(G.caja, MB.barraAlta, { z: 0.04, sx: 1.18, sy: 0.11, sz: 0.05, sombra: false, recibe: false })
-  relleno.name = 'relleno'
-  g.add(fondo, relleno)
-  g.position.set(e.wx, e.altura + 0.6, e.wz)
-  g.renderOrder = 4
-  return g
+/**
+ * BARRAS DE VIDA CON PISCINA Y TOPE.
+ *
+ * Antes cada edificio tocado se fabricaba la suya y se quedaba ahí: con setenta
+ * edificios la pantalla acababa siendo un enjambre de rayitas y no se leía
+ * ninguna. Ahora hay un puñado fijo de barras que se van poniendo sobre lo que
+ * importa AHORA: primero lo que está recibiendo golpes, luego lo más malherido.
+ */
+function piscinaBarras (raiz, n) {
+  const lista = []
+  for (let i = 0; i < n; i++) {
+    const g = new THREE.Group()
+    // marco oscuro + relleno: el borde negro es lo que hace legible el color
+    const fondo = pieza(G.caja, MB.barraFondo, { sx: 0.98, sy: 0.17, sz: 0.06, sombra: false, recibe: false })
+    const relleno = pieza(G.caja, MB.barraAlta, { z: 0.05, sx: 0.9, sy: 0.1, sz: 0.06, sombra: false, recibe: false })
+    g.add(fondo, relleno)
+    g.renderOrder = 6
+    g.visible = false
+    raiz.add(g)
+    lista.push({ g, relleno, e: null })
+  }
+  return lista
+}
+
+/** Reparte las barras entre lo que de verdad hay que mirar. */
+function repartirBarras () {
+  if (!B) return
+  const candidatos = B.candidatosBarra
+  candidatos.length = 0
+  for (const e of B.esc.eds) {
+    e.barra = null
+    if (!e.vivo || e.hp >= e.hpMax * 0.999) continue
+    // los tramos de muralla son muchos y todos rascados: solo llevan barra los
+    // que están a punto de caer o el que se está llevando los golpes ahora
+    if (e.esMuro && e !== B.marcado && !B.recibe.get(e) && e.hp > e.hpMax * 0.6) continue
+    candidatos.push(e)
+  }
+  // el que está recibiendo manda; entre iguales, el más tocado
+  candidatos.sort((a, b) => {
+    const pa = (B.recibe.get(a) ? 0 : 1) + (B.marcado === a ? -1 : 0)
+    const pb = (B.recibe.get(b) ? 0 : 1) + (B.marcado === b ? -1 : 0)
+    if (pa !== pb) return pa - pb
+    return (a.hp / a.hpMax) - (b.hp / b.hpMax)
+  })
+  for (let i = 0; i < B.barras.length; i++) {
+    const b = B.barras[i]
+    const e = candidatos[i] || null
+    b.e = e
+    if (!e) { b.g.visible = false; continue }
+    e.barra = b
+    b.g.position.set(e.wx, e.altura + 0.55, e.wz)
+    b.g.visible = true
+    pintarBarra(e)
+  }
+}
+
+function pintarBarra (e) {
+  const b = e.barra
+  if (!b) return
+  const frac = Math.max(0, Math.min(1, e.hp / e.hpMax))
+  b.relleno.scale.x = Math.max(0.02, frac * 0.9)
+  b.relleno.position.x = -(0.9 - b.relleno.scale.x) / 2
+  b.relleno.material = frac > 0.55 ? MB.barraAlta : frac > 0.25 ? MB.barraMedia : MB.barraBaja
 }
 
 function refrescarBarra (esc, e) {
-  const frac = Math.max(0, Math.min(1, e.hp / e.hpMax))
-  if (frac >= 0.999 || !e.vivo) {
-    if (e.barra) e.barra.visible = false
-    return
-  }
-  if (!e.barra) { e.barra = crearBarra(e); esc.raiz.add(e.barra); B.conBarra.push(e) }
-  e.barra.visible = true
-  const r = e.barra.getObjectByName('relleno')
-  r.scale.x = Math.max(0.02, frac * 1.18)
-  r.position.x = -(1.18 - r.scale.x) / 2
-  r.material = frac > 0.55 ? MB.barraAlta : frac > 0.25 ? MB.barraMedia : MB.barraBaja
+  if (!e.vivo || e.hp >= e.hpMax * 0.999) { if (e.barra) { e.barra.g.visible = false; e.barra.e = null; e.barra = null } return }
+  if (e.barra) pintarBarra(e)
+  else B.barrasSucias = true      // no hay barra libre: se repartirá en el próximo repaso
+}
+
+// ── proyectiles: flechas, virotes y pedradas ───────────────────────────────
+// Tres clases con vuelo distinto porque cuentan cosas distintas: la flecha
+// describe una curva suave, el virote va tenso y rápido (se lee "ballesta"), y
+// la piedra de catapulta sube alto y cae a plomo, que es lo que da el momento.
+const TIRO = {
+  flecha: { arco: 1.15, vel: 17, estela: 0.055, color: PALETA.brasa, gordo: 0.09, sx: 0.075, sz: 0.8 },
+  virote: { arco: 0.35, vel: 30, estela: 0.04, color: PALETA.aceroClaro, gordo: 0.08, sx: 0.065, sz: 0.95 },
+  piedra: { arco: 4.2, vel: 11, estela: 0.03, color: PALETA.ceniza, gordo: 0.22, sx: 0.46, sz: 0.46 }
 }
 
 /** Piscina de proyectiles: ni un `new` una vez arrancada la batalla. */
-function piscinaDisparos (raiz, n) {
+function piscinaDisparos (raiz, nFlechas, nPiedras) {
   const lista = []
-  for (let i = 0; i < n; i++) {
-    const m = pieza(G.caja, MB.flecha, { sx: 0.13, sy: 0.13, sz: 0.95, sombra: false, recibe: false })
+  for (let i = 0; i < nFlechas; i++) {
+    const m = pieza(G.caja, MB.flecha, { sx: 0.14, sy: 0.14, sz: 1.15, sombra: false, recibe: false })
     m.renderOrder = 5
     m.visible = false
     raiz.add(m)
-    lista.push({ malla: m, vivo: false, k: 0, dur: 0.3, x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0 })
+    lista.push({ malla: m, clase: 'flecha', vivo: false, k: 0, dur: 0.3, tEst: 0, x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0, arco: 1 })
   }
-  return lista
-}
-
-function piscinaHumo (raiz, n) {
-  const lista = []
-  for (let i = 0; i < n; i++) {
-    const m = pieza(G.esfera, MB.humo, { sombra: false, recibe: false })
+  for (let i = 0; i < nPiedras; i++) {
+    const m = pieza(G.esfera, MB.piedraTiro, { sx: 0.5, sy: 0.5, sz: 0.5, sombra: false, recibe: false })
+    m.renderOrder = 5
     m.visible = false
     raiz.add(m)
-    lista.push({ malla: m, vivo: false, k: 0, dur: 1.4, x: 0, y: 0, z: 0, r: 0.5, sube: 1 })
+    lista.push({ malla: m, clase: 'piedra', vivo: false, k: 0, dur: 0.8, tEst: 0, x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0, arco: 4 })
   }
   return lista
 }
 
-function disparar (x0, y0, z0, x1, y1, z1) {
-  const d = B.disparos.find(p => !p.vivo)
+function disparar (x0, y0, z0, x1, y1, z1, clase = 'flecha') {
+  const esPiedra = clase === 'piedra'
+  let d = null
+  for (const p of B.disparos) {
+    if (p.vivo) continue
+    if ((p.clase === 'piedra') !== esPiedra) continue
+    d = p; break
+  }
   if (!d) return
-  d.vivo = true; d.k = 0
+  const t = TIRO[clase] || TIRO.flecha
+  const largo = Math.hypot(x1 - x0, z1 - z0)
+  d.vivo = true; d.k = 0; d.tEst = 0; d.tipoTiro = clase
   // el vuelo se alarga a propósito: una flecha instantánea no la ve nadie
-  d.dur = 0.28 + Math.hypot(x1 - x0, z1 - z0) * 0.05
+  d.dur = Math.max(0.26, largo / t.vel)
+  d.arco = t.arco * Math.max(0.5, Math.min(2.2, largo / 7))
   d.x0 = x0; d.y0 = y0; d.z0 = z0
   d.x1 = x1; d.y1 = y1; d.z1 = z1
+  d.malla.material = esPiedra ? MB.piedraTiro : clase === 'virote' ? MB.virote : MB.flecha
+  d.malla.scale.set(t.sx, t.sx, t.sz)
   d.malla.visible = true
   d.malla.position.set(x0, y0, z0)
   d.malla.lookAt(x1, y1, z1)
 }
 
+/** Humo y polvo: van al sistema de partículas compartido (una llamada de dibujo). */
 function humear (x, y, z, radio = 0.6, cuantos = 4) {
+  const fx = FX()
+  if (!fx) return
   for (let i = 0; i < cuantos; i++) {
-    const h = B.humo.find(p => !p.vivo)
-    if (!h) return
-    h.vivo = true; h.k = 0
-    h.dur = 1.1 + Math.random() * 0.9
-    h.x = x + (Math.random() - 0.5) * radio * 1.6
-    h.z = z + (Math.random() - 0.5) * radio * 1.6
-    h.y = y + Math.random() * 0.3
-    h.r = radio * (0.5 + Math.random() * 0.7)
-    h.sube = 0.6 + Math.random() * 0.9
-    h.malla.visible = true
+    fx.humo(x + (Math.random() - 0.5) * radio * 1.6, z + (Math.random() - 0.5) * radio * 1.6,
+      y + Math.random() * 0.4, PALETA.ceniza)
   }
 }
 
-/** Un edificio que cae: se hunde, se tuerce y suelta polvo. */
+/** Un edificio que cae: se hunde, se tuerce, revienta en polvo y a veces arde. */
 function derrumbar (esc, e, instantaneo) {
   if (!e.vivo) return
   e.vivo = false
   e.hp = 0
-  if (e.barra) e.barra.visible = false
+  if (e.barra) { e.barra.g.visible = false; e.barra.e = null; e.barra = null }
+  B.barrasSucias = true
   esc.version++
   esc.bloqueo = mapaBloqueo(esc)
   if (instantaneo) {
     if (e.g) e.g.visible = false
     return
   }
-  B.derrumbes.push({ g: e.g, k: 0, dur: 0.75 })
-  humear(e.wx, 0.4, e.wz, 0.5 + Math.max(e.ancho, e.alto) * 0.32, e.esMuro ? 4 : 8)
+  B.derrumbes.push({ g: e.g, k: 0, dur: e.esMuro ? 0.6 : 0.95 })
+  const talla = Math.max(e.ancho, e.alto)
+  const fx = FX()
+  if (fx) {
+    fx.explosion(e.wx, e.wz, e.esMuro ? 0.75 : 0.8 + talla * 0.45)
+    fx.polvo(e.wx, e.wz, e.esMuro ? 12 : 22)
+    // lo gordo se siente en la mano: un golpe de cámara corto y se acabó
+    sacudir(e.esMuro ? 0.1 : Math.min(0.34, 0.16 + talla * 0.06))
+    // las ruinas humean y arden: es lo que hace que el campo parezca un campo.
+    // El humo va CLARO a propósito: el negro del `fuego()` de la aldea no se ve
+    // contra la tierra quemada, y aquí el humo es media ambientación.
+    if (!e.esMuro && B.fuegos.length < (TOPE_FUEGOS[ctx.calidad] || 4)) {
+      B.fuegos.push(fx.humoContinuo(e.wx, e.wz, {
+        altura: 0.7, color: PALETA.humo, periodo: 0.26, fuego: true, segundos: 90
+      }))
+      encenderRuina(e)
+    }
+  }
+  humear(e.wx, 0.5, e.wz, 0.5 + talla * 0.32, e.esMuro ? 3 : 6)
+}
+
+/**
+ * LLAMAS EN LAS RUINAS. Las brasas del sistema de partículas se quedan cortas a
+ * la distancia de juego; un par de conos emisivos que laten dicen "esto arde"
+ * desde el otro lado del campo. Van en un InstancedMesh: una llamada de dibujo.
+ */
+function encenderRuina (e) {
+  if (!B.llamas) return
+  const tope = TOPE_FUEGOS[ctx.calidad] || TOPE_FUEGOS.medio
+  if (B.ruinas.length >= tope) return
+  B.ruinas.push({ x: e.wx, z: e.wz, r: 0.4 + Math.max(e.ancho, e.alto) * 0.3, fase: Math.random() * 6 })
+}
+
+function actualizarLlamas (t) {
+  const m = B.llamas
+  if (!m) return
+  let n = 0
+  for (const r of B.ruinas) {
+    for (let j = 0; j < 2; j++) {
+      const late = 0.75 + Math.sin(t * (7 + j * 2.6) + r.fase + j) * 0.25
+      const ancho = r.r * (0.5 + j * 0.22) * late
+      _vPeana.set(r.x + (j ? r.r * 0.5 : -r.r * 0.3), ancho * 0.55, r.z + (j ? -r.r * 0.4 : r.r * 0.35))
+      _sPeana.set(ancho, ancho * 2.1, ancho)
+      _mPeana.compose(_vPeana, _qPlano, _sPeana)
+      m.setMatrixAt(n++, _mPeana)
+    }
+  }
+  m.count = n
+  m.instanceMatrix.needsUpdate = true
+}
+
+/** Golpe de cámara. Se ignora si el jugador ya está paseando la vista a mano. */
+function sacudir (fuerza) {
+  const fx = FX()
+  if (fx) fx.temblor(fuerza)
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -553,19 +776,65 @@ function repartir (tropas, tope) {
  * cota de malla de otra: lo que se lee de un vistazo es el color del suelo. Azul
  * los tuyos, rojo los suyos, y ya se sabe quién está ganando el patio.
  */
-function ponerPeana (h, nuestro) {
-  const d = pieza(G.cilindro, nuestro ? MB.peanaNuestra : MB.peanaSuya,
-    { y: 0.035, sx: 0.66, sy: 0.06, sz: 0.66, sombra: false, recibe: false })
-  h.raiz.add(d)
-  return d
+/**
+ * Las peanas van en DOS InstancedMesh por bando (disco + aro), no en una malla
+ * por soldado: cincuenta y cuatro llamadas de dibujo se quedan en cuatro, y de
+ * paso cabe el aro claro del borde, que es lo que hace que a cuarenta figuras
+ * amontonadas se les distinga el bando de un vistazo en una pantalla de móvil.
+ */
+function crearPeanas (raiz, n, nuestro) {
+  const disco = new THREE.InstancedMesh(discoGeo(), nuestro ? MB.peanaNuestra : MB.peanaSuya, n)
+  const aro = new THREE.InstancedMesh(aroGeo(), nuestro ? MB.bordeNuestro : MB.bordeSuyo, n)
+  for (const m of [disco, aro]) {
+    m.castShadow = false
+    m.receiveShadow = false
+    m.frustumCulled = false
+    m.renderOrder = 2
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    m.count = 0
+    raiz.add(m)
+  }
+  return { disco, aro }
 }
 
-/** Cae uno: se apaga su peana (girada con el cuerpo parecía una bandera tirada). */
+const _qPeana = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI / 2, 0, 0))
+const _qPlano = new THREE.Quaternion()
+const _vPeana = new THREE.Vector3()
+const _sPeana = new THREE.Vector3()
+const _mPeana = new THREE.Matrix4()
+
+function actualizarPeanas (grupo, lista, t) {
+  if (!grupo) return
+  let n = 0
+  for (const a of lista) {
+    const h = a.h
+    // el que pega late: se ve quién está dando y quién solo camina
+    const escala = !a.viva ? 0 : a.pegando ? 0.68 + Math.sin(t * 9 + a.desvio * 7) * 0.07 : 0.6
+    _vPeana.set(h.x, 0.04, h.z)
+    _sPeana.set(escala, 0.05, escala)
+    _mPeana.compose(_vPeana, _qPlano, _sPeana)
+    grupo.disco.setMatrixAt(n, _mPeana)
+    // el aro es el CANTO del disco, no un segundo plato: fino y justo al borde
+    _sPeana.set(escala * 1.04, escala * 1.04, 0.5)
+    _vPeana.y = 0.05
+    _mPeana.compose(_vPeana, _qPeana, _sPeana)
+    grupo.aro.setMatrixAt(n, _mPeana)
+    n++
+  }
+  grupo.disco.count = n
+  grupo.aro.count = n
+  grupo.disco.instanceMatrix.needsUpdate = true
+  grupo.aro.instanceMatrix.needsUpdate = true
+}
+
+/** Cae uno: se desploma de verdad, con su polvareda. La peana se apaga sola. */
 function abatir (a) {
   if (!a.viva) return
   a.viva = false
-  if (a.peana) a.peana.visible = false
+  a.pegando = false
   a.h.caer()
+  const fx = FX()
+  if (fx) fx.caida(a.h.x, a.h.z)
 }
 
 /** Dónde aparece la hueste: fuera del recinto, del lado que eligió el jugador. */
@@ -591,15 +860,16 @@ function desplegarAtacantes (esc, tropas, lado, bando) {
     const fila = Math.floor(i / frente)
     const p = puntoEntrada(esc, lado, carril * 1.05, fila)
     const h = crearActor(tipo, { bando, semilla: i * 37 + 13, padre: esc.raiz })
-    const peana = ponerPeana(h, bando === 'jugador')
     const w = esc.aMundo(p.x, p.z)
     const hacia = esc.aMundo(esc.cx, esc.cz)
     h.plantar(w.x, 0, w.z, Math.atan2(hacia.x - w.x, hacia.z - w.z))
     h.estado('andando')
     fuera.push({
-      h, peana, tipo, clase: u.clase, vel: u.velocidad || 1.2, alcance: u.alcance || 0,
+      h, tipo, clase: u.clase, vel: u.velocidad || 1.2, alcance: u.alcance || 0,
       gx: p.x, gz: p.z, objetivo: null, revisar: 0, viva: true, pegando: false,
-      desvio: (i % 5 - 2) * 0.18, desvioZ: (i % 3 - 1) * 0.18
+      desvio: (i % 5 - 2) * 0.18, desvioZ: (i % 3 - 1) * 0.18,
+      // cada uno con su reloj: si todos disparan a la vez parece una descarga de fusilería
+      cdTiro: 0.6 + (i % 7) * 0.32, cdGolpe: 0.3 + (i % 5) * 0.22
     })
   }
   return fuera
@@ -620,12 +890,12 @@ function desplegarDefensores (esc, tropas, cuantos, bando) {
     const gx = casa.cx + Math.cos(ang) * (casa.ancho / 2 + 1)
     const gz = casa.cz + Math.sin(ang) * (casa.alto / 2 + 1)
     const h = crearActor(tipo, { bando, semilla: i * 91 + 5, padre: esc.raiz })
-    const peana = ponerPeana(h, bando === 'jugador')
     const w = esc.aMundo(gx, gz)
     h.plantar(w.x, 0, w.z, ang)
     fuera.push({
-      h, peana, tipo, clase: u.clase, vel: u.velocidad || 1.2, alcance: u.alcance || 0,
-      gx, gz, viva: true, defensor: true
+      h, tipo, clase: u.clase, vel: u.velocidad || 1.2, alcance: u.alcance || 0,
+      gx, gz, viva: true, defensor: true, pegando: false,
+      desvio: (i % 5 - 2) * 0.18, cdTiro: 0.4 + (i % 5) * 0.3, cdGolpe: 0.2 + (i % 4) * 0.25
     })
   }
   return fuera
@@ -685,6 +955,7 @@ function pensarTropa (dtBat, real) {
       const dd = Math.hypot(d.gx - a.gx, d.gz - a.gz)
       if (dd < mejorD) { mejorD = dd; presa = d }
     }
+    a.presa = presa
     if (presa) {
       a.pegando = true
       a.h.estado('luchando')
@@ -742,9 +1013,15 @@ function pensarTropa (dtBat, real) {
       const dd = Math.hypot(a.gx - d.gx, a.gz - d.gz)
       if (dd < mejorD) { mejorD = dd; presa = a }
     }
-    if (!presa) { d.h.estado('parado'); continue }
+    d.presa = presa
+    if (!presa) { d.h.estado('parado'); d.pegando = false; continue }
     d.h.mirar(Math.atan2(presa.gx - d.gx, presa.gz - d.gz))
-    if (mejorD <= 1.3) { d.h.estado('luchando'); continue }
+    if (mejorD <= (d.clase === 'distancia' ? Math.max(1.3, d.alcance) : 1.3)) {
+      d.pegando = true
+      d.h.estado('luchando')
+      continue
+    }
+    d.pegando = false
     d.h.estado('andando')
     const avance = Math.min(mejorD - 1, d.vel * dtBat)
     d.gx += (presa.gx - d.gx) / mejorD * avance
@@ -770,9 +1047,88 @@ function dispararTorres (dtBat) {
     if (!presa) { t.cd = 0.4; continue }
     t.cd = 1 / t.cadencia
     const w = esc.aMundo(presa.gx, presa.gz)
-    disparar(t.wx, t.altura * 0.82, t.wz, w.x, 0.55, w.z)
+    const alto = t.altura * 0.82
+    disparar(t.wx, alto, t.wz, w.x, 0.55, w.z, t.tipo === 'torre_ballesta' ? 'virote' : 'flecha')
+    // fogonazo en la almena: se ve QUÉ torre está trabajando, que es la lección
+    const fx = FX()
+    if (fx) fx.impacto(t.wx, alto, t.wz, PALETA.brasa, 0.6)
     // la torre que la crónica señala se cobra la pieza de verdad
     if (t.cobrar > 0) { t.cobrar--; matarAtacantes(1, presa) }
+  }
+}
+
+/**
+ * QUE EL COMBATE SE VEA.
+ *
+ * La crónica ya decidió quién muere; esto es la otra mitad: el chispazo del
+ * acero, la flecha que sale del arco, la astilla que salta de la puerta cuando
+ * el ariete embiste y la piedra de la catapulta subiendo por encima del muro.
+ * Va por frame (no por paso de IA) porque un golpe que llega tarde no es golpe,
+ * y cada figura tiene su propio reloj para que no disparen todas a la vez.
+ */
+const _vGolpe = new THREE.Vector3()
+
+function puntoDeGolpe (a, esc) {
+  // contra un soldado, al pecho; contra piedra, donde el arma toca el muro
+  if (a.presa && a.presa.viva) {
+    const h = a.presa.h
+    return _vGolpe.set(h.x, 0.85, h.z)
+  }
+  const e = a.objetivo
+  if (!e || !e.vivo) return null
+  const w = esc.aMundo(a.gx, a.gz)
+  const dx = e.wx - w.x; const dz = e.wz - w.z
+  const largo = Math.hypot(dx, dz) || 1
+  const dentro = Math.max(0.3, largo - Math.max(e.ancho, e.alto) * 0.45)
+  return _vGolpe.set(w.x + dx / largo * dentro, Math.min(e.altura * 0.55, 1.3), w.z + dz / largo * dentro)
+}
+
+function combatirVisual (dt) {
+  const fx = FX()
+  if (!fx) return
+  const esc = B.esc
+  for (let paso = 0; paso < 2; paso++) {
+    const lista = paso === 0 ? B.atacantes : B.defensores
+    for (const a of lista) {
+      if (!a.viva || !a.pegando) continue
+      const p = puntoDeGolpe(a, esc)
+      if (!p) continue
+      const w = esc.aMundo(a.gx, a.gz)
+
+      if (a.clase === 'distancia') {
+        a.cdTiro -= dt
+        if (a.cdTiro > 0) continue
+        a.cdTiro = 1.5 + Math.random() * 1.1
+        disparar(w.x, 1.15, w.z, p.x, p.y, p.z, a.tipo === 'ballestero' ? 'virote' : 'flecha')
+        continue
+      }
+
+      if (a.tipo === 'catapulta') {
+        a.cdTiro -= dt
+        if (a.cdTiro > 0) continue
+        a.cdTiro = 3.6 + Math.random() * 1.6
+        disparar(w.x, 1.2, w.z, p.x, Math.max(0.4, p.y), p.z, 'piedra')
+        fx.polvo(w.x, w.z, 5)
+        continue
+      }
+
+      a.cdGolpe -= dt
+      if (a.cdGolpe > 0) continue
+
+      if (a.tipo === 'ariete') {
+        a.cdGolpe = 1.25 + Math.random() * 0.4
+        // la embestida: astillas hacia fuera, polvo abajo y un temblor corto
+        fx.astillas(p.x, p.y, p.z, p.x - w.x, p.z - w.z, 12)
+        fx.polvo(p.x, p.z, 6)
+        sacudir(0.07)
+        continue
+      }
+
+      a.cdGolpe = 0.62 + Math.random() * 0.45
+      const contraPiedra = !(a.presa && a.presa.viva)
+      fx.impacto(p.x, p.y, p.z, contraPiedra ? PALETA.piedra : PALETA.aceroClaro, contraPiedra ? 0.9 : 1.2)
+      if (contraPiedra && Math.random() < 0.35) fx.polvo(p.x, p.z, 3)
+    }
   }
 }
 
@@ -911,6 +1267,7 @@ function cambiarVelocidad () {
 
 function saltarAlFinal () {
   if (!B || B.terminada) return
+  if (B.fase === 'barrido') empezarAsalto()
   B.saltando = true
   if (!B.mando) arrancarReproductor()
   try { B.mando.saltar() } catch { /* da igual */ }
@@ -950,6 +1307,11 @@ function desgastar (dtBat) {
     recibe.set(a.objetivo, (recibe.get(a.objetivo) || 0) + 1)
   }
   for (const e of recibe.keys()) if (e.tGolpe == null) e.tGolpe = B.t
+  // a qué se le está pegando MÁS: es lo que lleva el aro y la primera barra
+  let mayor = null; let masGolpes = 0
+  for (const [e, n] of recibe) if (n > masGolpes) { masGolpes = n; mayor = e }
+  const marcado = (B.foco && B.foco.vivo && recibe.get(B.foco)) ? B.foco : mayor
+  if (marcado !== B.marcado) { B.marcado = marcado; B.barrasSucias = true }
   // solo se repasa lo que está tocado o lo que la crónica va a tumbar
   for (const e of B.enJuego) {
     if (!e.vivo) continue
@@ -969,9 +1331,19 @@ function desgastar (dtBat) {
   }
 }
 
-function frameBatalla (dt) {
+function frameBatalla (dt, t) {
   if (!B) return
-  const avanza = !B.pausa && !B.terminada
+  if (B.pausa) dt = 0                    // en pausa se para todo, también la cámara
+  B.tFase += dt
+
+  // --- el guion de cámara manda mientras el jugador no toque la pantalla ---
+  if (B.siguiendo && dt > 0) {
+    if (B.fase === 'barrido') barrido(dt)
+    else if (B.fase === 'final') planoFinal(dt)
+    else seguirLaAccion(dt)
+  }
+
+  const avanza = !B.pausa && !B.terminada && B.fase !== 'barrido'
   if (avanza) {
     const dtBat = dt * B.velocidad
     B.t += dtBat
@@ -982,41 +1354,93 @@ function frameBatalla (dt) {
     }
     dispararTorres(dtBat)
     desgastar(dtBat)
+    combatirVisual(dt * Math.min(2, B.velocidad))
     B.relojHud -= dt
     if (B.relojHud <= 0) { B.relojHud = 0.12; refrescarMarcador() }
-    B.relojCamara -= dtBat
-    if (B.relojCamara <= 0) { B.relojCamara = 2.2; seguirLaAccion() }
+    B.relojBarras -= dt
+    if (B.relojBarras <= 0 || B.barrasSucias) { B.relojBarras = 0.4; B.barrasSucias = false; repartirBarras() }
     if (B.esperaFinal > 0) {
       B.esperaFinal -= dt
       if (B.esperaFinal <= 0) { cerrarBatalla(); return }
     }
   }
 
-  // --- proyectiles ---
+  // --- el desenlace sigue vivo aunque la crónica haya terminado ---
+  if (B.terminada && (B.retirada || B.vencedores)) {
+    B.relojIA -= dt
+    if (B.relojIA <= 0) {
+      B.relojIA = PASO_IA
+      if (B.retirada) retirarTropa(PASO_IA)
+      if (B.vencedores) juntarseAlEstandarte(PASO_IA, B.vencedores)
+    }
+  }
+
+  // --- el estandarte del vencedor: sube clavándose y la tela ondea ---
+  if (B.estandarte) {
+    const e = B.estandarte
+    if (e.k < 1) {
+      e.k = Math.min(1, e.k + dt / 0.9)
+      const k = 1 - Math.pow(1 - e.k, 3)
+      e.g.position.y = -4.4 + 4.4 * k
+      if (e.k >= 1) { sacudir(0.12); FX()?.polvo(0, 0, 14) }
+    }
+    e.tela.rotation.y = Math.sin(t * 2.6) * 0.22
+    e.tela.scale.z = 1 + Math.sin(t * 5.2) * 0.35
+  }
+
+  // --- peanas de bando, llamas y aro del objetivo: legibilidad, por frame ---
+  if (B.ruinas.length) actualizarLlamas(t)
+  actualizarPeanas(B.peanasAtac, B.atacantes, t)
+  actualizarPeanas(B.peanasDef, B.defensores, t)
+  if (B.aroObjetivo) {
+    const e = B.marcado && B.marcado.vivo ? B.marcado : null
+    B.aroObjetivo.visible = !!e
+    if (e) {
+      const r = (Math.max(e.ancho, e.alto) * 0.75 + 0.9) * (1 + Math.sin(t * 4) * 0.05)
+      B.aroObjetivo.position.set(e.wx, 0.08, e.wz)
+      B.aroObjetivo.scale.set(r * 2, r * 2, r * 2)
+    }
+  }
+
+  // --- proyectiles: vuelan de verdad, dejan estela y se nota dónde caen ---
+  const fx = FX()
   for (const d of B.disparos) {
     if (!d.vivo) continue
     d.k += dt / d.dur
     if (d.k >= 1) {
       d.vivo = false
       d.malla.visible = false
-      humear(d.x1, 0.4, d.z1, 0.22, 1)        // polvo donde cae: se ve a quién le ha dado
+      if (!fx) continue
+      if (d.clase === 'piedra') {
+        // la pedrada es el momento gordo del asedio: reviente, polvareda y golpe de cámara
+        fx.explosion(d.x1, d.z1, 1.3)
+        fx.polvo(d.x1, d.z1, 16)
+        sacudir(0.18)
+      } else {
+        fx.impacto(d.x1, d.y1, d.z1, PALETA.aceroClaro, 0.9)
+        fx.polvo(d.x1, d.z1, 2)
+      }
       continue
     }
-    d.malla.position.set(
-      d.x0 + (d.x1 - d.x0) * d.k,
-      d.y0 + (d.y1 - d.y0) * d.k + Math.sin(d.k * Math.PI) * 1.1,
-      d.z0 + (d.z1 - d.z0) * d.k
+    const px = d.x0 + (d.x1 - d.x0) * d.k
+    const py = d.y0 + (d.y1 - d.y0) * d.k + Math.sin(d.k * Math.PI) * d.arco
+    const pz = d.z0 + (d.z1 - d.z0) * d.k
+    d.malla.position.set(px, py, pz)
+    // apuntar al sitio de dentro de un instante: así la flecha pica al caer
+    const k2 = Math.min(1, d.k + 0.06)
+    d.malla.lookAt(
+      d.x0 + (d.x1 - d.x0) * k2,
+      d.y0 + (d.y1 - d.y0) * k2 + Math.sin(k2 * Math.PI) * d.arco,
+      d.z0 + (d.z1 - d.z0) * k2
     )
-  }
-
-  // --- humo ---
-  for (const h of B.humo) {
-    if (!h.vivo) continue
-    h.k += dt / h.dur
-    if (h.k >= 1) { h.vivo = false; h.malla.visible = false; continue }
-    const s = h.r * (0.35 + h.k * 1.5) * (1 - h.k * 0.55)
-    h.malla.position.set(h.x, h.y + h.k * h.sube * 1.6, h.z)
-    h.malla.scale.set(s, s, s)
+    if (d.clase === 'piedra') d.malla.rotation.z += dt * 7
+    if (!fx) continue
+    d.tEst -= dt
+    if (d.tEst <= 0) {
+      const t = TIRO[d.tipoTiro] || TIRO.flecha
+      d.tEst = t.estela
+      fx.estela(px, py, pz, t.color, t.gordo)
+    }
   }
 
   // --- derrumbes ---
@@ -1035,7 +1459,7 @@ function frameBatalla (dt) {
   // --- barras y etiquetas siempre de cara a quien mira ---
   const cam = ctx.camera
   if (!cam) return
-  for (const e of B.conBarra) if (e.barra && e.barra.visible) e.barra.lookAt(cam.position)
+  for (const b of B.barras) if (b.g.visible) b.g.lookAt(cam.position)
   if (!B.marcas.length) return
   const r = ctx.renderer.domElement.getBoundingClientRect()
   // Con el parte abierto solo queda una franja de campo a la vista: la etiqueta
@@ -1138,6 +1562,10 @@ export function jugarBatalla (o = {}) {
     sucesos: resultado.sucesos.slice().sort((a, b) => a.t - b.t),
     consumidos: 0,
     t: 0, relojIA: 0, esperaFinal: 0, relojCamara: 4, relojHud: 0, siguiendo: true, grupo: null,
+    // el guion de cámara: primero se presenta la plaza, luego se pelea
+    fase: 'barrido', tFase: 0, relojFoco: 0, relojBarras: 0, elevInicial: 0, elev: 0,
+    camX: 0, camZ: 0, camZoom: 0, zoomBase: 40, marcado: null,
+    retirada: false, estandarte: null, fuegos: [], barrasSucias: true, candidatosBarra: [],
     // una crónica de dos minutos no se mira a velocidad real en el móvil
     velocidad: (resultado.duracion || 0) > 75 ? 2 : 1,
     pausa: false, terminada: false, saltando: false, flojos: false,
@@ -1149,9 +1577,9 @@ export function jugarBatalla (o = {}) {
     escalaDef: 1,
     foco: null,
     atacantes: [], defensores: [],
-    disparos: piscinaDisparos(esc.raiz, 22),
-    humo: piscinaHumo(esc.raiz, 26),
-    derrumbes: [], marcas: [], cronica: [], conBarra: [], recibe: new Map(),
+    disparos: piscinaDisparos(esc.raiz, ctx.calidad === 'bajo' ? 10 : 20, ctx.calidad === 'bajo' ? 3 : 6),
+    barras: piscinaBarras(esc.raiz, TOPE_BARRAS[ctx.calidad] || TOPE_BARRAS.medio),
+    derrumbes: [], marcas: [], cronica: [], recibe: new Map(),
     caidos: new Map(), hpFinal: new Map(),
     esDefensa: !!o.esDefensa,
     lado: o.lado || resultado.ladoEntrada || 'sur',
@@ -1190,6 +1618,31 @@ export function jugarBatalla (o = {}) {
     B.escalaDef = B.defensores.length / defensores
   }
 
+  // --- peanas de bando: dos InstancedMesh por lado, no una malla por soldado ---
+  const nuestrosAtacan = !o.esDefensa
+  B.peanasAtac = crearPeanas(esc.raiz, Math.max(1, B.atacantes.length), nuestrosAtacan)
+  B.peanasDef = crearPeanas(esc.raiz, Math.max(1, B.defensores.length), !nuestrosAtacan)
+
+  // --- las llamas de las ruinas, todas en una sola malla ---
+  B.ruinas = []
+  B.llamas = new THREE.InstancedMesh(G.cono6, mat(PALETA.fuego, { emisivo: 0xcc4400 }),
+    (TOPE_FUEGOS[ctx.calidad] || TOPE_FUEGOS.medio) * 2)
+  B.llamas.castShadow = false
+  B.llamas.receiveShadow = false
+  B.llamas.frustumCulled = false
+  B.llamas.count = 0
+  esc.raiz.add(B.llamas)
+
+  // --- el aro que dice a QUÉ le están pegando ahora mismo ---
+  B.aroObjetivo = new THREE.Mesh(anilloGeo(), MB.objetivo)
+  B.aroObjetivo.rotation.x = Math.PI / 2
+  B.aroObjetivo.position.y = 0.08
+  B.aroObjetivo.visible = false
+  B.aroObjetivo.castShadow = false
+  B.aroObjetivo.receiveShadow = false
+  B.aroObjetivo.renderOrder = 3
+  esc.raiz.add(B.aroObjetivo)
+
   // --- mandos ---
   B.btnPausa = boton('⏸', 'Pausa', () => pausar(!B.pausa))
   B.btnVel = boton('⏩', `x${B.velocidad}`, cambiarVelocidad)
@@ -1197,44 +1650,288 @@ export function jugarBatalla (o = {}) {
   B.btnFlojos = boton('🎯', 'Flojos', () => verFlojos(!B.flojos))
   ui.mandos.append(B.btnPausa, B.btnVel, B.btnFlojos, boton('⏭', 'Al resultado', saltarAlFinal))
 
-  // --- cámara: la base entera Y el lado por el que entra la hueste ---
-  // Si solo se encuadra el recinto, la tropa aparece fuera de pantalla y la
-  // batalla empieza "sola": hay que ver llegar a los soldados.
+  // --- el escenario cambia de sitio, de luz y de humor ---
   esconderAldea(true)
-  const medioTablero = (CONFIG.GRID - 1) / 2
-  const hacia = { norte: [0, -1], sur: [0, 1], este: [1, 0], oeste: [-1, 0] }[B.lado] || [0, 1]
-  // En vertical el móvil ve poquísimo de ancho (28° de campo). Encuadrar la base
-  // ENTERA deja a los soldados del tamaño de una mosca, así que se encuadra el
-  // lado por el que entra la hueste: ahí es donde pasa todo. El dedo hace el resto.
-  const sesgo = Math.min(7, esc.anchoBase * 0.22)
-  events.emit(EV.CAMERA_FOCUS, {
-    x: medioTablero + hacia[0] * sesgo,
-    z: medioTablero + hacia[1] * sesgo,
-    zoom: Math.max(26, Math.min(56, esc.anchoBase * 2.1 + 8))
-  })
+  FX()?.batalla(true)
+  fundir(false)          // se abre DESDE negro: el salto aldea -> campo no se ve
+
+  // Cámara: se guarda la pose de la aldea para devolverla tal cual al salir.
+  // más cerca que antes: con cuarenta figuras en un móvil, a 44 de distancia
+  // eran moscas. La cámara sigue el punto caliente, así que se puede apretar.
+  B.zoomBase = Math.max(22, Math.min(42, esc.anchoBase * 1.5 + 9))
+  const pos = ctx.camara?.posicion?.()
+  const dist = ctx.camara?.distancia || CONFIG.ZOOM_INICIAL
+  B.elevInicial = pos ? Math.asin(Math.max(-1, Math.min(1, pos[1] / Math.max(1, dist)))) : CONFIG.ANGULO_CAMARA
+  B.elev = B.elevInicial
+  B.fase = 'barrido'
+  B.tFase = 0
 
   const lienzo = ctx.renderer?.domElement
-  B.soltarDedo = () => { if (B) B.siguiendo = false }
+  B.soltarDedo = () => { if (B) { B.siguiendo = false; if (B.fase === 'barrido') empezarAsalto() } }
   lienzo?.addEventListener('pointerdown', B.soltarDedo)
 
   bajaFrame = onFrame(frameBatalla)
   refrescarMarcador()
-  arrancarReproductor()
+  // OJO: el reproductor NO arranca aquí. Primero la cámara presenta la plaza
+  // (`empezarAsalto` lo lanza al acabar el barrido): una batalla que empieza
+  // antes de que sepas dónde estás no se entiende.
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  DIRECCIÓN DE CÁMARA: la batalla se cuenta, no se mira desde una grúa fija
+// ════════════════════════════════════════════════════════════════════════
+
+const MEDIO = () => (CONFIG.GRID - 1) / 2
+const suave = (k) => k * k * (3 - 2 * k)
+
+/**
+ * Enfoca un punto del MUNDO (el campo está centrado en el origen).
+ *
+ * `corrimiento` positivo acerca el objetivo a la cámara, y entonces el punto
+ * que te interesa BAJA en la pantalla (se aparta del marcador); negativo lo
+ * aleja y el punto sube (se aparta del parte). Se
+ * fondo (negativo). Hace falta porque la pantalla del móvil no está limpia: el
+ * marcador tapa la franja de arriba y el parte tapa la de abajo, así que el
+ * centro ÚTIL no es el centro geométrico. Sin esto la pelea se queda pegada al
+ * borde del marcador y media pantalla es prado vacío.
+ */
+function enfocarMundo (wx, wz, zoom, corrimiento = 0) {
+  let x = wx; let z = wz
+  const cam = ctx.camera
+  if (corrimiento && cam) {
+    const dx = cam.position.x - wx
+    const dz = cam.position.z - wz
+    const largo = Math.hypot(dx, dz) || 1
+    x += (dx / largo) * corrimiento
+    z += (dz / largo) * corrimiento
+  }
+  events.emit(EV.CAMERA_FOCUS, { x: MEDIO() + x, z: MEDIO() + z, zoom })
+}
+
+function inclinarA (objetivo, dt, brio = 2.6) {
+  if (!ctx.camara) return
+  const k = Math.min(1, dt * brio)
+  const paso = (objetivo - B.elev) * k
+  if (Math.abs(paso) < 0.0002) return
+  B.elev += paso
+  ctx.camara.inclinar(paso)
+}
+
+/** El lado por el que entra la hueste, en vector de casillas. */
+const VECTOR_LADO = { norte: [0, -1], sur: [0, 1], este: [1, 0], oeste: [-1, 0] }
+
+/**
+ * EL BARRIDO DE ENTRADA. La cámara pasa por encima de la base enemiga —baja,
+ * girando despacio— y acaba plantada en el lado por el que va a entrar la
+ * hueste. Es lo que convierte "una lista de sucesos" en "esto va en serio".
+ */
+function barrido (dt) {
+  const esc = B.esc
+  const k = suave(Math.min(1, B.tFase / SEG_BARRIDO))
+  const hacia = VECTOR_LADO[B.lado] || [0, 1]
+  const sesgo = Math.min(11, esc.anchoBase * 0.5)   // acaba mirando por dónde entra la hueste
+  // de la punta contraria del recinto al lado de entrada, en línea recta
+  const desdeX = -hacia[0] * esc.anchoBase * 0.45
+  const desdeZ = -hacia[1] * esc.anchoBase * 0.45
+  const wx = desdeX + (hacia[0] * sesgo - desdeX) * k
+  const wz = desdeZ + (hacia[1] * sesgo - desdeZ) * k
+  // giro lento, cada vez más suave: acaba quieta, no cortada
+  // un giro corto, lo justo para que la cámara "viaje": si gira mucho, el lado
+  // por el que entra la hueste acaba en cualquier parte de la pantalla
+  ctx.camara?.girar(dt * 0.17 * (1 - k * 0.85))
+  // arranca baja y abierta (se ve el fuerte entero, imponente) y se cierra
+  // hacia la vista de jugar: es un acercamiento, no un salto
+  inclinarA(0.40 + (B.elevInicial - 0.40) * k, dt, 3.4)
+  enfocarMundo(wx, wz, B.zoomBase * (1.5 - 0.5 * k), B.zoomBase * 0.12)
+  if (B.tFase >= SEG_BARRIDO) empezarAsalto()
+}
+
+/** Se acabó la presentación: entra la hueste y corre la crónica. */
+function empezarAsalto () {
+  if (!B || B.fase !== 'barrido') return
+  B.fase = 'asalto'
+  B.tFase = 0
+  B.relojFoco = 0
+  if (!B.terminada && !B.pausa) arrancarReproductor()
 }
 
 /**
- * La cámara va detrás de la hueste. Sin esto, la tropa se mete en la aldea y el
- * jugador se queda mirando un prado vacío: la batalla pasa fuera de cuadro.
- * En cuanto el dedo toca la pantalla, se deja de seguir y manda el jugador.
+ * La cámara va detrás de la hueste, pero con freno: solo se mueve cuando la
+ * acción se ha ido de verdad del cuadro. Una cámara que persigue cada paso
+ * marea, y en un móvil marea el doble.
  */
-function seguirLaAccion () {
-  if (!B || !B.siguiendo || !B.grupo) return
+function seguirLaAccion (dt) {
+  if (!B || !B.siguiendo) return
+  B.relojFoco -= dt
+  if (B.relojFoco > 0) return
+  B.relojFoco = 0.25
   const esc = B.esc
-  // a medio camino entre el grueso de la hueste y el corazón de la aldea
-  const x = B.grupo.x * 0.62 + esc.cx * 0.38
-  const z = B.grupo.z * 0.62 + esc.cz * 0.38
-  const medio = (CONFIG.GRID - 1) / 2
-  events.emit(EV.CAMERA_FOCUS, { x: medio + (x - esc.cx), z: medio + (z - esc.cz) })
+  // EL PUNTO CALIENTE ES UN SITIO, NO UN PROMEDIO. Promediando las posiciones de
+  // los que pelean, con la hueste repartida por dos lados la cámara se plantaba
+  // en mitad del patio vacío. Manda el edificio que más golpes está recibiendo:
+  // ahí hay pelea seguro, y de paso se ve contra QUÉ se pelea.
+  let x; let z
+  if (B.marcado && B.marcado.vivo) {
+    x = B.marcado.cx; z = B.marcado.cz
+    // un paso hacia los que pegan, para que entren en cuadro con el edificio
+    let sx = 0; let sz = 0; let n = 0
+    for (const a of B.atacantes) {
+      if (!a.viva || a.objetivo !== B.marcado) continue
+      sx += a.gx; sz += a.gz; n++
+    }
+    if (n) { x = x * 0.55 + (sx / n) * 0.45; z = z * 0.55 + (sz / n) * 0.45 }
+    // y un tirón hacia la plaza: encuadrar la pelea sola deja media pantalla de
+    // prado vacío, porque la pelea siempre pasa en el BORDE del recinto
+    x = x * 0.72 + esc.cx * 0.28
+    z = z * 0.72 + esc.cz * 0.28
+  } else if (B.grupo) {
+    x = B.grupo.x * 0.72 + esc.cx * 0.28
+    z = B.grupo.z * 0.72 + esc.cz * 0.28
+  } else return
+  const wx = x - esc.cx; const wz = z - esc.cz
+  // peleando se cierra el plano (se ven las caras y los golpes); en marcha se
+  // abre, que si no la hueste entra en cuadro de tres en tres
+  const zoom = B.marcado && B.marcado.vivo ? B.zoomBase * 0.7 : B.zoomBase
+  if (Math.abs(zoom - B.camZoom) < 1 && Math.hypot(wx - B.camX, wz - B.camZ) < 2.2) return   // zona muerta: sin esto la vista tiembla
+  B.camX = wx; B.camZ = wz; B.camZoom = zoom
+  enfocarMundo(wx, wz, zoom, zoom * 0.1)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  EL FINAL: estandarte clavado o retirada, y la vuelta a casa con fundido
+// ════════════════════════════════════════════════════════════════════════
+
+/** El estandarte del vencedor, clavado en mitad de la plaza. */
+function plantarEstandarte (nuestro) {
+  const esc = B.esc
+  const g = new THREE.Group()
+  g.add(pieza(G.cilindro, MB.astaEstandarte, { y: 2.1, sx: 0.16, sy: 4.2, sz: 0.16 }))
+  g.add(pieza(G.cono6, mat(PALETA.oro, { emisivo: 0x553300 }), { y: 4.42, sx: 0.26, sy: 0.5, sz: 0.26 }))
+  const tela = pieza(G.caja, nuestro ? MB.telaNuestra : MB.telaSuya, { x: 0.95, y: 3.3, sx: 1.8, sy: 1.3, sz: 0.09 })
+  tela.name = 'tela'
+  g.add(tela)
+  g.add(pieza(G.caja, nuestro ? MB.bordeNuestro : MB.bordeSuyo, { x: 0.95, y: 2.58, sx: 1.8, sy: 0.2, sz: 0.11 }))
+  g.position.set(0, -4.4, 0)
+  // de cara a quien mira: un estandarte de canto no se ve, y es EL remate
+  const cam = ctx.camera
+  if (cam) g.rotation.y = Math.atan2(cam.position.x, cam.position.z)
+  esc.raiz.add(g)
+  B.estandarte = { g, tela, k: 0 }
+  const fx = FX()
+  if (fx) {
+    fx.confeti(0, 0, 46)
+    fx.rayoDeLuz(0, 0, PALETA.oro, 2.6)
+    fx.destello(0, 0, PALETA.oro, 1.6)
+    fx.polvo(0, 0, 18)
+  }
+}
+
+/**
+ * Los vencedores se juntan alrededor del estandarte y vitorean. Antes se
+ * quedaban celebrando cada uno en su esquina y la victoria no se veía.
+ */
+function juntarseAlEstandarte (dtBat, lista) {
+  const esc = B.esc
+  let i = 0
+  for (const a of lista) {
+    const ang = (i / Math.max(1, lista.length)) * Math.PI * 2
+    i++
+    if (!a.viva) continue
+    const rx = esc.cx + Math.cos(ang) * 3.2
+    const rz = esc.cz + Math.sin(ang) * 3.2
+    const vx = rx - a.gx; const vz = rz - a.gz
+    const largo = Math.hypot(vx, vz)
+    if (largo < 0.7) {
+      a.h.estado('celebrando')
+      a.h.mirar(Math.atan2(esc.cx - a.gx, esc.cz - a.gz))
+      continue
+    }
+    a.h.estado('andando')
+    a.h.mirar(Math.atan2(vx, vz))
+    const avance = Math.min(largo, a.vel * 1.4 * dtBat)
+    a.gx += (vx / largo) * avance
+    a.gz += (vz / largo) * avance
+    const w = esc.aMundo(a.gx, a.gz)
+    a.h.ir(w.x, 0, w.z, dtBat / B.velocidad)
+  }
+}
+
+/** Los que quedan vivos se vuelven por donde entraron. Una derrota se VE. */
+function retirarTropa (dtBat) {
+  const esc = B.esc
+  const p = puntoEntrada(esc, B.lado, 0, 3)
+  for (const a of B.atacantes) {
+    if (!a.viva) continue
+    const vx = p.x + a.desvio * 2.4 - a.gx
+    const vz = p.z + a.desvioZ * 2.4 - a.gz
+    const largo = Math.hypot(vx, vz)
+    if (largo < 0.6) { a.h.estado('parado'); continue }
+    a.pegando = false
+    a.h.estado('andando')
+    a.h.mirar(Math.atan2(vx, vz))
+    const avance = Math.min(largo, a.vel * 1.25 * dtBat)
+    a.gx += (vx / largo) * avance
+    a.gz += (vz / largo) * avance
+    const w = esc.aMundo(a.gx, a.gz)
+    a.h.ir(w.x, 0, w.z, dtBat / B.velocidad)
+  }
+}
+
+/** El plano de cierre: se abre, se levanta y gira despacio sobre lo que queda. */
+function planoFinal (dt) {
+  const k = suave(Math.min(1, B.tFase / 4))
+  ctx.camara?.girar(dt * 0.11 * (1 - k * 0.5))
+  inclinarA(B.elevInicial + 0.16, dt, 1.2)
+  // el parte tapa la mitad de abajo: el remate se enfoca ALTO en la pantalla
+  const arriba = -B.zoomBase * 0.3
+  if (B.retirada && B.grupo) {
+    enfocarMundo((B.grupo.x - B.esc.cx) * 0.8, (B.grupo.z - B.esc.cz) * 0.8, B.zoomBase * (1 + 0.12 * k), arriba)
+  } else {
+    enfocarMundo(0, 0, B.zoomBase * (0.95 + 0.15 * k), arriba)
+  }
+}
+
+// ── el fundido: ni entrar ni salir de la batalla es un corte seco ──────────
+let velo = null
+let relojVelo = 0
+
+function ponerVelo () {
+  if (velo) return velo
+  velo = nodo('div', 'bat-velo')
+  document.body.appendChild(velo)
+  return velo
+}
+
+/**
+ * @param {boolean} aNegro true tapa la pantalla, false la descubre
+ * @param {Function} [alAcabar]
+ */
+function fundir (aNegro, alAcabar) {
+  const v = ponerVelo()
+  clearTimeout(relojVelo)
+  if (aNegro) {
+    v.style.transition = `opacity ${SEG_FUNDIDO}s ease-in`
+    v.style.opacity = '1'
+    relojVelo = setTimeout(() => { if (alAcabar) alAcabar() }, SEG_FUNDIDO * 1000)
+    return
+  }
+  // se entra desde negro: el salto aldea -> campo queda escondido dentro del velo
+  v.style.transition = 'none'
+  v.style.opacity = '1'
+  void v.offsetWidth
+  v.style.transition = `opacity ${SEG_FUNDIDO * 1.4}s ease-out`
+  v.style.opacity = '0'
+  relojVelo = setTimeout(() => { velo?.remove(); velo = null; if (alAcabar) alAcabar() }, SEG_FUNDIDO * 1400)
+}
+
+/** Salida con transición: negro, se recoge el campo y la aldea aparece. */
+function salirSuave (silencioso, despues) {
+  if (!B) { if (despues) despues(); return }
+  fundir(true, () => {
+    salir(silencioso)
+    fundir(false)
+    if (despues) despues()
+  })
 }
 
 /** Recoge el campo: las mallas compartidas solo se desenganchan, nunca se liberan. */
@@ -1242,6 +1939,15 @@ function desmontarEscenario () {
   if (!B) return
   limpiarMarcas()
   limpiarActores()
+  for (const apagar of B.fuegos) { try { apagar() } catch { /* ya se apagó */ } }
+  B.fuegos.length = 0
+  // las geometrías de este campo (instancias, peanas) sí son suyas: se liberan
+  for (const m of [B.peanasAtac, B.peanasDef]) {
+    if (!m) continue
+    m.disco.dispose?.()
+    m.aro.dispose?.()
+  }
+  B.esc.raiz.traverse((o) => { if (o.isInstancedMesh) o.dispose?.() })
   if (B.soltarDedo) ctx.renderer?.domElement?.removeEventListener('pointerdown', B.soltarDedo)
   B.esc.raiz.parent?.remove(B.esc.raiz)
 }
@@ -1249,8 +1955,12 @@ function desmontarEscenario () {
 export function salir (silencioso) {
   if (!B) return
   pararReproductor()
+  clearTimeout(B.relojParte)
   if (bajaFrame) { bajaFrame(); bajaFrame = null }
   const alSalir = B.alSalir
+  // la cámara vuelve a la inclinación de jugar: si no, la aldea se queda torcida
+  if (ctx.camara && Math.abs(B.elev - B.elevInicial) > 0.001) ctx.camara.inclinar(B.elevInicial - B.elev)
+  FX()?.batalla(false)
   desmontarEscenario()
   B = null
   capa?.remove()
@@ -1329,10 +2039,37 @@ function cerrarBatalla () {
   B.bajasReales = suma(r.caidos) || B.bajasReales
   refrescarMarcador()
   verFlojos(true)
-  B.siguiendo = false
-  const medio = (CONFIG.GRID - 1) / 2
-  events.emit(EV.CAMERA_FOCUS, { x: medio, z: medio, zoom: Math.max(30, Math.min(60, B.esc.anchoBase * 2.3 + 8)) })
 
+  // --- el desenlace, en el campo: estandarte clavado o retirada por donde se vino ---
+  const atacanteGana = esDefensa ? (r.estrellas || 0) > 0 : !!r.victoria
+  const vencedores = atacanteGana ? B.atacantes : B.defensores
+  const vencidos = atacanteGana ? B.defensores : B.atacantes
+  for (const a of vencedores) if (a.viva) { a.pegando = false; a.h.estado('celebrando') }
+  for (const a of vencidos) if (a.viva) { a.pegando = false; a.h.estado('parado') }
+  B.vencedores = vencedores.filter(a => a.viva).slice(0, 18)   // los que se juntan a vitorear
+  // la enseña del que se queda con la plaza (azul si es la tuya, granate si no)
+  plantarEstandarte(atacanteGana ? !esDefensa : esDefensa)
+  if (!atacanteGana) {
+    // los que asaltaban se vuelven por donde vinieron: una derrota se VE
+    B.retirada = true
+    FX()?.polvo(0, 0, 10)
+  }
+
+  // --- plano de cierre: se levanta y gira despacio sobre lo que ha quedado ---
+  B.fase = 'final'
+  B.tFase = 0
+  B.zoomBase = Math.max(30, Math.min(60, B.esc.anchoBase * 2.3 + 8))
+
+  // El parte NO sale de golpe: primero se ve clavarse el estandarte (o a los
+  // tuyos retirándose). Un pergamino tapando la celebración se la come entera.
+  const mia = B
+  B.relojParte = setTimeout(() => { if (B === mia && B.terminada) mostrarParte() }, 1700)
+}
+
+/** El pergamino del resultado, cuando el campo ya ha contado el final. */
+function mostrarParte () {
+  const r = B.resultado
+  const esDefensa = B.esDefensa
   B.mandos.remove()
   const parte = nodo('div', 'bat-parte')
   const estrellas = r.estrellas || 0
@@ -1470,8 +2207,8 @@ function cerrarBatalla () {
   mandos.style.padding = '8px 0 0'
   const repetir = B.repetir
   mandos.append(
-    boton('🔁', 'Repetir', () => { salir(true); if (repetir) repetir() }),
-    boton('✔', 'Cerrar', () => salir())
+    boton('🔁', 'Repetir', () => salirSuave(true, repetir)),
+    boton('✔', 'Cerrar', () => salirSuave(false))
   )
   parte.appendChild(mandos)
   B.parteNodo = parte
@@ -1587,11 +2324,14 @@ export function init () {
 const API = {
   jugarBatalla, salir, verAsedio, hayAsedioPendiente,
   get activa () { return !!B },
+  /** Mandos sueltos para depurar y para hacer capturas a un momento concreto. */
+  pausar: (si = true) => pausar(si),
+  saltarPresentacion: () => empezarAsalto(),
   /** Sonda para depurar y medir: cuántos hay en el campo y cómo va la cosa. */
   get info () {
     if (!B) return null
     return {
-      t: Math.round(B.t * 10) / 10, velocidad: B.velocidad, terminada: B.terminada,
+      t: Math.round(B.t * 10) / 10, velocidad: B.velocidad, terminada: B.terminada, fase: B.fase,
       atacantes: B.atacantes.length, atacantesVivos: B.atacantes.filter(a => a.viva).length,
       defensores: B.defensores.length, defensoresVivos: B.defensores.filter(d => d.viva).length,
       edificios: B.esc.eds.length, enPie: B.esc.eds.filter(e => e.vivo).length,

@@ -11,6 +11,7 @@
 import { events, EV } from '../core/events.js'
 import { game } from '../core/state.js'
 import { ICONO } from '../core/config.js'
+import { limitesDelTerritorio } from '../core/grid.js'
 import { UNIDADES, PIEDRA_PAPEL } from '../data/units.js'
 import { EDIFICIOS, valorEdificio } from '../data/buildings.js'
 import * as UI from './styles.js'
@@ -43,9 +44,14 @@ let parteDefensa = null     // el parte del último asedio recibido, hasta que l
 // --- lo que dura un asalto: se limpia al cerrar ---
 let rival = null            // { enemigo, etiqueta, ratio, recompensa, consejo }
 let seleccion = {}          // { lancero: 6, ... }
+let modoSeleccion = 'ataque' // 'ataque' = solo los escuadrones que salen; 'todo' = vaciar la aldea
 let lado = 'sur'
 let reproduccion = null     // handle de combat.reproducir
 let animacion = 0           // setInterval del canvas
+
+// --- escuadrones ---
+let reparto = null          // { de, a, mueve:{lancero:2} } el traspaso que se está preparando
+let plantando = null        // { id, nombre, x, z, barra, quitarTap } buscando sitio en la aldea
 
 // ------------------------------------------------------------- utilidades ---
 
@@ -124,8 +130,23 @@ function reloj (fn) { relojes.push(fn); try { fn() } catch { /* da igual */ } }
 
 export function init () {
   events.on(EV.UI_PANEL, (p = {}) => {
-    if (p.panel === 'ejercito' || p.panel === 'army') abrir(p.datos)
+    if (p.panel === 'ejercito' || p.panel === 'army') { salirDePlantar(true); quitarBarraHecho(); abrir(p.datos) }
     else if (p.panel === null && panel) panel.cerrar()
+    else if (p.panel && p.panel !== 'ejercito' && p.panel !== 'army') { salirDePlantar(true); quitarBarraHecho() }
+  })
+
+  // Otro panel entra a colocar algo (una obra, un traslado): aquí se recoge la
+  // mesa, que dos fantasmas a la vez no los entiende nadie.
+  events.on(EV.BUILD_MODE, (p) => {
+    if (!plantando) return
+    if (p && p.activo && p.escuadron !== plantando.id) salirDePlantar(true)
+  })
+
+  // el reparto cambia por otros sitios (entrenas, curas, te matan gente)
+  events.on(EV.ESCUADRONES_CAMBIADOS, () => { if (panel && solapa === 'escuadrones' && !reparto) pintar() })
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && plantando) { e.preventDefault(); salirDePlantar() }
   })
 
   events.on(EV.ATTACK_INCOMING, (p = {}) => {
@@ -158,14 +179,17 @@ function abrir (datos = {}) {
   if (panel) { if (datos && datos.solapa) { solapa = datos.solapa; pintar() } return }
   solapa = datos?.solapa || 'tropas'
   rival = null
+  reparto = null
   seleccion = {}
+  modoSeleccion = 'ataque'
 
   nav = pestañas([
     { id: 'tropas', texto: 'Tropa' },
+    { id: 'escuadrones', texto: 'Escuadrones' },
     { id: 'entrenar', texto: 'Entrenar' },
     { id: 'atacar', texto: 'Atacar' },
     { id: 'defensa', texto: 'Defensa' }
-  ], (id) => { solapa = id; pintar() })
+  ], (id) => { solapa = id; reparto = null; pintar() })
 
   const cuerpo = el('div', { clase: 'col' })
 
@@ -195,6 +219,7 @@ function pintar () {
   if (solapa !== 'atacar') pararBatalla()
 
   if (solapa === 'tropas') vistaTropas(zona)
+  else if (solapa === 'escuadrones') { if (reparto) vistaReparto(zona); else vistaEscuadrones(zona) }
   else if (solapa === 'entrenar') vistaEntrenar(zona)
   else if (solapa === 'atacar') vistaAtacar(zona)
   else vistaDefensa(zona)
@@ -267,10 +292,633 @@ function vistaTropas (zona) {
   }
   zona.appendChild(lista)
 
+  // el reparto en escuadrones es lo que decide la defensa: que se vea desde aquí
+  const esc = listaEscuadrones()
+  if (esc.length) {
+    const sin = flancosDescubiertos(esc)
+    zona.appendChild(el('button', {
+      clase: sin.length ? 'btn btn-peligro btn-gordo' : 'btn btn-piedra btn-gordo', type: 'button',
+      texto: sin.length ? `🚩 Nadie guarda el ${sin[0]}: reparte tu hueste` : `🚩 Tus ${esc.length} escuadrones`,
+      onclick: () => { solapa = 'escuadrones'; reparto = null; pintar() }
+    }))
+  }
+
   zona.appendChild(el('button', {
     clase: 'btn btn-oro btn-gordo', type: 'button', texto: '⚒️ Entrenar más tropa',
     onclick: () => { solapa = 'entrenar'; pintar() }
   }))
+}
+
+/* ===========================================================================
+   1 bis. ESCUADRONES — repartir la hueste y plantarla en los flancos
+   ===========================================================================
+   La hueste dejó de ser un montón: son varias formaciones con nombre, cometido
+   y SITIO. Y el sitio es lo que decide la defensa, no el número: el mismo
+   asedio por el norte con la tropa al norte se salda con el 12 % de la aldea
+   arrasada; con esa misma tropa al sur, se pierde entera. Toda esta pestaña
+   existe para que el jugador entienda eso ANTES de que se lo enseñe el humo.
+   =========================================================================== */
+
+/** Los mismos seis tonos que render/units.js le pone al paño de cada estandarte. */
+const COLORES_ESCUADRON = ['#1e88e5', '#ffc107', '#3f9d6b', '#7e57c2', '#4f9e8b', '#c98a4b']
+/** El color va pegado al ID, igual que en el render: disolver uno no repinta a los demás. */
+function colorEscuadron (id, i = 0) {
+  const m = /(\d+)/.exec(String(id || ''))
+  const k = m ? Number(m[1]) - 1 : i
+  const n = COLORES_ESCUADRON.length
+  return COLORES_ESCUADRON[((k % n) + n) % n]
+}
+
+const FLANCOS = ['norte', 'este', 'sur', 'oeste']
+const FLECHA = { norte: '⬆️', sur: '⬇️', este: '➡️', oeste: '⬅️', centro: '⭕' }
+/** Lo que sim/combat da por "estaba ahí": más de esto es llegar con la pelea empezada. */
+const SEG_A_TIEMPO = 6
+/** Mismos números que sim/combat.js: 1,6 casillas por segundo y tope de 45 s. */
+const AVISO_CASILLAS_SEG = 1.6
+const REACCION_MAX = 45
+
+const listaEscuadrones = () => pedir(Ejercito, 'escuadrones', [], []) || []
+const flancoDe = (x, z) => pedir(Ejercito, 'flancoDe', [x, z], 'centro') || 'centro'
+
+/** Por dónde entra una hueste que ataca por ese flanco (como en sim/combat.js). */
+function puntoEntrada (flanco) {
+  const l = limitesDelTerritorio(game.state)
+  const cx = (l.x0 + l.x1) / 2
+  const cz = (l.z0 + l.z1) / 2
+  if (flanco === 'norte') return { x: cx, z: l.z0 + 1 }
+  if (flanco === 'sur') return { x: cx, z: l.z1 - 1 }
+  if (flanco === 'este') return { x: l.x1 - 1, z: cz }
+  return { x: l.x0 + 1, z: cz }
+}
+
+/**
+ * SEGUNDOS DE REACCIÓN: lo que tarda ese puesto en entrar en la pelea si la
+ * hueste entra por ese flanco. Es la cuenta EXACTA que hace el motor de
+ * combate, no una aproximación bonita: si aquí pone 14 s, en la batalla son 14.
+ */
+function segundosHasta (puesto, flanco) {
+  const e = puntoEntrada(flanco)
+  return Math.min(REACCION_MAX, Math.hypot((puesto?.x ?? 0) - e.x, (puesto?.z ?? 0) - e.z) / AVISO_CASILLAS_SEG)
+}
+
+/**
+ * Quién guarda cada flanco: el escuadrón de DEFENSA con gente en casa que antes
+ * llegaría. `guardado` es el que está ahí de verdad, no el que llega tarde.
+ * @param {Array} [lista] para simular un puesto antes de confirmarlo
+ */
+function coberturaDeFlancos (lista = listaEscuadrones()) {
+  const salida = {}
+  for (const f of FLANCOS) {
+    let mejor = null
+    for (const q of lista) {
+      if (q.cometido !== 'defensa' || !q.totalEnCasa) continue
+      const s = segundosHasta(q.puesto, f)
+      if (!mejor || s < mejor.segundos) mejor = { escuadron: q, segundos: s }
+    }
+    salida[f] = mejor ? { ...mejor, guardado: mejor.segundos <= SEG_A_TIEMPO } : null
+  }
+  return salida
+}
+
+/** La lista de escuadrones como quedaría si ESE se plantara en esa casilla. */
+function listaSimulada (id, x, z) {
+  return listaEscuadrones().map(q => q.id === id
+    ? { ...q, puesto: { x, z }, flanco: flancoDe(x, z) }
+    : q)
+}
+
+/** Los flancos que quedarían sin nadie que llegue a tiempo. */
+const flancosDescubiertos = (lista) => FLANCOS.filter(f => !coberturaDeFlancos(lista)[f]?.guardado)
+
+/** «el este, el sur y el oeste» — una lista que se lee, no un "y" detrás de otro. */
+function enumerar (lista, articulo = 'el ') {
+  const l = lista.map(x => `${articulo}${x}`)
+  if (l.length <= 1) return l[0] || ''
+  return `${l.slice(0, -1).join(', ')} y ${l[l.length - 1]}`
+}
+
+/** La tropa de un escuadrón en iconos: `🗡️ 6 · 🏹 3`. */
+function tropaEnLinea (tropas) {
+  const partes = []
+  for (const [t, n] of Object.entries(tropas || {})) {
+    if (!n) continue
+    partes.push(`${UNIDADES[t]?.icono || '🧍'} ${n}`)
+  }
+  return partes.length ? partes.join('  ·  ') : 'sin nadie dentro'
+}
+
+/** Cuadrito de color del escuadrón: lo que lo empareja con su estandarte en la aldea. */
+const marcaColor = (color, lado = 18) => el('i', {
+  estilo: {
+    width: `${lado}px`, height: `${lado}px`, borderRadius: '4px', flex: 'none',
+    background: color, border: '2px solid rgba(40,25,15,.5)', display: 'inline-block'
+  }
+})
+
+// ------------------------------------------------------------- la pestaña ---
+
+function vistaEscuadrones (zona) {
+  const lista = listaEscuadrones()
+  if (!lista.length) {
+    zona.appendChild(el('div', { clase: 'panel tenue', texto: 'La hueste no se puede repartir ahora mismo.' }))
+    return
+  }
+  const cob = coberturaDeFlancos(lista)
+  const enCasa = lista.reduce((a, q) => a + q.totalEnCasa, 0)
+  const acogida = lista.find(q => q.acogida) || lista[0]
+  const sinRepartir = acogida ? acogida.totalEnCasa : 0
+  const descubiertos = FLANCOS.filter(f => !cob[f]?.guardado)
+
+  // --- la brújula: por dónde estás guardado y por dónde no ---
+  const brujula = el('div', { clase: 'panel col' }, [
+    el('div', { clase: 'fila fila-sep' }, [
+      el('span', { clase: 'titular', texto: '🧭 Tus flancos' }),
+      chip('🛡️', `${4 - descubiertos.length}/4 guardados`, { tono: descubiertos.length ? (descubiertos.length >= 3 ? 'mal' : '') : 'bien' })
+    ])
+  ])
+  for (const f of FLANCOS) {
+    const c = cob[f]
+    const texto = !c
+      ? 'nadie: no tienes tropa de defensa en casa'
+      : c.guardado
+        ? `${c.escuadron.nombre} · está ahí mismo`
+        : `${c.escuadron.nombre} tarda ${Math.round(c.segundos)} s en llegar`
+    brujula.appendChild(el('div', { clase: 'fila fila-sep', estilo: { gap: '8px' } }, [
+      el('span', { estilo: { fontWeight: '800', flex: 'none', minWidth: '92px' }, texto: `${FLECHA[f]} ${f[0].toUpperCase()}${f.slice(1)}` }),
+      el('span', { clase: 'pequeño crece', estilo: { textAlign: 'right', color: c?.guardado ? '' : 'var(--rojo-oscuro)' }, texto })
+    ]))
+  }
+  brujula.appendChild(el('div', {
+    clase: 'pequeño',
+    estilo: { lineHeight: '1.35', borderTop: '2px dashed rgba(90,58,34,.25)', paddingTop: '8px' },
+    texto: descubiertos.length
+      ? `⚠️ Si entran por ${enumerar(descubiertos)}, tu tropa llega con la batalla empezada. Plántala en ese lado.`
+      : '✅ Entren por donde entren, tienes gente peleando desde el primer segundo.'
+  }))
+  zona.appendChild(brujula)
+
+  // --- cuánta gente hay y cuánta sigue sin repartir ---
+  zona.appendChild(el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } }, [
+    chip('🧍', `${enCasa} en casa`, { tono: enCasa ? '' : 'mal' }),
+    chip('🚩', `${lista.length} ${lista.length === 1 ? 'escuadrón' : 'escuadrones'}`, {}),
+    chip('🏠', sinRepartir ? `${sinRepartir} sin repartir` : 'todo repartido', { tono: sinRepartir ? 'oro' : 'bien' })
+  ]))
+  if (sinRepartir && lista.length > 1) {
+    zona.appendChild(el('div', {
+      clase: 'pequeño tenue', estilo: { lineHeight: '1.35' },
+      texto: `Los ${sinRepartir} de ${acogida.nombre} son los que todavía no has mandado a ningún flanco: ahí caen los reclutas nuevos.`
+    }))
+  }
+
+  // --- una tarjeta por escuadrón ---
+  for (const q of lista) zona.appendChild(tarjetaEscuadron(q, cob))
+
+  // --- levantar uno nuevo ---
+  const tope = lista.length >= 6
+  zona.appendChild(el('div', { clase: 'panel col' }, [
+    el('div', { clase: 'titular', texto: '➕ Levantar otro escuadrón' }),
+    el('div', { clase: 'pequeño tenue', estilo: { lineHeight: '1.35' }, texto: tope ? 'Seis es el tope: más formaciones no se gobiernan con el dedo.' : 'Nace vacío y en un flanco libre. Luego le mandas tropa y lo plantas donde quieras.' }),
+    el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
+      el('button', {
+        clase: 'btn btn-piedra', type: 'button', texto: '🛡️ De defensa', disabled: tope,
+        estilo: { minHeight: '48px' },
+        onclick: () => crear('defensa')
+      }),
+      el('button', {
+        clase: 'btn btn-piedra', type: 'button', texto: '⚔️ De ataque', disabled: tope,
+        estilo: { minHeight: '48px' },
+        onclick: () => crear('ataque')
+      })
+    ])
+  ]))
+
+  function crear (cometido) {
+    const r = pedir(Ejercito, 'crearEscuadron', ['', cometido], { ok: false, motivo: 'No se pudo' })
+    if (!r || !r.ok) { toast(r?.motivo || 'No se pudo levantar', 'mal'); return }
+    pintar()
+  }
+}
+
+/** Una formación: quién es, qué lleva, dónde está y qué se puede hacer con ella. */
+function tarjetaEscuadron (q, cob) {
+  const color = colorEscuadron(q.id)
+  const ataca = q.cometido === 'ataque'
+  const caja = el('div', { clase: 'tarjeta col', estilo: { borderLeft: `6px solid ${color}`, gap: '8px' } })
+
+  caja.appendChild(el('div', { clase: 'fila fila-sep', estilo: { gap: '8px' } }, [
+    el('div', { clase: 'fila', estilo: { gap: '8px', alignItems: 'center', minWidth: '0' } }, [
+      marcaColor(color),
+      el('span', { clase: 'tarjeta-nombre', texto: q.nombre })
+    ]),
+    chip(ataca ? '⚔️' : '🛡️', ataca ? 'ataque' : 'defensa', { tono: ataca ? 'oro' : 'bien' })
+  ]))
+
+  // dónde está plantado y qué significa
+  const sug = ataca
+    ? 'Sale a los asaltos: no cuenta como guardia de la aldea.'
+    : cob[q.flanco]?.escuadron?.id === q.id
+      ? `Guarda el flanco ${q.flanco}: si entran por ahí, pelea desde el primer segundo.`
+      : `Está en el ${q.flanco}. Si entran por otro lado, tarda en llegar.`
+  caja.appendChild(el('div', { clase: 'col', estilo: { gap: '2px' } }, [
+    el('div', { clase: 'tarjeta-detalle', texto: `${FLECHA[q.flanco] || '⭕'} casilla ${q.puesto.x},${q.puesto.z}${q.fijado ? '' : ' · puesto automático'}` }),
+    el('div', { clase: 'pequeño', estilo: { lineHeight: '1.3' }, texto: sug })
+  ]))
+
+  caja.appendChild(el('div', { clase: 'panel', estilo: { padding: '8px 10px', margin: '0' } }, [
+    el('div', { clase: 'pequeño', estilo: { fontWeight: '800' }, texto: tropaEnLinea(q.enCasa) })
+  ]))
+
+  caja.appendChild(el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } }, [
+    chip('🧍', `${q.totalEnCasa} en casa`, { tono: q.totalEnCasa ? '' : 'mal' }),
+    chip('💪', formatoNumero(q.poder), { tono: 'oro' }),
+    q.total > q.totalEnCasa ? chip('🚩', `${q.total - q.totalEnCasa} fuera`, {}) : null,
+    q.acogida ? chip('🏠', 'reserva', {}) : null
+  ]))
+
+  if (!ataca && !q.totalEnCasa) {
+    caja.appendChild(el('div', { clase: 'pequeño no-alcanzable', texto: '⚠️ Está vacío: ese flanco no lo guarda nadie.' }))
+  }
+
+  caja.appendChild(el('button', {
+    clase: 'btn btn-oro btn-gordo', type: 'button', texto: '🚩 Plantar aquí en el mapa',
+    estilo: { minHeight: '52px' },
+    onclick: () => plantarEnMapa(q.id)
+  }))
+
+  caja.appendChild(el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
+    el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '🔀 Repartir tropa',
+      estilo: { minHeight: '48px' },
+      onclick: () => { reparto = { de: q.id, a: null, mueve: {} }; pintar() }
+    }),
+    el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: ataca ? '🛡️ Que se quede' : '⚔️ Que salga',
+      estilo: { minHeight: '48px' },
+      onclick: () => {
+        const r = pedir(Ejercito, 'fijarCometido', [q.id, ataca ? 'defensa' : 'ataque'], { ok: false, motivo: 'No se pudo' })
+        if (!r || !r.ok) { toast(r?.motivo || 'No se pudo', 'mal'); return }
+        pintar()
+      }
+    })
+  ]))
+
+  caja.appendChild(el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' } }, [
+    el('button', {
+      clase: 'btn btn-fantasma', type: 'button', texto: '👁️ Ver',
+      estilo: { minHeight: '48px' },
+      onclick: () => {
+        events.emit(EV.CAMERA_FOCUS, { x: q.puesto.x, z: q.puesto.z, zoom: 26 })
+        panel?.cerrar()
+      }
+    }),
+    el('button', {
+      clase: 'btn btn-fantasma', type: 'button', texto: '✏️ Nombre',
+      estilo: { minHeight: '48px' },
+      onclick: () => pedirNombre(q)
+    }),
+    el('button', {
+      clase: 'btn btn-fantasma', type: 'button', texto: '🗑️ Disolver',
+      estilo: { minHeight: '48px' },
+      onclick: async () => {
+        if (!await confirmar({
+          titulo: `Disolver ${q.nombre}`,
+          texto: q.total ? `Sus ${q.total} soldados pasan al primer escuadrón. No se pierde a nadie.` : 'No lleva a nadie dentro.',
+          si: 'Disolver', no: 'Dejarlo'
+        })) return
+        const r = pedir(Ejercito, 'borrarEscuadron', [q.id], { ok: false, motivo: 'No se pudo' })
+        if (!r || !r.ok) { toast(r?.motivo || 'No se pudo', 'mal'); return }
+        pintar()
+      }
+    })
+  ]))
+
+  return caja
+}
+
+/** Nombre nuevo, con cuatro sugerencias para no pelearse con el teclado. */
+const NOMBRES_SUGERIDOS = ['La Guardia', 'Hueste del Norte', 'Los del Vado', 'Mesnada Vieja', 'Lobos del Sur', 'La Reserva']
+function pedirNombre (q) {
+  const campo = el('input', {
+    type: 'text', valor: q.nombre, maxlength: '24',
+    estilo: {
+      width: '100%', minHeight: '52px', fontSize: '1.05em', padding: '0 12px',
+      borderRadius: '12px', border: '2px solid rgba(90,58,34,.35)', font: 'inherit', boxSizing: 'border-box'
+    }
+  })
+  const sugerencias = el('div', { clase: 'fila', estilo: { flexWrap: 'wrap', gap: '6px' } })
+  for (const n of NOMBRES_SUGERIDOS) {
+    sugerencias.appendChild(el('button', {
+      clase: 'btn btn-fantasma', type: 'button', texto: n,
+      estilo: { minHeight: '44px', padding: '0 12px', fontSize: '.85em' },
+      onclick: () => { campo.value = n }
+    }))
+  }
+  const guardar = () => {
+    const r = pedir(Ejercito, 'renombrarEscuadron', [q.id, campo.value], { ok: false, motivo: 'Ponle un nombre' })
+    if (!r || !r.ok) { toast(r?.motivo || 'Ponle un nombre', 'mal'); return }
+    sub.cerrar()
+    toast(`Ahora se llama ${r.nombre}`, 'bien', 1600)
+    pintar()
+  }
+  const sub = hoja({
+    titulo: '✏️ Nombre del escuadrón',
+    contenido: [
+      el('div', { clase: 'pequeño tenue', estilo: { lineHeight: '1.35' }, texto: 'Ponle uno que reconozcas de un vistazo: es el que sale en el parte de la batalla.' }),
+      campo,
+      sugerencias
+    ],
+    pie: [el('button', { clase: 'btn btn-oro btn-gordo', type: 'button', texto: 'Guardar', estilo: { minHeight: '52px', width: '100%' }, onclick: guardar })]
+  })
+  campo.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); guardar() } })
+  setTimeout(() => { try { campo.focus(); campo.select() } catch { /* da igual */ } }, 80)
+}
+
+// -------------------------------------------------------------- repartir ---
+
+/**
+ * Pasar gente de un escuadrón a otro. Se prepara entero aquí y se manda de UNA
+ * llamada a `moverTropas()`: así el censo nunca se queda a medias y el render
+ * no repinta la aldea en cada toquecito del dedo.
+ */
+function vistaReparto (zona) {
+  const lista = listaEscuadrones()
+  const de = lista.find(q => q.id === reparto.de)
+  if (!de) { reparto = null; vistaEscuadrones(zona); return }
+  const otros = lista.filter(q => q.id !== de.id)
+
+  zona.appendChild(el('div', { clase: 'fila fila-sep' }, [
+    el('button', { clase: 'btn btn-fantasma', type: 'button', texto: '‹ Escuadrones', estilo: { minHeight: '48px' }, onclick: () => { reparto = null; pintar() } }),
+    el('span', { clase: 'titular', texto: 'Repartir tropa' })
+  ]))
+
+  if (!otros.length) {
+    zona.appendChild(el('div', { clase: 'panel col' }, [
+      el('div', { clase: 'titular', texto: 'Solo tienes un escuadrón' }),
+      el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: 'Para repartir hace falta otro al que mandar la gente. Levanta uno y vuelve.' }),
+      el('button', {
+        clase: 'btn btn-oro btn-gordo', type: 'button', texto: '➕ Levantar otro escuadrón',
+        onclick: () => {
+          const r = pedir(Ejercito, 'crearEscuadron', ['', 'defensa'], { ok: false, motivo: 'No se pudo' })
+          if (!r || !r.ok) { toast(r?.motivo || 'No se pudo', 'mal'); return }
+          reparto.a = r.escuadron?.id || null
+          pintar()
+        }
+      })
+    ]))
+    return
+  }
+
+  if (!otros.some(q => q.id === reparto.a)) { reparto.a = otros[0].id; reparto.mueve = {} }
+  const a = otros.find(q => q.id === reparto.a)
+
+  // --- de quién a quién ---
+  const cabecera = el('div', { clase: 'panel col' }, [
+    el('div', { clase: 'fila', estilo: { gap: '8px', alignItems: 'center' } }, [
+      marcaColor(colorEscuadron(de.id), 16),
+      el('span', { estilo: { fontWeight: '800' }, texto: de.nombre }),
+      el('span', { clase: 'tenue', texto: '→' }),
+      marcaColor(colorEscuadron(a.id), 16),
+      el('span', { estilo: { fontWeight: '800' }, texto: a.nombre })
+    ]),
+    el('div', { clase: 'pequeño tenue', texto: otros.length > 1 ? 'Elige a quién se la mandas:' : '' })
+  ])
+  if (otros.length > 1) {
+    const fila = el('div', { clase: 'fila', estilo: { flexWrap: 'wrap', gap: '6px' } })
+    for (const q of otros) {
+      fila.appendChild(el('button', {
+        clase: q.id === a.id ? 'btn btn-oro' : 'btn btn-piedra', type: 'button',
+        estilo: { minHeight: '48px', padding: '0 12px', fontSize: '.9em' },
+        texto: `${q.cometido === 'ataque' ? '⚔️' : '🛡️'} ${q.nombre}`,
+        onclick: () => { reparto.a = q.id; reparto.mueve = {}; pintar() }
+      }))
+    }
+    cabecera.appendChild(fila)
+  }
+  zona.appendChild(cabecera)
+
+  // --- atajos ---
+  const tipos = Object.keys(de.tropas || {}).filter(t => de.tropas[t] > 0)
+  const aplicar = (f) => { for (const t of tipos) { const v = f(de.tropas[t]); if (v > 0) reparto.mueve[t] = v; else delete reparto.mueve[t] } pintar() }
+  zona.appendChild(el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' } }, [
+    el('button', { clase: 'btn btn-piedra', type: 'button', texto: '½ La mitad', estilo: { minHeight: '48px' }, disabled: !tipos.length, onclick: () => aplicar(n => Math.floor(n / 2)) }),
+    el('button', { clase: 'btn btn-piedra', type: 'button', texto: '⬆️ Vaciar', estilo: { minHeight: '48px' }, disabled: !tipos.length, onclick: () => aplicar(n => n) }),
+    el('button', { clase: 'btn btn-fantasma', type: 'button', texto: '↩️ Ninguno', estilo: { minHeight: '48px' }, disabled: !tipos.length, onclick: () => aplicar(() => 0) })
+  ]))
+
+  if (!tipos.length) {
+    zona.appendChild(el('div', { clase: 'panel tenue', texto: `${de.nombre} no tiene a nadie dentro.` }))
+    return
+  }
+
+  // --- una fila por tipo ---
+  const resumen = el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } })
+  const botonMandar = el('button', { clase: 'btn btn-oro btn-gordo', type: 'button', texto: '', estilo: { minHeight: '54px' } })
+
+  function refrescar () {
+    vaciar(resumen)
+    const van = suma(reparto.mueve)
+    const quedan = suma(de.tropas) - van
+    resumen.append(
+      chip('🏠', `${quedan} quedan en ${de.nombre}`, { tono: quedan ? '' : 'mal' }),
+      chip('➡️', `${van} van a ${a.nombre}`, { tono: van ? 'bien' : '' })
+    )
+    botonMandar.textContent = van ? `Mandar ${van} ${van === 1 ? 'soldado' : 'soldados'} a ${a.nombre}` : 'Elige a cuántos mandas'
+    botonMandar.disabled = !van
+  }
+
+  const filas = el('div', { clase: 'col' })
+  for (const t of tipos) {
+    const u = UNIDADES[t]
+    const tope = de.tropas[t]
+    const num = el('span', { clase: 'num', estilo: { flex: 'none', minWidth: '44px', textAlign: 'center', fontSize: '1.15em' }, texto: `${reparto.mueve[t] || 0}` })
+    const cambiar = (d) => {
+      const v = Math.max(0, Math.min(tope, (reparto.mueve[t] || 0) + d))
+      if (v) reparto.mueve[t] = v; else delete reparto.mueve[t]
+      num.textContent = `${v}`
+      refrescar()
+    }
+    filas.appendChild(el('div', { clase: 'tarjeta', estilo: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, [
+      el('div', { clase: 'tarjeta-icono', texto: u?.icono || '🧍' }),
+      el('div', { clase: 'tarjeta-cuerpo col crece', estilo: { gap: '0' } }, [
+        el('div', { clase: 'tarjeta-nombre', texto: u?.nombre || t }),
+        el('div', { clase: 'tarjeta-detalle', texto: `${tope} en ${de.nombre}` })
+      ]),
+      el('button', { clase: 'btn btn-piedra', type: 'button', texto: '−', estilo: { flex: 'none', width: '48px', minHeight: '48px', padding: '0', fontSize: '1.3em' }, onclick: () => cambiar(-1) }),
+      num,
+      el('button', { clase: 'btn btn-piedra', type: 'button', texto: '+', estilo: { flex: 'none', width: '48px', minHeight: '48px', padding: '0', fontSize: '1.3em' }, onclick: () => cambiar(1) })
+    ]))
+  }
+  zona.append(filas, el('div', { clase: 'panel col' }, [resumen, botonMandar]))
+
+  botonMandar.addEventListener('click', () => {
+    const van = suma(reparto.mueve)
+    if (!van) return
+    const r = pedir(Ejercito, 'moverTropas', [de.id, a.id, reparto.mueve], { ok: false, motivo: 'No se pudo' })
+    if (!r || !r.ok) { toast(r?.motivo || 'No se pudo repartir', 'mal'); return }
+    toast(`${van} ${van === 1 ? 'soldado pasa' : 'soldados pasan'} a ${a.nombre}`, 'bien')
+    reparto = null
+    pintar()
+  })
+  refrescar()
+}
+
+// ------------------------------------------ plantar un escuadrón en el mapa ---
+
+/**
+ * COLOCAR EN LA ALDEA. El panel se quita de en medio, la aldea se queda a la
+ * vista y el dedo elige la casilla: es el mismo flujo que el fantasma de obra
+ * (BUILD_MODE congela la cámara y enciende la rejilla, GRID_TAP va diciendo
+ * dónde está el dedo) y se confirma con un botón, no con el toque, para que no
+ * se plante la tropa de un roce.
+ */
+function plantarEnMapa (id) {
+  const q = listaEscuadrones().find(e => e.id === id)
+  if (!q) return
+  salirDePlantar(true)
+  quitarBarraHecho()
+  plantando = { id, nombre: q.nombre, cometido: q.cometido, x: q.puesto.x, z: q.puesto.z, barra: null, hecho: false }
+  panel?.cerrar()
+  events.emit(EV.BUILD_MODE, { activo: true, tipo: null, escuadron: id, ancho: 1, alto: 1 })
+  events.emit(EV.CAMERA_FOCUS, { x: q.puesto.x, z: q.puesto.z, zoom: 34 })
+  plantando.quitarTap = events.on(EV.GRID_TAP, (p) => {
+    if (!plantando || !p) return
+    plantando.x = p.x | 0
+    plantando.z = p.z | 0
+    refrescarBarraPlantar()
+  })
+  crearBarraPlantar()
+  toast(`Toca la casilla donde plantas a ${q.nombre}`, 'info', 2600)
+}
+
+function salirDePlantar (silencioso = false) {
+  if (!plantando) return
+  const p = plantando
+  plantando = null
+  p.quitarTap?.()
+  p.barra?.caja.remove()
+  events.emit(EV.BUILD_MODE, { activo: false, tipo: null, escuadron: null })
+  if (!silencioso && !p.hecho) toast(`${p.nombre} se queda donde estaba`, 'info', 1600)
+}
+
+/** Cajón de fondo fijo para las dos barras flotantes: la del HUD, con sus márgenes. */
+function cajaFlotante (color) {
+  return el('div', {
+    clase: 'panel',
+    estilo: {
+      position: 'fixed', left: '0', right: '0', bottom: '0', zIndex: '55',
+      borderRadius: 'var(--r-g) var(--r-g) 0 0', borderBottom: 'none',
+      borderTop: `5px solid ${color}`,
+      padding: '10px 12px',
+      paddingBottom: 'calc(10px + var(--seg-abajo))',
+      paddingLeft: 'calc(12px + var(--seg-izq))', paddingRight: 'calc(12px + var(--seg-der))',
+      boxShadow: 'var(--sombra-flotante)'
+    }
+  })
+}
+
+function crearBarraPlantar () {
+  const color = colorEscuadron(plantando.id)
+  const raiz = document.getElementById('hud') || document.body
+  const caja = cajaFlotante(color)
+
+  const flancoTxt = el('div', { estilo: { fontWeight: '800', fontSize: '1.05em' } })
+  const casillaTxt = el('div', { clase: 'pequeño tenue' })
+  const avisoTxt = el('div', { clase: 'pequeño', estilo: { lineHeight: '1.35', marginBottom: '8px' } })
+
+  caja.appendChild(el('div', { clase: 'fila', estilo: { gap: '10px', marginBottom: '6px', alignItems: 'center' } }, [
+    marcaColor(color, 22),
+    el('div', { clase: 'crece col', estilo: { gap: '0' } }, [
+      el('div', { estilo: { fontWeight: '800' }, texto: plantando.nombre }),
+      flancoTxt, casillaTxt
+    ])
+  ]))
+  caja.appendChild(avisoTxt)
+
+  const confirmarBtn = el('button', {
+    clase: 'btn btn-oro', type: 'button', texto: 'Plantar aquí',
+    estilo: { minHeight: '56px', width: '100%', fontSize: '1.02em' },
+    onclick: () => confirmarPlantar()
+  })
+  caja.appendChild(el('div', { estilo: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px' } }, [
+    el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '✕', 'aria-label': 'Cancelar',
+      estilo: { minWidth: '56px', minHeight: '56px', fontSize: '1.2em' },
+      onclick: () => { salirDePlantar(); events.emit(EV.UI_PANEL, { panel: 'ejercito', datos: { solapa: 'escuadrones' } }) }
+    }),
+    confirmarBtn
+  ]))
+
+  raiz.appendChild(caja)
+  plantando.barra = { caja, flancoTxt, casillaTxt, avisoTxt, confirmarBtn }
+  refrescarBarraPlantar()
+}
+
+function refrescarBarraPlantar () {
+  if (!plantando || !plantando.barra) return
+  const b = plantando.barra
+  const { id, x, z } = plantando
+  const flanco = flancoDe(x, z)
+  const esDefensa = plantando.cometido !== 'ataque'
+
+  b.flancoTxt.textContent = `${FLECHA[flanco] || '⭕'} mirando al flanco ${flanco}`
+  b.casillaTxt.textContent = `casilla ${x}, ${z}`
+
+  const simulada = listaSimulada(id, x, z)
+  const sin = flancosDescubiertos(simulada)
+  const tardaAqui = Math.round(segundosHasta({ x, z }, flanco))
+
+  if (!esDefensa) {
+    b.avisoTxt.textContent = '⚔️ Es un escuadrón de ataque: saldrá a los asaltos y no guardará este flanco.'
+    b.avisoTxt.style.color = ''
+  } else if (sin.length) {
+    // el precio exacto de mirar al lado que no es, en segundos
+    const peor = sin.reduce((m, f) => {
+      const s = Math.round(segundosHasta({ x, z }, f))
+      return s > m.s ? { f, s } : m
+    }, { f: sin[0], s: -1 })
+    b.avisoTxt.textContent = `⚠️ Así te quedas sin guardia en ${enumerar(sin)}. Si entran por el ${peor.f}, desde aquí tardas ${peor.s} s en llegar: para entonces ya están dentro.`
+    b.avisoTxt.style.color = 'var(--rojo-oscuro)'
+  } else {
+    b.avisoTxt.textContent = `✅ Aquí llega a tiempo por el ${flanco} (${tardaAqui} s) y ningún flanco se queda solo.`
+    b.avisoTxt.style.color = ''
+  }
+}
+
+function confirmarPlantar () {
+  if (!plantando) return
+  const { id, x, z, nombre } = plantando
+  const r = pedir(Ejercito, 'fijarPuestoEscuadron', [id, x, z], { ok: false, motivo: 'No se pudo plantar ahí' })
+  if (!r || !r.ok) { toast(r?.motivo || 'Ahí no se puede', 'mal'); return }
+  plantando.hecho = true
+  salirDePlantar(true)
+  // sim/army.js ya ha cantado dónde se ha plantado; aquí solo se ofrece el
+  // siguiente paso sin tapar la aldea, que es lo que el jugador quiere ver.
+  barraHecho(`🚩 ${nombre} guarda el flanco ${flancoDe(r.x, r.z)}`)
+}
+
+let barraHechoNodo = null
+function quitarBarraHecho () { barraHechoNodo?.remove(); barraHechoNodo = null }
+
+function barraHecho (texto) {
+  quitarBarraHecho()
+  const raiz = document.getElementById('hud') || document.body
+  const caja = cajaFlotante('var(--oro)')
+  caja.appendChild(el('div', { estilo: { fontWeight: '800', marginBottom: '8px' }, texto }))
+  caja.appendChild(el('div', { clase: 'pequeño tenue', estilo: { marginBottom: '8px' }, texto: 'Ya está formando ahí: mira la aldea.' }))
+  caja.appendChild(el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
+    el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '🚩 Plantar otro',
+      estilo: { minHeight: '52px' },
+      onclick: () => { quitarBarraHecho(); events.emit(EV.UI_PANEL, { panel: 'ejercito', datos: { solapa: 'escuadrones' } }) }
+    }),
+    el('button', {
+      clase: 'btn btn-oro', type: 'button', texto: '✔️ Listo',
+      estilo: { minHeight: '52px' },
+      onclick: () => quitarBarraHecho()
+    })
+  ]))
+  raiz.appendChild(caja)
+  barraHechoNodo = caja
 }
 
 // ============================================================== 2. ENTRENAR ==
@@ -546,6 +1194,7 @@ function vistaAtacar (zona) {
         onclick: () => {
           if (sinTropa) { solapa = 'entrenar'; pintar(); return }
           rival = r
+          modoSeleccion = 'ataque'
           prepararAsalto()
         }
       })
@@ -757,6 +1406,54 @@ function baseDeCombate (enemigo) {
   }
 }
 
+/**
+ * QUIÉN SALE Y QUIÉN SE QUEDA. Es la regla que más sorprende del juego: los
+ * escuadrones de defensa NO van a los asaltos, se quedan en su puesto aunque tú
+ * estés reventando el castillo del vecino. Si no se dice aquí, el jugador cuenta
+ * soldados en la pestaña de Tropa y no entiende por qué salen la mitad.
+ */
+function bloqueQuienSale () {
+  const lista = listaEscuadrones()
+  const salen = lista.filter(q => q.cometido === 'ataque' && q.totalEnCasa)
+  const quedan = lista.filter(q => q.cometido === 'defensa' && q.totalEnCasa)
+  const caja = el('div', { clase: 'panel col' })
+
+  if (!salen.length) {
+    caja.append(
+      el('div', { clase: 'titular', texto: '⚔️ No tienes escuadrones de ataque' }),
+      el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: 'Sin ninguno marcado como de ataque sale toda la tropa que haya en casa… y la aldea se queda sola. Marca uno para que sea SIEMPRE el que salga.' }),
+      el('button', {
+        clase: 'btn btn-piedra btn-gordo', type: 'button', texto: '🚩 Repartir en escuadrones',
+        onclick: () => { rival = null; solapa = 'escuadrones'; reparto = null; pintar() }
+      })
+    )
+    return caja
+  }
+
+  const linea = (titulo, grupo, tono) => {
+    const fila = el('div', { clase: 'col', estilo: { gap: '2px' } })
+    fila.appendChild(el('div', { clase: 'pequeño', estilo: { fontWeight: '800' }, texto: titulo }))
+    for (const q of grupo) {
+      fila.appendChild(el('div', { clase: 'fila', estilo: { gap: '8px', alignItems: 'center' } }, [
+        marcaColor(colorEscuadron(q.id), 14),
+        el('span', { clase: 'pequeño crece', texto: `${q.nombre} · ${q.totalEnCasa} ${q.totalEnCasa === 1 ? 'soldado' : 'soldados'}` }),
+        el('span', { clase: 'pequeño tenue', texto: tono })
+      ]))
+    }
+    if (!grupo.length) fila.appendChild(el('div', { clase: 'pequeño tenue', texto: '—' }))
+    return fila
+  }
+
+  caja.append(
+    el('div', { clase: 'titular', texto: 'Quién sale de la aldea' }),
+    linea(`⚔️ Salen (${salen.reduce((a, q) => a + q.totalEnCasa, 0)})`, salen, 'al asalto'),
+    el('div', { clase: 'separador' }),
+    linea(`🛡️ Se quedan (${quedan.reduce((a, q) => a + q.totalEnCasa, 0)})`, quedan, 'guardando'),
+    el('div', { clase: 'pequeño tenue', estilo: { lineHeight: '1.35' }, texto: 'Los de defensa no se mueven de su puesto ni aunque tú estés fuera: por eso la aldea aguanta mientras asaltas.' })
+  )
+  return caja
+}
+
 // ------------------------------------------------------ pantalla de preparar ---
 
 function prepararAsalto () {
@@ -767,9 +1464,17 @@ function prepararAsalto () {
   const base = baseDeCombate(e)
   const disponibles = tropasDe()
 
-  // por defecto se lleva todo lo que hay en casa: es lo que el jugador quiere
+  // POR DEFECTO SALEN LOS DE ATAQUE Y NADIE MÁS. Antes se llevaba todo lo que
+  // hubiera en casa y la aldea se quedaba desnuda sin que el jugador lo pidiera:
+  // ahora el que se queda a guardar, se queda, y llevárselo hay que hacerlo a mano.
+  const deAsalto = modoSeleccion === 'todo'
+    ? disponibles
+    : (pedir(Ejercito, 'tropasDeAsalto', [], null) || disponibles)
   seleccion = {}
-  for (const [t, n] of Object.entries(disponibles)) if ((UNIDADES[t]?.espacio || 0) > 0 && n > 0) seleccion[t] = n
+  for (const [t, n] of Object.entries(deAsalto)) {
+    if ((UNIDADES[t]?.espacio || 0) > 0 && n > 0) seleccion[t] = Math.min(n, disponibles[t] || 0)
+    if (!seleccion[t]) delete seleccion[t]
+  }
 
   zona.appendChild(el('div', { clase: 'fila fila-sep' }, [
     el('button', { clase: 'btn btn-fantasma', type: 'button', texto: '‹ Otro rival', onclick: () => { rival = null; pintar() } }),
@@ -813,6 +1518,9 @@ function prepararAsalto () {
 
   zona.appendChild(el('div', { clase: 'panel pequeño', estilo: { lineHeight: '1.35' }, texto: `🕵️ ${e.descripcion || ''}` }))
 
+  // --- quién sale de casa y quién se queda guardándola ---
+  zona.appendChild(bloqueQuienSale())
+
   // --- qué tropas llevo ---
   const resumen = el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } })
   const filas = el('div', { clase: 'col' })
@@ -855,12 +1563,19 @@ function prepararAsalto () {
   }
 
   zona.appendChild(el('div', { clase: 'panel col' }, [
-    el('div', { clase: 'fila fila-sep' }, [
-      el('span', { clase: 'titular', texto: 'Qué te llevas' }),
+    el('div', { clase: 'titular', texto: 'Qué te llevas' }),
+    el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
       el('button', {
-        clase: 'btn btn-fantasma', type: 'button', texto: 'Todo',
+        clase: modoSeleccion === 'ataque' ? 'btn btn-oro' : 'btn btn-piedra', type: 'button', texto: '⚔️ Solo los de ataque',
+        estilo: { minHeight: '48px', fontSize: '.88em' },
+        onclick: () => { modoSeleccion = 'ataque'; prepararAsalto() }
+      }),
+      el('button', {
+        clase: modoSeleccion === 'todo' ? 'btn btn-oro' : 'btn btn-fantasma', type: 'button', texto: '😳 Todo, sin guardia',
+        estilo: { minHeight: '48px', fontSize: '.88em' },
         onclick: () => {
-          for (const t of tipos) seleccion[t] = disponibles[t]
+          modoSeleccion = 'todo'
+          toast('Cuidado: la aldea se queda sin quien la guarde', 'mal')
           prepararAsalto()
         }
       })
@@ -1234,6 +1949,60 @@ function bloqueParteDefensa (p) {
   return caja
 }
 
+/**
+ * POR DÓNDE ESTÁS PROTEGIDO Y POR DÓNDE NO. Este bloque es el que explica la
+ * derrota antes de que ocurra. Está medido en partida: el MISMO asedio por el
+ * norte con la tropa al norte se salda con el 12 % de la aldea arrasada y 17
+ * bajas; con esa misma tropa al sur, la aldea se pierde ENTERA. No es que
+ * faltara tropa: es que estaba mirando al lado que no era, y tardó en llegar.
+ */
+function bloqueFlancos () {
+  const lista = listaEscuadrones()
+  const cob = coberturaDeFlancos(lista)
+  const sin = FLANCOS.filter(f => !cob[f]?.guardado)
+  const caja = el('div', { clase: 'panel col', estilo: sin.length ? { borderColor: 'var(--rojo-oscuro)' } : {} })
+
+  caja.appendChild(el('div', { clase: 'fila fila-sep' }, [
+    el('span', { clase: 'titular', texto: '🧭 Por dónde te pueden entrar' }),
+    chip('🛡️', `${4 - sin.length}/4`, { tono: sin.length ? (sin.length >= 3 ? 'mal' : '') : 'bien' })
+  ]))
+
+  for (const f of FLANCOS) {
+    const c = cob[f]
+    const texto = !c
+      ? 'nadie de guardia'
+      : c.guardado
+        ? `${c.escuadron.nombre}: está ahí`
+        : `${c.escuadron.nombre} tarda ${Math.round(c.segundos)} s en llegar`
+    caja.appendChild(el('div', { clase: 'fila fila-sep', estilo: { gap: '8px' } }, [
+      el('div', { clase: 'fila', estilo: { gap: '6px', alignItems: 'center', flex: 'none' } }, [
+        c ? marcaColor(colorEscuadron(c.escuadron.id), 12) : el('i', { estilo: { width: '12px', height: '12px', display: 'inline-block' } }),
+        el('span', { estilo: { fontWeight: '800' }, texto: `${FLECHA[f]} ${f[0].toUpperCase()}${f.slice(1)}` })
+      ]),
+      el('span', {
+        clase: 'pequeño crece',
+        estilo: { textAlign: 'right', color: c?.guardado ? '' : 'var(--rojo-oscuro)', fontWeight: c?.guardado ? '400' : '800' },
+        texto
+      })
+    ]))
+  }
+
+  caja.appendChild(el('div', {
+    clase: 'pequeño',
+    estilo: { lineHeight: '1.4', borderTop: '2px dashed rgba(90,58,34,.25)', paddingTop: '8px' },
+    texto: sin.length
+      ? `Una batalla dura poco más de un minuto: un escuadrón que tarda 20 s en cruzar la aldea llega a las ruinas, no a la muralla. Con la tropa en el flanco bueno se pierde una décima parte de la aldea; con la tropa en la otra punta, se pierde entera.`
+      : 'Entren por donde entren, tienes gente peleando desde el primer segundo. Eso es lo que salva la aldea, no el número de soldados.'
+  }))
+
+  caja.appendChild(el('button', {
+    clase: sin.length ? 'btn btn-peligro btn-gordo' : 'btn btn-piedra btn-gordo', type: 'button',
+    texto: sin.length ? `🚩 Plantar tropa en el ${sin[0]}` : '🚩 Mover mis escuadrones',
+    onclick: () => { solapa = 'escuadrones'; reparto = null; pintar() }
+  }))
+  return caja
+}
+
 function vistaDefensa (zona) {
   const d = pedir(Combate, 'calcularDefensa', [], null)
   if (!d) {
@@ -1300,6 +2069,8 @@ function vistaDefensa (zona) {
       })
     })()
   ]))
+
+  zona.appendChild(bloqueFlancos())
 
   const consejos = el('div', { clase: 'panel col' }, [el('div', { clase: 'titular', texto: 'Lo que hay que arreglar' })])
   for (const c of d.consejos || []) consejos.appendChild(el('div', { clase: 'pequeño', texto: `• ${c}` }))

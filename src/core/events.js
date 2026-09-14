@@ -74,6 +74,10 @@ export const EV = {
   TROPAS_HERIDAS: 'tropa:heridas',       // { tropas:{lancero:3}, total, fin } vuelven malheridos: están en la enfermería del cuartel
   TROPAS_CURADAS: 'tropa:curadas',       // { tropas, total, motivo:'tiempo'|'recursos'|'gemas' } salen de la enfermería y vuelven a filas
   REUNION_CAMBIADA: 'tropa:reunion',     // { x, z, ajustado } el estandarte de batalla se mueve: el render recoloca la formación
+  // --- escuadrones (la hueste se reparte en varias formaciones con cometido) ---
+  ESCUADRONES_CAMBIADOS: 'tropa:escuadrones', // { motivo:'creado'|'borrado'|'reparto'|'cometido'|'nombre'|'cargada', escuadrones:[{id,nombre,cometido,puesto:{x,z},flanco,tropas,enCasa,total}] } el render repinta TODAS las formaciones
+  ESCUADRON_MOVIDO: 'tropa:escuadron-puesto', // { id, nombre, cometido, x, z, flanco, ajustado } ese escuadrón se planta en otra casilla: el render mueve solo su formación
+  ASEDIO_RITMO: 'ataque:ritmo',          // { escalon, nombre, asediosDia, descansoMin, faltanMin, porQue } cada cuánto te visitan hoy y por qué: la interfaz lo cuenta en el panel de defensa
 
   // --- mundo y exploración ---
   SCOUT_SENT: 'scout:sent',              // { expedicion }

@@ -1,6 +1,6 @@
 /**
  * EJÉRCITO. Dueño de `game.state.ejercito`:
- *   { tropas, cola, fuera, hambre, heridos, curacion, reunion }
+ *   { tropas, cola, fuera, hambre, heridos, curacion, reunion, escuadrones }
  *
  * Aquí vive todo lo de la hueste: entrenar, la cola del cuartel, cuánto sitio
  * hay, cuánto come, qué tropa está fuera de casa, quién está convaleciente,
@@ -26,7 +26,7 @@
 import { CONFIG } from '../core/config.js'
 import { events, EV } from '../core/events.js'
 import { game } from '../core/state.js'
-import { dentro, tamañoDe, centroDe, dist, esTerritorio } from '../core/grid.js'
+import { dentro, tamañoDe, centroDe, dist, esTerritorio, limitesDelTerritorio } from '../core/grid.js'
 import { EDIFICIOS, ORDEN_EDADES, AGE_NOMBRE } from '../data/buildings.js'
 import { UNIDADES, defUnidad } from '../data/units.js'
 import { TECNOLOGIAS } from '../data/techs.js'
@@ -80,6 +80,9 @@ function ej () {
       if (typeof e.reunion.ancla !== 'string') e.reunion.ancla = null
     }
   } else e.reunion = null
+  // El reparto de la hueste en escuadrones. Solo se garantiza que exista la
+  // lista: cuadrarla con el censo de tropas es cosa de sanearEscuadrones().
+  if (!Array.isArray(e.escuadrones)) e.escuadrones = []
   return e
 }
 
@@ -885,8 +888,12 @@ function reunionPorDefecto () {
   return mejor || libreCerca(c.x, ancla.z + t.alto + 1)
 }
 
-/** @returns {{x:number, z:number}} dónde está hoy el estandarte (siempre válido). */
-export function puntoReunion () {
+/**
+ * @param {string} [escuadronId] si se pasa, el puesto de ESE escuadrón
+ * @returns {{x:number, z:number}} dónde está hoy el estandarte (siempre válido).
+ */
+export function puntoReunion (escuadronId) {
+  if (typeof escuadronId === 'string' && escuadronId) return puestoEscuadron(escuadronId)
   const e = ej()
   const r = e.reunion
   if (!r || !Number.isFinite(r.x) || !Number.isFinite(r.z) || !casillaParaTropa(r.x, r.z, false)) {
@@ -902,9 +909,14 @@ export function puntoReunion () {
  * Mueve el estandarte. Si la casilla pedida no sirve (edificio, borde, puerta de
  * aldeanos), se planta en la más cercana que sí: el jugador no se queda sin
  * saber dónde ha caído su tropa.
+ *
+ * Admite las DOS formas, para no romper a quien ya la llamaba:
+ *   fijarReunion(x, z)                 → el estandarte general
+ *   fijarReunion(escuadronId, x, z)    → el puesto de ese escuadrón
  * @returns {{ok:boolean, motivo:string, x:number, z:number, ajustado:boolean}}
  */
-export function fijarReunion (x, z) {
+export function fijarReunion (x, z, z2) {
+  if (typeof x === 'string') return fijarPuestoEscuadron(x, z, z2)
   const e = ej()
   const px = Math.round(Number(x)); const pz = Math.round(Number(z))
   if (!Number.isFinite(px) || !Number.isFinite(pz) || !dentro(px, pz)) {
@@ -915,8 +927,16 @@ export function fijarReunion (x, z) {
   const antes = e.reunion || {}
   // A partir de aquí manda el jugador: el estandarte deja de seguir al cuartel.
   e.reunion = { x: destino.x, z: destino.z, fijada: true, ancla: anclaDeReunion()?.id || null }
+  // El estandarte general ES el puesto del primer escuadrón: mover uno mueve el
+  // otro, o el jugador vería la bandera en un sitio y su tropa en otro.
+  const primero = sanearEscuadrones()[0]
+  primero.puesto = { x: destino.x, z: destino.z, fijado: true }
   if (antes.x !== destino.x || antes.z !== destino.z) {
     events.emit(EV.REUNION_CAMBIADA, { x: destino.x, z: destino.z, ajustado })
+    events.emit(EV.ESCUADRON_MOVIDO, {
+      id: primero.id, nombre: primero.nombre, cometido: primero.cometido,
+      x: destino.x, z: destino.z, flanco: flancoDe(destino.x, destino.z), ajustado
+    })
     events.emit(EV.SFX, { nombre: 'entrenar' })
   }
   events.emit(EV.UI_TOAST, {
@@ -926,34 +946,437 @@ export function fijarReunion (x, z) {
   return { ok: true, motivo: '', x: destino.x, z: destino.z, ajustado }
 }
 
+// ------------------------------------------------------------- ESCUADRONES
+/**
+ * LOS ESCUADRONES. Hasta ahora la hueste era UN montón: toda la tropa salía a
+ * los asaltos y toda formaba en el mismo sitio, así que "defender" era un
+ * número y la aldea no tenía flancos. Ahora el jugador la reparte:
+ *
+ *   - Cada escuadrón tiene NOMBRE y COMETIDO: `ataque` (es el que sale a los
+ *     asaltos) o `defensa` (no se mueve de la aldea, estés donde estés).
+ *   - Cada uno se planta en SU casilla (`puesto`). Ahí se le ve y desde ahí
+ *     defiende: sim/combat mira dónde está para saber cuánto tarda en llegar
+ *     al flanco por el que han entrado. Si están al sur y entran por el norte,
+ *     llegan tarde. Eso es todo el juego táctico de la defensa.
+ *   - La tropa NO se duplica: `ejercito.tropas` sigue siendo el censo de la
+ *     hueste y los escuadrones son solo el reparto. `sanearEscuadrones()`
+ *     cuadra las dos cuentas en CADA consulta, así que entrenar, perder gente
+ *     o curar heridos no puede descuadrar nada.
+ *
+ * Partidas ya empezadas: si no hay escuadrones se crea uno de defensa con toda
+ * la tropa dentro y el juego sigue exactamente igual que antes.
+ */
+
+/** En un móvil, más de seis formaciones ni se ven ni se gestionan. */
+const MAX_ESCUADRONES = 6
+const COMETIDOS = ['ataque', 'defensa']
+/** Nombres de casa, por si el jugador no pone ninguno. */
+const NOMBRES_ESCUADRON = [
+  'La Guardia', 'La Hueste del Norte', 'Los del Vado',
+  'La Mesnada Vieja', 'Los Lobos del Sur', 'La Reserva'
+]
+/** Por qué flanco se reparten los escuadrones nuevos, en este orden. */
+const FLANCOS = ['sur', 'norte', 'este', 'oeste']
+
+const listaEscuadrones = () => ej().escuadrones
+
+/** Id que no choque con ninguno de los que ya hay. */
+function idEscuadron (lista) {
+  let n = lista.length + 1
+  while (lista.some(q => q && q.id === `esc_${n}`)) n++
+  return `esc_${n}`
+}
+
+/** El centro de TU reino, que es contra lo que se miden los flancos. */
+function centroAldea () {
+  const l = limitesDelTerritorio(game.state)
+  return { x: (l.x0 + l.x1) / 2, z: (l.z0 + l.z1) / 2 }
+}
+
+/**
+ * Por qué flanco cae una casilla. Misma convención que sim/combat (z crece
+ * hacia el sur), para que "estabas al sur" signifique lo mismo en los dos sitios.
+ */
+export function flancoDe (x, z) {
+  const c = centroAldea()
+  const dx = x - c.x; const dz = z - c.z
+  if (Math.hypot(dx, dz) < 3) return 'centro'
+  if (Math.abs(dx) > Math.abs(dz)) return dx > 0 ? 'este' : 'oeste'
+  return dz > 0 ? 'sur' : 'norte'
+}
+
+/** Casilla de partida para un escuadrón nuevo: a medio camino de un flanco libre. */
+function puestoSugerido (indice) {
+  const l = limitesDelTerritorio(game.state)
+  const c = centroAldea()
+  const lado = FLANCOS[indice % FLANCOS.length]
+  const p = lado === 'norte' ? { x: c.x, z: (c.z + l.z0) / 2 }
+    : lado === 'sur' ? { x: c.x, z: (c.z + l.z1) / 2 }
+      : lado === 'este' ? { x: (c.x + l.x1) / 2, z: c.z }
+        : { x: (c.x + l.x0) / 2, z: c.z }
+  return libreCerca(p.x, p.z)
+}
+
+function nuevoEscuadron (nombre, cometido, tropas, indice) {
+  const p = puestoSugerido(indice)
+  return {
+    id: `esc_${indice + 1}`,
+    nombre: (typeof nombre === 'string' && nombre.trim()) ? nombre.trim().slice(0, 24) : NOMBRES_ESCUADRON[indice % NOMBRES_ESCUADRON.length],
+    cometido: COMETIDOS.includes(cometido) ? cometido : 'defensa',
+    tropas: { ...(tropas || {}) },
+    puesto: { x: p.x, z: p.z, fijado: false },
+    creado: Date.now()
+  }
+}
+
+/**
+ * Cuadra el reparto con el censo real de la hueste. Se llama en cada consulta
+ * porque la tropa cambia por doce sitios distintos (cola del cuartel, bajas,
+ * enfermería, gemas…) y ninguno de ellos tiene por qué saber de escuadrones:
+ * lo que sobra entra en el escuadrón de acogida y lo que falta se recorta por
+ * el final. Así es IMPOSIBLE que los escuadrones sumen algo distinto de
+ * `ejercito.tropas`.
+ * @returns {Array} la lista real (no una copia): es la que manda
+ */
+function sanearEscuadrones () {
+  const e = ej()
+  const lista = e.escuadrones
+
+  for (let i = lista.length - 1; i >= 0; i--) {
+    const q = lista[i]
+    if (!q || typeof q !== 'object') { lista.splice(i, 1); continue }
+    if (typeof q.id !== 'string' || !q.id) q.id = idEscuadron(lista)
+    if (typeof q.nombre !== 'string' || !q.nombre.trim()) q.nombre = NOMBRES_ESCUADRON[i % NOMBRES_ESCUADRON.length]
+    if (!COMETIDOS.includes(q.cometido)) q.cometido = 'defensa'
+    if (!q.tropas || typeof q.tropas !== 'object') q.tropas = {}
+    for (const [t, n] of Object.entries(q.tropas)) {
+      const v = Math.max(0, Math.floor(Number(n) || 0))
+      if (!v || !UNIDADES[t]) delete q.tropas[t]
+      else q.tropas[t] = v
+    }
+    if (!q.puesto || !Number.isFinite(q.puesto.x) || !Number.isFinite(q.puesto.z)) {
+      const p = puestoSugerido(i)
+      q.puesto = { x: p.x, z: p.z, fijado: false }
+    }
+    if (typeof q.puesto.fijado !== 'boolean') q.puesto.fijado = false
+  }
+  // Partida vieja (o recién empezada): un solo escuadrón con toda la hueste.
+  if (!lista.length) lista.push(nuevoEscuadron('La Guardia', 'defensa', e.tropas, 0))
+
+  // --- la cuenta tiene que cuadrar con el censo, tipo por tipo ---
+  const tipos = new Set(Object.keys(e.tropas))
+  for (const q of lista) for (const t of Object.keys(q.tropas)) tipos.add(t)
+  const acogida = lista[0]                     // los reclutas nuevos entran aquí
+  for (const tipo of tipos) {
+    const total = Math.max(0, Math.floor(e.tropas[tipo] || 0))
+    let suma = 0
+    for (const q of lista) suma += q.tropas[tipo] || 0
+    if (suma === total) continue
+    if (suma < total) {
+      acogida.tropas[tipo] = (acogida.tropas[tipo] || 0) + (total - suma)
+      continue
+    }
+    let sobra = suma - total
+    for (let i = lista.length - 1; i >= 0 && sobra > 0; i--) {
+      const hay = lista[i].tropas[tipo] || 0
+      if (!hay) continue
+      const quita = Math.min(hay, sobra)
+      lista[i].tropas[tipo] = hay - quita
+      sobra -= quita
+      if (!lista[i].tropas[tipo]) delete lista[i].tropas[tipo]
+    }
+  }
+  return lista
+}
+
+/** El escuadrón donde caen los reclutas nuevos: el primero de la lista. */
+export const escuadronDeAcogida = () => sanearEscuadrones()[0].id
+
+/** Dónde está plantado un escuadrón. Siempre una casilla válida y pisable. */
+export function puestoEscuadron (id) {
+  const q = sanearEscuadrones().find(x => x.id === id)
+  if (!q) return puntoReunion()
+  if (!casillaParaTropa(q.puesto.x, q.puesto.z, false)) {
+    // Le han construido encima: se corre al hueco bueno más cercano.
+    const n = libreCerca(q.puesto.x, q.puesto.z)
+    q.puesto.x = n.x; q.puesto.z = n.z
+  }
+  return { x: q.puesto.x, z: q.puesto.z }
+}
+
+/** La ficha que lee la interfaz. `tropas` es el censo; `enCasa`, lo que hoy pisa la aldea. */
+function fichaEscuadron (q, enCasa) {
+  const p = puestoEscuadron(q.id)
+  const casa = enCasa || q.tropas
+  return {
+    id: q.id,
+    nombre: q.nombre,
+    cometido: q.cometido,
+    acogida: q.id === listaEscuadrones()[0]?.id,
+    puesto: p,
+    fijado: !!q.puesto.fijado,
+    flanco: flancoDe(p.x, p.z),
+    tropas: { ...q.tropas },
+    enCasa: { ...casa },
+    total: sumaDe(q.tropas),
+    totalEnCasa: sumaDe(casa),
+    poder: poderDe(casa)
+  }
+}
+
+/** Avisa al render y a la interfaz de que el reparto ha cambiado. */
+function avisarEscuadrones (motivo) {
+  events.emit(EV.ESCUADRONES_CAMBIADOS, { motivo, escuadrones: escuadrones() })
+}
+
+/**
+ * La tropa que cada escuadrón tiene AHORA MISMO en la aldea. Lo que está fuera
+ * (asalto, expedición, refuerzo de una plaza) se descuenta primero de los
+ * escuadrones de ATAQUE, que son los que salen: los de defensa se quedan en
+ * casa aunque tú estés reventando el castillo del vecino.
+ * @returns {Array<{id:string, tropas:Record<string,number>}>}
+ */
+function repartoEnCasa () {
+  const e = ej()
+  const lista = sanearEscuadrones()
+  const fuera = {}
+  for (const bloque of Object.values(e.fuera)) {
+    for (const [t, n] of Object.entries(bloque)) fuera[t] = (fuera[t] || 0) + n
+  }
+  const casa = new Map(lista.map(q => [q.id, { ...q.tropas }]))
+  const orden = [...lista.filter(q => q.cometido === 'ataque'), ...lista.filter(q => q.cometido !== 'ataque')]
+  for (const q of orden) {
+    const mio = casa.get(q.id)
+    for (const [t, n] of Object.entries(mio)) {
+      if (!fuera[t]) continue
+      const quita = Math.min(n, fuera[t])
+      mio[t] = n - quita
+      fuera[t] -= quita
+      if (!mio[t]) delete mio[t]
+    }
+  }
+  return lista.map(q => ({ id: q.id, tropas: casa.get(q.id) }))
+}
+
+/** Poder de un puñado de tropa, con la misma vara que `poderMilitar()`. */
+function poderDe (tropas) {
+  let p = 0
+  for (const [tipo, n] of Object.entries(tropas || {})) {
+    const u = UNIDADES[tipo]
+    if (!u || !u.espacio) continue
+    const s = estadisticasUnidad(tipo)
+    p += n * (s.hp * 0.45 + s.ataque * 2.6 + s.armadura * 5) * (PESO_CLASE[u.clase] ?? 1)
+  }
+  return Math.round(p)
+}
+
+/**
+ * TODOS LOS ESCUADRONES, listos para pintar.
+ * @returns {Array<{id,nombre,cometido,puesto:{x,z},flanco,tropas,enCasa,total,totalEnCasa,poder}>}
+ */
+export function escuadrones () {
+  const casa = new Map(repartoEnCasa().map(r => [r.id, r.tropas]))
+  return sanearEscuadrones().map(q => fichaEscuadron(q, casa.get(q.id)))
+}
+
+/**
+ * Levanta un escuadrón nuevo, vacío y plantado en un flanco que no esté ya
+ * cubierto. La tropa se le pasa después con `moverTropas()`.
+ */
+export function crearEscuadron (nombre = '', cometido = 'defensa') {
+  const lista = sanearEscuadrones()
+  if (lista.length >= MAX_ESCUADRONES) {
+    return { ok: false, motivo: `No puedes llevar más de ${MAX_ESCUADRONES} escuadrones` }
+  }
+  const q = nuevoEscuadron(nombre, cometido, {}, lista.length)
+  q.id = idEscuadron(lista)
+  lista.push(q)
+  avisarEscuadrones('creado')
+  events.emit(EV.ESCUADRON_MOVIDO, {
+    id: q.id, nombre: q.nombre, cometido: q.cometido, x: q.puesto.x, z: q.puesto.z, flanco: flancoDe(q.puesto.x, q.puesto.z), ajustado: false
+  })
+  events.emit(EV.UI_TOAST, { texto: `🚩 ${q.nombre} levanta su propio estandarte`, tipo: 'bien' })
+  return { ok: true, motivo: '', escuadron: fichaEscuadron(q) }
+}
+
+/**
+ * Pasa tropa de un escuadrón a otro. Es la ÚNICA forma de repartir la hueste:
+ * así el censo nunca puede descuadrarse.
+ */
+export function moverTropas (deEscuadron, aEscuadron, tropas = {}) {
+  const lista = sanearEscuadrones()
+  const de = lista.find(q => q.id === deEscuadron)
+  const a = lista.find(q => q.id === aEscuadron)
+  if (!de || !a) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  if (de === a) return { ok: false, motivo: 'Es el mismo escuadrón' }
+
+  const mueve = {}
+  for (const [t, n] of Object.entries(tropas || {})) {
+    const v = Math.max(0, Math.floor(Number(n) || 0))
+    if (!v) continue
+    if ((de.tropas[t] || 0) < v) {
+      return { ok: false, motivo: `${de.nombre} no tiene ${v} × ${UNIDADES[t]?.nombre || t}` }
+    }
+    mueve[t] = v
+  }
+  if (!Object.keys(mueve).length) return { ok: false, motivo: 'No has elegido tropa' }
+
+  for (const [t, v] of Object.entries(mueve)) {
+    de.tropas[t] -= v
+    if (!de.tropas[t]) delete de.tropas[t]
+    a.tropas[t] = (a.tropas[t] || 0) + v
+  }
+  avisarEscuadrones('reparto')
+  return { ok: true, motivo: '', movidas: mueve }
+}
+
+/**
+ * Planta un escuadrón en una casilla de la aldea. Si ahí no cabe, se pone en la
+ * más cercana que sí (nunca dentro de un edificio ni en parcela ajena).
+ * @returns {{ok:boolean, motivo:string, x:number, z:number, ajustado:boolean}}
+ */
+export function fijarPuestoEscuadron (id, x, z) {
+  const lista = sanearEscuadrones()
+  const q = lista.find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe', x: 0, z: 0, ajustado: false }
+  const px = Math.round(Number(x)); const pz = Math.round(Number(z))
+  if (!Number.isFinite(px) || !Number.isFinite(pz) || !dentro(px, pz)) {
+    return { ok: false, motivo: 'Esa casilla no está en la aldea', x: q.puesto.x, z: q.puesto.z, ajustado: false }
+  }
+  const destino = casillaParaTropa(px, pz, true) ? { x: px, z: pz } : libreCerca(px, pz)
+  const ajustado = destino.x !== px || destino.z !== pz
+  const movido = q.puesto.x !== destino.x || q.puesto.z !== destino.z
+  q.puesto = { x: destino.x, z: destino.z, fijado: true }
+
+  // El primero de la lista arrastra el estandarte de toda la vida: así el render
+  // y la interfaz viejos siguen enseñando la bandera donde está la tropa.
+  if (lista[0] === q) {
+    const e = ej()
+    e.reunion = { x: destino.x, z: destino.z, fijada: true, ancla: anclaDeReunion()?.id || null }
+    if (movido) events.emit(EV.REUNION_CAMBIADA, { x: destino.x, z: destino.z, ajustado })
+  }
+  if (movido) {
+    events.emit(EV.ESCUADRON_MOVIDO, {
+      id: q.id, nombre: q.nombre, cometido: q.cometido,
+      x: destino.x, z: destino.z, flanco: flancoDe(destino.x, destino.z), ajustado
+    })
+    events.emit(EV.SFX, { nombre: 'entrenar' })
+  }
+  events.emit(EV.UI_TOAST, {
+    texto: ajustado
+      ? `🚩 Ahí no cabe ${q.nombre}: se planta al lado`
+      : `🚩 ${q.nombre} guarda ahora el flanco ${flancoDe(destino.x, destino.z)}`,
+    tipo: ajustado ? 'info' : 'bien'
+  })
+  return { ok: true, motivo: '', x: destino.x, z: destino.z, ajustado }
+}
+
+/** Lo disuelve: su gente pasa al escuadrón de acogida. No se puede quedar sin ninguno. */
+export function borrarEscuadron (id) {
+  const lista = sanearEscuadrones()
+  const i = lista.findIndex(q => q.id === id)
+  if (i < 0) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  if (lista.length <= 1) return { ok: false, motivo: 'Tu hueste necesita al menos un escuadrón' }
+  const [q] = lista.splice(i, 1)
+  const destino = lista[0]
+  for (const [t, n] of Object.entries(q.tropas)) destino.tropas[t] = (destino.tropas[t] || 0) + n
+  avisarEscuadrones('borrado')
+  events.emit(EV.UI_TOAST, { texto: `${q.nombre} se disuelve: su gente pasa a ${destino.nombre}`, tipo: 'info' })
+  return { ok: true, motivo: '', destino: destino.id }
+}
+
+/** Cambia el cometido: `ataque` sale a los asaltos, `defensa` no se mueve de casa. */
+export function fijarCometido (id, cometido) {
+  const q = sanearEscuadrones().find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  if (!COMETIDOS.includes(cometido)) return { ok: false, motivo: 'Un escuadrón es de ataque o de defensa' }
+  if (q.cometido === cometido) return { ok: true, motivo: '' }
+  q.cometido = cometido
+  avisarEscuadrones('cometido')
+  events.emit(EV.UI_TOAST, {
+    texto: cometido === 'ataque' ? `⚔️ ${q.nombre} sale a los asaltos` : `🛡️ ${q.nombre} se queda guardando la aldea`,
+    tipo: 'bien'
+  })
+  return { ok: true, motivo: '' }
+}
+
+/** Le pone otro nombre. Es lo que hace que el jugador se encariñe con su hueste. */
+export function renombrarEscuadron (id, nombre) {
+  const q = sanearEscuadrones().find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  const n = String(nombre || '').trim().slice(0, 24)
+  if (!n) return { ok: false, motivo: 'Ponle un nombre' }
+  q.nombre = n
+  avisarEscuadrones('nombre')
+  return { ok: true, motivo: '', nombre: n }
+}
+
+/**
+ * La tropa que SALE a un asalto: solo la de los escuadrones de ataque que esté
+ * en casa. Si no hay ninguno de ataque, sale lo que haya (partidas viejas y
+ * jugadores que no quieren saber nada de escuadrones siguen jugando igual).
+ */
+export function tropasDeAsalto () {
+  const lista = sanearEscuadrones()
+  if (!lista.some(q => q.cometido === 'ataque')) return tropasDisponibles()
+  const total = {}
+  const casa = new Map(repartoEnCasa().map(r => [r.id, r.tropas]))
+  for (const q of lista) {
+    if (q.cometido !== 'ataque') continue
+    for (const [t, n] of Object.entries(casa.get(q.id) || {})) total[t] = (total[t] || 0) + n
+  }
+  return total
+}
+
+/** La tropa que se queda a defender la aldea, venga quien venga. */
+export function tropasDeDefensa () {
+  const total = {}
+  const lista = sanearEscuadrones()
+  const casa = new Map(repartoEnCasa().map(r => [r.id, r.tropas]))
+  for (const q of lista) {
+    if (q.cometido !== 'defensa') continue
+    for (const [t, n] of Object.entries(casa.get(q.id) || {})) total[t] = (total[t] || 0) + n
+  }
+  return total
+}
+
+/**
+ * CÓMO ESTÁ DESPLEGADA LA DEFENSA AHORA MISMO. Lo pide sim/combat al empezar un
+ * asedio: coloca a cada escuadrón en SU casilla y calcula, según lo lejos que
+ * esté del flanco por donde entran, cuánto tarda en enterarse.
+ * @returns {Array<{id,nombre,cometido,flanco,x,z,tropas}>}
+ */
+export function defensaDesplegada () {
+  const lista = sanearEscuadrones()
+  const casa = new Map(repartoEnCasa().map(r => [r.id, r.tropas]))
+  const salida = []
+  for (const q of lista) {
+    const tropas = casa.get(q.id) || {}
+    if (!sumaDe(tropas)) continue
+    const p = puestoEscuadron(q.id)
+    salida.push({ id: q.id, nombre: q.nombre, cometido: q.cometido, flanco: flancoDe(p.x, p.z), x: p.x, z: p.z, tropas })
+  }
+  return salida
+}
+
 /** Orden de formación: infantería delante, asedio al fondo. */
 const ORDEN_FORMACION = ['lancero', 'espadachin', 'arquero', 'ballestero', 'monje', 'explorador', 'jinete', 'caballero', 'ariete', 'catapulta']
 
 /**
- * Dónde se pone cada soldado. Devuelve casillas ENTERAS y libres: filas
- * ordenadas detrás del estandarte y, si no caben, más filas a los lados. Nunca
- * mete a nadie dentro de un edificio ni fuera del tablero.
- *
- * @param {Record<string,number>} [tropas] por defecto, la tropa que está en casa
- * @param {{tope?:number}} [opciones] tope de figuras (el render pinta menos en móvil flojo)
- * @returns {{reunion:{x,z}, estandarte:{x,z}, porFila:number, filas:number,
- *            puestos:Array<{tipo:string,x:number,z:number,fila:number,col:number}>, sinSitio:number}}
+ * Planta una formación en un punto: filas ordenadas detrás del estandarte y, si
+ * no caben, anillos alrededor. Devuelve casillas ENTERAS y libres; `usadas` se
+ * comparte entre escuadrones para que dos formaciones no se pisen.
  */
-export function formacionReunion (tropas, opciones = {}) {
-  const p = puntoReunion()
-  const lista = tropas || tropasDisponibles()
-  const tope = Math.max(1, opciones.tope || 200)
-
+function colocarFormacion (p, tropas, tope, usadas) {
   const cola = []
-  const tipos = [...ORDEN_FORMACION, ...Object.keys(lista).filter(t => !ORDEN_FORMACION.includes(t))]
+  const tipos = [...ORDEN_FORMACION, ...Object.keys(tropas).filter(t => !ORDEN_FORMACION.includes(t))]
   for (const tipo of tipos) {
     const u = UNIDADES[tipo]
     if (!u || u.espacio <= 0) continue            // los aldeanos no forman
-    const n = Math.max(0, Math.floor(lista[tipo] || 0))
+    const n = Math.max(0, Math.floor(tropas[tipo] || 0))
     for (let i = 0; i < n && cola.length < tope; i++) cola.push(tipo)
   }
-  const vacio = { reunion: p, estandarte: { ...p }, porFila: 0, filas: 0, puestos: [], sinSitio: 0 }
-  if (!cola.length) return vacio
+  if (!cola.length) return { porFila: 0, filas: 0, puestos: [], sinSitio: 0 }
 
   // la formación crece hacia donde hay tablero, no siempre al sur
   const medio = (CONFIG.GRID - 1) / 2
@@ -961,7 +1384,6 @@ export function formacionReunion (tropas, opciones = {}) {
   const porFila = Math.min(8, Math.max(3, Math.ceil(Math.sqrt(cola.length * 1.4))))
 
   const puestos = []
-  const usadas = new Set()
   const marcar = (x, z) => usadas.add(z * CONFIG.GRID + x)
   const librePara = (x, z, estricto) => !usadas.has(z * CONFIG.GRID + x) && casillaParaTropa(x, z, estricto)
 
@@ -996,9 +1418,85 @@ export function formacionReunion (tropas, opciones = {}) {
     }
     if (i >= cola.length) break
   }
-
   const filas = puestos.reduce((m, q) => Math.max(m, q.fila + 1), 0)
-  return { reunion: p, estandarte: { ...p }, porFila, filas, puestos, sinSitio: cola.length - i }
+  return { porFila, filas, puestos, sinSitio: cola.length - i }
+}
+
+/**
+ * Dónde se pone cada soldado. Sin argumentos coloca CADA ESCUADRÓN en su propio
+ * puesto —que es lo que el jugador tiene que ver: su gente repartida por los
+ * flancos— y cada casilla devuelta lleva de qué escuadrón es.
+ *
+ * Sigue admitiendo las llamadas de siempre:
+ *   formacionReunion()                       → todos los escuadrones, cada uno en su sitio
+ *   formacionReunion(tropas)                 → esa tropa junta, en el estandarte general
+ *   formacionReunion(null, { escuadron:id }) → solo ese escuadrón
+ *
+ * @param {Record<string,number>} [tropas]
+ * @param {{tope?:number, escuadron?:string}} [opciones]
+ * @returns {{reunion:{x,z}, estandarte:{x,z}, porFila:number, filas:number,
+ *            puestos:Array<{tipo:string,x:number,z:number,fila:number,col:number,escuadron?:string,nombre?:string}>,
+ *            sinSitio:number, escuadrones:Array}}
+ */
+export function formacionReunion (tropas, opciones = {}) {
+  const tope = Math.max(1, opciones.tope || 200)
+  const usadas = new Set()
+
+  // --- un escuadrón concreto ---
+  if (opciones.escuadron) {
+    const q = sanearEscuadrones().find(e => e.id === opciones.escuadron)
+    const p0 = puntoReunion()
+    if (!q) return { reunion: p0, estandarte: { ...p0 }, porFila: 0, filas: 0, puestos: [], sinSitio: 0, escuadrones: [] }
+    const p = puestoEscuadron(q.id)
+    const casa = repartoEnCasa().find(r => r.id === q.id)
+    const f = colocarFormacion(p, tropas || (casa ? casa.tropas : q.tropas), tope, usadas)
+    for (const x of f.puestos) { x.escuadron = q.id; x.nombre = q.nombre }
+    return {
+      reunion: p,
+      estandarte: { ...p },
+      ...f,
+      escuadrones: [{ id: q.id, nombre: q.nombre, cometido: q.cometido, flanco: flancoDe(p.x, p.z), reunion: p, puestos: f.puestos }]
+    }
+  }
+
+  // --- compatibilidad: si te dan la tropa a mano, forma junta en el estandarte ---
+  if (tropas) {
+    const p = puntoReunion()
+    const f = colocarFormacion(p, tropas, tope, usadas)
+    return { reunion: p, estandarte: { ...p }, ...f, escuadrones: [] }
+  }
+
+  // --- lo normal: cada escuadrón en su puesto ---
+  const lista = sanearEscuadrones()
+  const casa = new Map(repartoEnCasa().map(r => [r.id, r.tropas]))
+  const bloques = []
+  const puestos = []
+  let sinSitio = 0; let porFila = 0; let filas = 0
+  let restante = tope
+  for (const q of lista) {
+    const mios = casa.get(q.id) || {}
+    if (!sumaDe(mios) || restante <= 0) continue
+    const p = puestoEscuadron(q.id)
+    const f = colocarFormacion(p, mios, restante, usadas)
+    for (const x of f.puestos) { x.escuadron = q.id; x.nombre = q.nombre }
+    restante -= f.puestos.length
+    sinSitio += f.sinSitio
+    porFila = Math.max(porFila, f.porFila)
+    filas = Math.max(filas, f.filas)
+    puestos.push(...f.puestos)
+    bloques.push({ id: q.id, nombre: q.nombre, cometido: q.cometido, flanco: flancoDe(p.x, p.z), reunion: p, puestos: f.puestos })
+  }
+  const p0 = bloques.length ? bloques[0].reunion : puntoReunion()
+  return { reunion: p0, estandarte: { ...p0 }, porFila, filas, puestos, sinSitio, escuadrones: bloques }
+}
+
+/**
+ * Una formación por escuadrón, para que el render pinte cada estandarte donde
+ * toca sin tener que deducirlo de la lista plana.
+ * @returns {Array<{id,nombre,cometido,flanco,reunion:{x,z},puestos:Array}>}
+ */
+export function formacionesEscuadrones (opciones = {}) {
+  return formacionReunion(null, opciones).escuadrones
 }
 
 // -------------------------------------------------------------------- init
@@ -1025,14 +1523,36 @@ function revisarReunion () {
   if (!antes || antes.x !== ahora.x || antes.z !== ahora.z) {
     events.emit(EV.REUNION_CAMBIADA, { x: ahora.x, z: ahora.z, ajustado: true })
   }
+  // Los escuadrones también pueden haberse quedado bajo un edificio nuevo.
+  let movidos = false
+  for (const q of sanearEscuadrones()) {
+    const p = { x: q.puesto.x, z: q.puesto.z }
+    const ok = puestoEscuadron(q.id)
+    if (ok.x === p.x && ok.z === p.z) continue
+    movidos = true
+    events.emit(EV.ESCUADRON_MOVIDO, {
+      id: q.id, nombre: q.nombre, cometido: q.cometido,
+      x: ok.x, z: ok.z, flanco: flancoDe(ok.x, ok.z), ajustado: true
+    })
+  }
+  if (movidos) avisarEscuadrones('reparto')
 }
 
 export function init () {
   ej()
   puntoReunion()          // el estandarte existe desde el minuto uno y siempre en sitio válido
+  sanearEscuadrones()     // y la hueste, repartida: partidas viejas incluidas
   // Al cargar partida, cola, enfermería y manutención se ponen al día solas: las
   // tres miran la diferencia real con Date.now(), con el tope offline de CONFIG.
-  events.on(EV.STATE_LOADED, () => { ensuciarSuelo(); ej(); procesarCola(); recuperarHeridos(); revisarReunion() })
+  events.on(EV.STATE_LOADED, () => {
+    ensuciarSuelo(); ej(); procesarCola(); recuperarHeridos(); revisarReunion()
+    avisarEscuadrones('cargada')
+  })
+  // Entrenar, curar o perder gente cambia el reparto: el panel y el render se
+  // enteran por aquí en vez de tener que preguntar en cada frame.
+  for (const ev of [EV.UNIT_TRAINED, EV.TROPAS_CURADAS, EV.TROPAS_HERIDAS]) {
+    events.on(ev, () => avisarEscuadrones('reparto'))
+  }
   events.on(EV.TICK, () => { procesarCola(); recuperarHeridos(); comer() })
   // Tocar la aldea invalida el mapa de suelo y puede mover el estandarte.
   for (const ev of [EV.BUILD_PLACED, EV.BUILD_COMPLETED, EV.BUILD_UPGRADED, EV.BUILD_DEMOLISHED, EV.TERRITORIO_DESBLOQUEADO]) {

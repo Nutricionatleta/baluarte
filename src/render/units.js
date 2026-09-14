@@ -1701,10 +1701,32 @@ function repasarVisibles (forzar = false) {
 
 const guarnicion = []
 const banderas = []
-let estandarte = null                 // el poste con el paño, en el punto de reunión
+let estandarte = null                 // el primer estandarte, para lo que ya lo miraba
 let reunion = { x: 0, z: 0 }          // casilla del estandarte, según sim/army.js
-let moviendoEstandarte = false        // esperando a que el jugador diga dónde
+let moviendo = null                   // id del escuadrón al que se le está buscando sitio
 let modArmy = null                    // sim/army.js, cargado de forma tolerante
+
+/**
+ * LOS ESCUADRONES A LA VISTA. Ya no hay UNA formación junto al cuartel: hay
+ * varias, cada una plantada en su flanco. Desde la cámara del juego todas son
+ * el mismo bulto con casco, así que lo único que las distingue es el PAÑO: el
+ * estandarte de su puesto y las dos banderolas que enmarcan la formación.
+ * Seis tonos bien separados y ninguno es el granate del enemigo.
+ */
+const COLORES_ESCUADRON = [
+  PALETA.estandarte, PALETA.oro, PALETA.telaVerde,
+  PALETA.ropaAldeana, PALETA.cobre, PALETA.maderaClara
+]
+/** El color va pegado al ID, no al orden: disolver uno no repinta a los demás. */
+function colorEscuadron (id, i = 0) {
+  const m = /(\d+)/.exec(String(id || ''))
+  const k = m ? Number(m[1]) - 1 : i
+  const n = COLORES_ESCUADRON.length
+  return COLORES_ESCUADRON[((k % n) + n) % n]
+}
+
+const estandartes = new Map()         // id de escuadrón → su poste, para encenderlo
+let puestosEscuadron = []             // [{ id, nombre, cometido, x, z, color }]
 const ORDEN_FORMACION = ['lancero', 'espadachin', 'arquero', 'ballestero', 'monje', 'explorador', 'jinete', 'caballero', 'ariete', 'catapulta']
 const TOPE_GUARNICION = { bajo: 18, medio: 34, alto: 48 }
 
@@ -1713,30 +1735,39 @@ const TOPE_GUARNICION = { bajo: 18, medio: 34, alto: 48 }
  * mueve su ejército por la aldea, así que tiene que verse desde lejos y cantar
  * que se puede tocar. Debajo lleva su casilla marcada, como el fantasma de obra.
  */
-function crearEstandarteBatalla () {
+function crearEstandarteBatalla (color = PALETA.estandarte, cometido = 'defensa') {
   const g = new THREE.Group()
   g.name = 'estandarte-batalla'
-  const huella = pieza(G.caja, mat(PALETA.estandarte, { transparente: 0.5 }),
+  const huella = pieza(G.caja, mat(color, { transparente: 0.5 }),
     { y: 0.03, sx: 0.94, sy: 0.05, sz: 0.94, sombra: false })
   huella.name = 'huella'
   g.add(huella)
   g.add(pieza(G.cilindro, mat(PALETA.piedraOscura), { y: 0.1, sx: 0.44, sy: 0.2, sz: 0.44 }))
   g.add(pieza(G.cilindro6, mat(PALETA.madera), { y: 0.95, sx: 0.075, sy: 1.7, sz: 0.075 }))
   g.add(pieza(G.cono8, mat(PALETA.oro), { y: 1.86, sx: 0.14, sy: 0.24, sz: 0.14 }))
-  const pano = pieza(G.caja, mat(PALETA.estandarte), { x: 0.3, y: 1.42, sx: 0.6, sy: 0.62, sz: 0.03 })
+  const pano = pieza(G.caja, mat(color), { x: 0.3, y: 1.42, sx: 0.6, sy: 0.62, sz: 0.03 })
   pano.name = 'pano'
   g.add(pano)
   g.add(pieza(G.caja, mat(PALETA.oro), { x: 0.3, y: 1.42, z: 0.022, sx: 0.2, sy: 0.34, sz: 0.012 }))
-  banderas.push({ malla: pano, fase: 0 })
+  // El cometido se lee sin abrir ningún panel: lanza cruzada el que sale a los
+  // asaltos, escudo clavado el que no se mueve de la aldea.
+  if (cometido === 'ataque') {
+    g.add(pieza(G.cilindro6, mat(PALETA.hierro), { x: -0.3, y: 1.15, rz: 0.55, sx: 0.05, sy: 1.5, sz: 0.05 }))
+    g.add(pieza(G.cono6, mat(PALETA.metalTropa), { x: -0.68, y: 1.75, rz: 0.55, sx: 0.12, sy: 0.26, sz: 0.12 }))
+  } else {
+    g.add(pieza(GL.disco, mat(PALETA.metalTropa), { x: -0.3, y: 0.95, rz: Math.PI / 2, sx: 0.5, sy: 0.07, sz: 0.5 }))
+    g.add(pieza(GL.disco, mat(color), { x: -0.34, y: 0.95, rz: Math.PI / 2, sx: 0.3, sy: 0.05, sz: 0.3 }))
+  }
+  banderas.push({ malla: pano, fase: banderas.length * 1.1 })
   return g
 }
 
-/** Banderola de formación: palo, moharra y paño del bando, que ondea. */
-function banderola () {
+/** Banderola de formación: palo, moharra y paño del escuadrón, que ondea. */
+function banderola (color = PALETA.estandarte) {
   const g = new THREE.Group()
   g.add(pieza(G.cilindro6, mat(PALETA.madera), { y: 0.7, sx: 0.055, sy: 1.4, sz: 0.055 }))
   g.add(pieza(G.cono6, mat(PALETA.oro), { y: 1.48, sx: 0.1, sy: 0.18, sz: 0.1 }))
-  const pano = pieza(G.caja, mat(PALETA.estandarte), { x: 0.19, y: 1.13, sx: 0.38, sy: 0.42, sz: 0.025 })
+  const pano = pieza(G.caja, mat(color), { x: 0.19, y: 1.13, sx: 0.38, sy: 0.42, sz: 0.025 })
   pano.name = 'pano'
   g.add(pano)
   banderas.push({ malla: pano, fase: banderas.length * 1.7 })
@@ -1747,6 +1778,8 @@ function limpiarGuarnicion () {
   for (const f of guarnicion) olvidar(f)
   guarnicion.length = 0
   estandarte = null
+  estandartes.clear()
+  puestosEscuadron = []
   if (raizTropa) {
     for (let i = raizTropa.children.length - 1; i >= 0; i--) {
       const h = raizTropa.children[i]
@@ -1775,20 +1808,40 @@ export function mostrarGuarnicion (tropas) {
   if (!plan) return
   reunion = { x: plan.reunion.x, z: plan.reunion.z }
 
+  // CADA ESCUADRÓN, EN SU SITIO. sim/army.js devuelve un bloque por escuadrón
+  // con su puesto y su gente ya colocada; aquí solo se pinta. Si alguien pide
+  // una tropa suelta (la vista de siempre), se dibuja como un bloque más.
+  const bloques = (plan.escuadrones && plan.escuadrones.length)
+    ? plan.escuadrones
+    : [{
+        id: null, nombre: 'La hueste', cometido: 'defensa',
+        reunion: plan.estandarte || plan.reunion, puestos: plan.puestos || []
+      }]
+
+  let i = 0
+  for (const b of bloques) { dibujarEscuadron(b, i); i++ }
+  aplicarTope()
+}
+
+/** Un escuadrón: su formación alineada, sus banderolas y su estandarte. */
+function dibujarEscuadron (bloque, indice) {
+  const color = colorEscuadron(bloque.id, indice)
+  const p = bloque.reunion || { x: reunion.x, z: reunion.z }
+  const lista = bloque.puestos || []
+
   // TODOS MIRANDO AL MISMO LADO. Antes cada uno se torcía un poco "para que no
   // pareciera de cartón" y el resultado era justo lo contrario: un corrillo. Una
   // tropa formada impone porque está alineada, así que se calcula UN rumbo —el
-  // que va del centro de la formación al estandarte— y lo copian todos.
+  // que va del centro de la formación a su estandarte— y lo copian todos.
   let mx = 0; let mz = 0
-  for (const q of plan.puestos) { mx += q.x; mz += q.z }
-  if (plan.puestos.length) { mx /= plan.puestos.length; mz /= plan.puestos.length }
-  const e0 = plan.estandarte || plan.reunion
-  let rumbo = Math.atan2(e0.x - mx, e0.z - mz)
-  if (!plan.puestos.length || (Math.abs(e0.x - mx) < 0.2 && Math.abs(e0.z - mz) < 0.2)) rumbo = 0
+  for (const q of lista) { mx += q.x; mz += q.z }
+  if (lista.length) { mx /= lista.length; mz /= lista.length }
+  let rumbo = Math.atan2(p.x - mx, p.z - mz)
+  if (!lista.length || (Math.abs(p.x - mx) < 0.2 && Math.abs(p.z - mz) < 0.2)) rumbo = 0
 
-  for (let i = 0; i < plan.puestos.length; i++) {
-    const q = plan.puestos[i]
-    const fig = crearUnidad(q.tipo, { bando: 'jugador', semilla: i * 37 + 11 })
+  for (let i = 0; i < lista.length; i++) {
+    const q = lista[i]
+    const fig = crearUnidad(q.tipo, { bando: 'jugador', semilla: i * 37 + 11 + indice * 13 })
     const f = animar(fig, { estado: 'parado' })
     f.siempreVisible = true
     const w = gridAMundo(q.x, q.z)
@@ -1799,38 +1852,100 @@ export function mostrarGuarnicion (tropas) {
 
   // dos banderolas en los extremos de la primera fila: enmarcan la formación y
   // le dan el aire de desfile que no dan los soldados solos
-  if (plan.puestos.length >= 3) {
+  if (lista.length >= 3) {
     let minX = Infinity; let maxX = -Infinity; let zFrente = Infinity
-    for (const q of plan.puestos) {
+    for (const q of lista) {
       if (q.x < minX) minX = q.x
       if (q.x > maxX) maxX = q.x
       if (q.z < zFrente) zFrente = q.z
     }
     for (const gx of [minX - 0.9, maxX + 0.9]) {
       const w = gridAMundo(gx, zFrente)
-      const b = banderola()
+      const b = banderola(color)
       b.position.set(w.x, sueloEn(gx, zFrente), w.z)
       b.rotation.y = rumbo
       ;(raizTropa || ctx.raizAldea).add(b)
     }
   }
 
-  // el estandarte va SIEMPRE, aunque no haya tropa: es el mando del ejército
-  const e = plan.estandarte || plan.reunion
-  const wE = gridAMundo(e.x, e.z)
-  estandarte = crearEstandarteBatalla()
-  estandarte.position.set(wE.x, sueloEn(e.x, e.z), wE.z)
-  ;(raizTropa || ctx.raizAldea).add(estandarte)
-  marcarEstandarte(moviendoEstandarte)
-  aplicarTope()
+  // el estandarte va SIEMPRE, aunque el escuadrón esté vacío: es su puesto
+  const wE = gridAMundo(p.x, p.z)
+  const poste = crearEstandarteBatalla(color, bloque.cometido)
+  poste.position.set(wE.x, sueloEn(p.x, p.z), wE.z)
+  ;(raizTropa || ctx.raizAldea).add(poste)
+  if (bloque.id) estandartes.set(bloque.id, poste)
+  if (!estandarte) estandarte = poste
+  puestosEscuadron.push({ id: bloque.id, nombre: bloque.nombre, cometido: bloque.cometido, x: p.x, z: p.z, color })
+  if (bloque.id && moviendo === bloque.id) marcarPuesto(bloque.id, true)
 }
 
 /** El estandarte late en dorado mientras espera a que le digas dónde formar. */
-function marcarEstandarte (encendido) {
-  const huella = estandarte && estandarte.getObjectByName('huella')
+function marcarPuesto (id, encendido) {
+  const g = id ? estandartes.get(id) : estandarte
+  const huella = g && g.getObjectByName('huella')
   if (!huella) return
-  huella.material = mat(encendido ? PALETA.oro : PALETA.estandarte, { transparente: encendido ? 0.75 : 0.5 })
+  const suyo = puestosEscuadron.find(q => q.id === id)
+  const base = suyo ? suyo.color : PALETA.estandarte
+  huella.material = mat(encendido ? PALETA.oro : base, { transparente: encendido ? 0.75 : 0.5 })
   huella.scale.set(encendido ? 1.5 : 0.94, 0.05, encendido ? 1.5 : 0.94)
+}
+
+/** El escuadrón cuyo estandarte está a un paso de la casilla tocada. */
+function puestoJuntoA (x, z) {
+  for (const q of puestosEscuadron) {
+    if (Math.max(Math.abs(q.x - x), Math.abs(q.z - z)) <= 1) return q
+  }
+  return null
+}
+
+// ── la marca de "aquí lo planto": el fantasma del panel de ejército ────────
+/**
+ * Mientras el jugador busca sitio para un escuadrón, el panel se aparta y deja
+ * ver la aldea. Esta marca es lo único que queda en pantalla: la casilla que
+ * está apuntando con el dedo, con el paño de ESE escuadrón para que no la
+ * confunda con la de otro. La repinta el panel tocando la aldea (GRID_TAP).
+ */
+let raizMarcas = null
+let plantando = null                  // { id, color } escuadrón al que se busca sitio
+let marcaPuesto = null
+
+function ponerMarca (color, x, z) {
+  quitarMarca()
+  if (!raizMarcas) return
+  const g = new THREE.Group()
+  g.name = 'marca-puesto'
+  g.userData.ignorarPicking = true
+  // el cerco dorado va DEBAJO y más ancho: se lee como un marco alrededor del
+  // paño del escuadrón, que es lo que tiene que cantar de qué formación es
+  g.add(pieza(G.caja, mat(PALETA.oro, { transparente: 0.55 }), { y: 0.04, sx: 2.2, sy: 0.04, sz: 2.2, sombra: false, recibe: false }))
+  g.add(pieza(G.caja, mat(color, { transparente: 0.75 }), { y: 0.08, sx: 1.6, sy: 0.06, sz: 1.6, sombra: false, recibe: false }))
+  g.add(pieza(G.cilindro6, mat(PALETA.madera, { transparente: 0.7 }), { y: 0.95, sx: 0.075, sy: 1.7, sz: 0.075, sombra: false }))
+  g.add(pieza(G.caja, mat(color, { transparente: 0.7 }), { x: 0.3, y: 1.42, sx: 0.6, sy: 0.62, sz: 0.03, sombra: false }))
+  marcaPuesto = g
+  raizMarcas.add(g)
+  moverMarca(x, z)
+}
+
+function moverMarca (x, z) {
+  if (!marcaPuesto) return
+  const w = gridAMundo(x, z)
+  marcaPuesto.position.set(w.x, sueloEn(x, z) + 0.02, w.z)
+}
+
+function quitarMarca () {
+  if (marcaPuesto && marcaPuesto.parent) marcaPuesto.parent.remove(marcaPuesto)
+  marcaPuesto = null
+}
+
+/**
+ * Repintar la guarnición entera cuesta lo suyo y el reparto cambia por seis
+ * sitios distintos (entrenar, curar, mover tropa, plantar un puesto…). Se
+ * agrupan todos los avisos de un mismo instante en un solo repintado.
+ */
+let repintePedido = 0
+function pedirGuarnicion () {
+  if (repintePedido) return
+  repintePedido = setTimeout(() => { repintePedido = 0; mostrarGuarnicion() }, 60)
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2161,7 +2276,8 @@ export function init () {
     raizGente = new THREE.Group(); raizGente.name = 'gente'
     raizTropa = new THREE.Group(); raizTropa.name = 'tropa'
     raizBatalla = new THREE.Group(); raizBatalla.name = 'batalla'
-    aEscena(raizGente); aEscena(raizTropa); aEscena(raizBatalla)
+    raizMarcas = new THREE.Group(); raizMarcas.name = 'marcas-tropa'
+    aEscena(raizGente); aEscena(raizTropa); aEscena(raizBatalla); aEscena(raizMarcas)
 
     // el suelo lo pone terrain.js; si no está, todos a cota cero y tan contentos
     try {
@@ -2184,22 +2300,43 @@ export function init () {
   })
 
   // el estandarte se ha movido (lo mueve el jugador o le construyen encima)
-  events.on(EV.REUNION_CAMBIADA, () => mostrarGuarnicion())
+  events.on(EV.REUNION_CAMBIADA, () => pedirGuarnicion())
+  // el reparto de la hueste ha cambiado: hay que repintar TODAS las formaciones
+  events.on(EV.ESCUADRONES_CAMBIADOS, () => pedirGuarnicion())
+  events.on(EV.ESCUADRON_MOVIDO, () => pedirGuarnicion())
 
-  // Mover el ejército: se toca el estandarte y luego la casilla de destino. Va
+  /**
+   * El panel de ejército se aparta para dejar elegir la casilla y avisa por
+   * BUILD_MODE con el id del escuadrón. Mientras dure, este módulo no mueve
+   * nada por su cuenta: solo lleva la marca de dónde está apuntando el dedo.
+   */
+  events.on(EV.BUILD_MODE, (p) => {
+    const id = (p && p.activo && p.escuadron) ? p.escuadron : null
+    if (!id) { quitarMarca(); plantando = null; return }
+    if (moviendo) { marcarPuesto(moviendo, false); moviendo = null }
+    const q = puestosEscuadron.find(e => e.id === id)
+    plantando = { id, color: q ? q.color : colorEscuadron(id) }
+    ponerMarca(plantando.color, q ? q.x : reunion.x, q ? q.z : reunion.z)
+  })
+
+  // Mover un escuadrón: se toca su estandarte y luego la casilla de destino. Va
   // por GRID_TAP porque el dedo lo gestiona scene.js; aquí solo se escucha.
   events.on(EV.GRID_TAP, (p) => {
-    if (!p || !estandarte) return
-    if (!moviendoEstandarte) {
-      if (Math.max(Math.abs(p.x - reunion.x), Math.abs(p.z - reunion.z)) > 1) return
-      moviendoEstandarte = true
-      marcarEstandarte(true)
-      events.emit(EV.UI_TOAST, { texto: '🚩 Toca dónde quieres que forme tu tropa', tipo: 'info' })
+    if (!p) return
+    if (plantando) { moverMarca(p.x, p.z); return }   // manda el panel de ejército
+    if (!moviendo) {
+      const q = puestoJuntoA(p.x, p.z)
+      if (!q || !q.id) return
+      moviendo = q.id
+      marcarPuesto(q.id, true)
+      events.emit(EV.UI_TOAST, { texto: `🚩 Toca dónde quieres que forme ${q.nombre}`, tipo: 'info' })
       return
     }
-    moviendoEstandarte = false
-    marcarEstandarte(false)
-    if (modArmy && typeof modArmy.fijarReunion === 'function') modArmy.fijarReunion(p.x, p.z)
+    const id = moviendo
+    moviendo = null
+    marcarPuesto(id, false)
+    if (modArmy && typeof modArmy.fijarPuestoEscuadron === 'function') modArmy.fijarPuestoEscuadron(id, p.x, p.z)
+    else if (modArmy && typeof modArmy.fijarReunion === 'function') modArmy.fijarReunion(p.x, p.z)
   })
 
   events.on(EV.VILLAGER_SPAWNED, (p) => {
@@ -2247,7 +2384,7 @@ export function init () {
 
   events.on(EV.TICK, sincronizar)
 
-  events.on(EV.UNIT_TRAINED, () => mostrarGuarnicion())
+  events.on(EV.UNIT_TRAINED, () => pedirGuarnicion())
   events.on(EV.BUILD_COMPLETED, (p) => {
     mostrarGuarnicion()
     // la aldea celebra: los que estén cerca de la obra dan saltos
@@ -2259,7 +2396,7 @@ export function init () {
       if (Math.hypot(f.x - w.x, f.z - w.z) < 5) gestoPasajero(f, 'celebrando', 2.4)
     }
   })
-  events.on(EV.BUILD_DEMOLISHED, () => mostrarGuarnicion())
+  events.on(EV.BUILD_DEMOLISHED, () => pedirGuarnicion())
   events.on(EV.STATE_LOADED, () => {
     for (const id of [...porAldeano.keys()]) morirAldeano(id)
     for (const v of game.state.villagers || []) nacerAldeano(v)

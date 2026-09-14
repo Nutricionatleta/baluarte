@@ -64,9 +64,11 @@ ejercito:  { tropas: { lancero: 4, ... }, cola: [{ tipo, fin }],
              heridos: { lancero: 2, ... },           // convalecientes: no pelean, ocupan hueco
              curacion: { inicio, fin },              // reloj real de la enfermería
              reunion: { x, z, fijada, ancla } }      // el estandarte de batalla, en casillas
+             escuadrones: [{ id, nombre, cometido:'ataque'|'defensa', tropas, puesto:{x,z,fijado} }] }  // el reparto de la hueste: quién sale y quién guarda qué flanco
 obras:     [{ id, buildingId, tipo:'construir'|'mejorar', inicio, fin }]   // en marcha
 colaObras: [{ id, buildingId, tipo:'construir'|'mejorar', encargada, aviso }] // esperando turno
 expediciones: [{ id, destino, vuelve, explorador }]
+asedios:   { jugado, total, ultimo }             // descanso entre asedios, medido en SEGUNDOS JUGADOS (no de reloj)
 territorio: { parcelas: { '2,2': { estado:'mia'|'disponible', motivo, cuando } } }  // el tablero crece
 world:     { descubierto: {}, nodos: [], enemigos: [] }
 research:  { techId: true }

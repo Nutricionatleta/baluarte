@@ -508,7 +508,32 @@ function pintarSeccion () {
    1. CATÁLOGO
    =========================================================================== */
 
+/**
+ * La puerta al modo reorganizar. Va lo primero del taller a propósito: mover y
+ * cuadrar la aldea se hace más veces que construir nada nuevo, y antes había que
+ * ir edificio por edificio con el botón Mover de la ficha.
+ */
+function botonReorganizar () {
+  const caja = el('button', {
+    clase: 'btn btn-oro', type: 'button',
+    estilo: {
+      minHeight: '58px', width: '100%', display: 'flex', alignItems: 'center',
+      gap: '10px', justifyContent: 'flex-start', padding: '0 14px', textAlign: 'left'
+    },
+    onclick: () => { salirDeColocacion(true); cerrar(); events.emit(EV.UI_PANEL, { panel: 'reorganizar' }) }
+  }, [
+    el('span', { estilo: { fontSize: '1.6em', lineHeight: '1' }, texto: '🧭' }),
+    el('span', { estilo: { display: 'grid', lineHeight: '1.15' } }, [
+      el('span', { estilo: { fontWeight: '900' }, texto: 'Reorganizar la aldea' }),
+      el('span', { estilo: { fontSize: '.72em', fontWeight: '700', opacity: '.85' }, texto: 'Mueve todo gratis, pinta muros y fosos, y guarda diseños' })
+    ])
+  ])
+  return caja
+}
+
 function pintarCatalogo (destino) {
+  destino.appendChild(botonReorganizar())
+
   // aviso de constructores: afecta a TODO, mejor arriba que repetido en 20 fichas
   const obras = estado().obras?.length || 0
   const plazas = simPlazasObra()
@@ -1541,7 +1566,10 @@ let puesta = null        // { tipo, x, z, rot, valido, motivo, cola, puestos, en
 let barra = null         // nodos de la barra de abajo
 let emitiendo = false    // para no escucharme a mí mismo el BUILD_MODE
 
-const ENCADENA = new Set(['muralla', 'puerta'])
+// Lo que se pone a puñados y nunca de uno en uno: muros, puertas y fosos
+const ENCADENA = new Set(['muralla', 'puerta', 'foso'])
+/** …y lo que además se pinta arrastrando el dedo (una puerta por casilla sería una ruina). */
+const SE_PINTA = new Set(['muralla', 'foso'])
 const ANIMOS = [
   'Los canteros ya están en ello',
   '¡Buen sitio! Empieza la obra',
@@ -1560,9 +1588,10 @@ function entrarEnColocacion (tipo) {
     tipo, rot: 0, x: null, z: null, valido: false,
     motivo: 'Toca la aldea para elegir el sitio',
     cola: [], puestos: 0, encadena: ENCADENA.has(tipo),
-    // solo la muralla se pinta arrastrando: una puerta a cada casilla que roza el
-    // dedo sería una ruina, y solo caben seis
-    pintando: tipo === 'muralla'
+    // muralla y foso se pintan arrastrando: son de los que se ponen a docenas.
+    // La puerta no: una a cada casilla que roza el dedo sería una ruina, y solo
+    // caben seis.
+    pintando: SE_PINTA.has(tipo)
   }
   emitirModo(true)
   crearBarra()

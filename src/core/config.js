@@ -167,6 +167,18 @@ export const PALETA = {
   caballoOscuro: 0x4e342e,
   caballoClaro: 0xc9a882,
 
+  // ambiente de batalla: el campo NO se ve como la aldea tranquila. Cielo
+  // cargado, sol bajo y anaranjado, tierra pisada y quemada por el asedio.
+  cieloBatalla: 0x6e6472,
+  nieblaBatalla: 0x8d8079,
+  solBatalla: 0xffab5e,
+  tierraPisada: 0x7d6549,
+  quemado: 0x3a3128,
+  // bordes de las peanas de bando: el aro claro es lo que separa a los tuyos de
+  // los suyos cuando hay cuarenta figuras amontonadas en el mismo patio
+  estandarteClaro: 0x7ec2ff,
+  enemigoClaro: 0xe0705f,
+
   // ambiente
   cielo: 0x87ceeb,
   cieloAtardecer: 0xf5a05a,

@@ -648,6 +648,69 @@ export const EDIFICIOS = {
     dano: (n = 1) => Math.round(28 * Math.pow(1.36, n - 1)),
     radio: (n = 1) => Math.round((5 + 0.4 * n) * 10) / 10,
     cadencia: 0.5
+  },
+
+  /**
+   * EL FOSO — la otra manera de defenderse.
+   *
+   * La muralla PARA: el enemigo se queda fuera y tiene que echarla abajo.
+   * El foso NO para: deja pasar, pero el que cruza lo hace a rastras, y mientras
+   * chapotea está quieto delante de tus torres. Son estrategias distintas y esa
+   * es la gracia: un anillo de muralla con dos o tres franjas de foso por fuera
+   * multiplica el tiempo que el asaltante pasa a tiro, y encima la caballería
+   * —que es la que revienta murallas— no puede entrar y se ve obligada a
+   * rodear hasta la puerta, justo donde tú la esperas.
+   *
+   * Equilibrio: cuesta menos de la mitad que un tramo de muralla en piedra y se
+   * levanta en segundos, pero tiene poca vida (cegarlo a golpes es posible) y no
+   * cierra el recinto: sin torres que cubran el foso, el foso no vale nada.
+   *
+   * Los campos `bloquea:false`, `frena`, `costePaso` y `cuentaEnSaqueo` son el
+   * CONTRATO con sim/combat.js; aquí solo están los números.
+   */
+  foso: {
+    nombre: 'Foso',
+    icono: '🕳️',
+    categoria: 'defensa',
+    ancho: 1,
+    alto: 1,
+    maxNivel: 8,
+    max: 160,
+    age: 'oscura',
+    desc: 'Zanja de agua y estacas. No cierra el paso: lo hace lento. La infantería tarda el doble en cruzarlo, la caballería ni lo intenta y el asedio se atasca — y todos ellos, quietos a tiro de tus torres.',
+    coste: coste(0, 22, 0, 0, 1.66),
+    tiempo: obra(4, 2.1, 20 * 60),
+    // Poca vida a propósito: un foso se ciega con tierra, no se asalta. Lo que
+    // aguanta es el TIEMPO que te regala, no los golpes.
+    hp: vida(200, 1.26),
+    requiere: { ayuntamiento: 2 },
+
+    // --- contrato con el motor de combate ---
+    /** NO corta el paso: el campo de flujo lo atraviesa. Lo contrario de la muralla. */
+    bloquea: false,
+    /** Marca para que el motor sepa que esta casilla frena en vez de detener. */
+    foso: true,
+    /**
+     * Cuánto AVANZA quien lo está cruzando, por clase de tropa.
+     * 1 = pasa como si nada · 0,5 = tarda el doble · 0 = no puede entrar (rodea).
+     * Mejorarlo lo hace más hondo: del doble de tiempo al triple.
+     */
+    frena: (n = 1) => {
+      const f = Math.max(0.30, 0.5 * Math.pow(0.945, Math.max(0, n - 1)))
+      return {
+        infanteria: Math.round(f * 100) / 100,
+        distancia: Math.round(f * 100) / 100,
+        asedio: Math.round(f * 0.66 * 100) / 100,
+        caballeria: 0
+      }
+    },
+    /**
+     * Lo que "cuesta" esta casilla al buscar camino (una normal cuesta 1). Así el
+     * enemigo prefiere rodear el foso e ir a la puerta, que es de lo que se trata.
+     */
+    costePaso: (n = 1) => Math.round(2 + n * 0.4),
+    /** Arrasar fosos no da estrellas: no es arrasar la aldea, igual que los muros. */
+    cuentaEnSaqueo: false
   }
 }
 

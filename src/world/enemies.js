@@ -24,19 +24,60 @@ const GRID_BASE = 24                 // rejilla propia de cada aldea enemiga
 const CENTRO = (GRID_BASE - 1) / 2   // 11.5
 const NIVEL_MAX = 14
 
-/** Horas de gracia al empezar la partida: nadie ataca a un recién llegado. */
-const GRACIA_HORAS = 2
 /**
- * Descanso entre asedios. Antes eran 35 min de mínimo pero el resto de
- * condiciones hacían que no llegase NUNCA un ataque; ahora el ritmo real es
- * este: una visita cada 25-45 minutos de juego, y si te arrasan, el escudo de
- * 4 h de sim/combat te deja respirar de verdad.
+ * ═══════════════ EL RITMO DE LOS ASEDIOS ═══════════════
+ *
+ * EL PROBLEMA QUE HABÍA: el descanso entre asedios era global y de 25-45 min de
+ * RELOJ. Con más de treinta rivales en el valle siempre había alguno con su
+ * turno cumplido, así que en cuanto pasaba el descanso caía otro asedio. Y lo
+ * peor: el reloj corría con la app CERRADA, de modo que cada vez que el jugador
+ * volvía tenía un asedio esperándole en la puerta. En el banco de pruebas salían
+ * 3 asedios por día de juego, uno por sesión, clavados. De ahí el "¿por qué me
+ * atacan tanto?".
+ *
+ * CÓMO FUNCIONA AHORA:
+ *  1. El descanso se mide en TIEMPO JUGADO, no de reloj (`state.asedios.jugado`,
+ *     que solo crece en los ticks). Cerrar la app no acumula asedios: es
+ *     imposible que te esperen tres a la vuelta.
+ *  2. Cuánto descanso depende de UN ESCALÓN DE PROGRESO, no del azar: los
+ *     primeros días nadie viene, y a partir de ahí el ritmo sube con lo que
+ *     tienes que perder (ayuntamiento, parcelas ganadas, plazas sometidas).
+ *  3. Tras CADA defensa —se gane o se pierda— hay un respiro largo garantizado:
+ *     nunca caen dos seguidos.
+ *  4. Si el jugador estaba fuera y le tocaba asedio, se resuelve UNO solo y se
+ *     le cuenta al volver. Ni dos, ni cinco.
  */
-const ENTRE_ATAQUES_MIN = 25 * 60000
-const ENTRE_ATAQUES_AZAR = 20 * 60000
+
+/** Horas de calma al empezar: que le dé tiempo a montar la aldea sin sustos. */
+const HORAS_TRANQUILAS = 30
+/** Y además, hasta que no hay algo que merezca la pena robar, no viene nadie. */
+const AYTO_MINIMO = 3
+
+/**
+ * LA ESCALERA. `descansoMin` son MINUTOS DE JUEGO entre asedio y asedio.
+ * La cuenta: alguien juega a esto en tres ratos de 20-25 min, o sea unos 70
+ * minutos al día. Con 75 min de descanso sale ~1 asedio al día; con 28, unos
+ * 2,3. Ese es el suelo y el techo que se buscaban: uno o dos asedios diarios de
+ * base y algo más cuando ya tienes medio valle y mucho que perder.
+ */
+const ESCALERA_ASEDIOS = [
+  { nombre: 'Colonos', descansoMin: 0, asediosDia: 0, porQue: 'Acabas de levantar las primeras casas: nadie pierde el tiempo contigo.' },
+  { nombre: 'Aldea', descansoMin: 75, asediosDia: 0.9, porQue: 'Ya sale humo de tus chimeneas. Algún bandido de camino vendrá a probar.' },
+  { nombre: 'Villa', descansoMin: 55, asediosDia: 1.2, porQue: 'Tu granero da de comer a mucha gente, y eso se sabe en toda la comarca.' },
+  { nombre: 'Señorío', descansoMin: 42, asediosDia: 1.5, porQue: 'Mandas sobre varias parcelas: los señores de al lado ya te tienen fichado.' },
+  { nombre: 'Comarca', descansoMin: 34, asediosDia: 1.9, porQue: 'Media comarca lleva tu bandera. Quien quiera crecer tiene que quitártela.' },
+  { nombre: 'Reino', descansoMin: 28, asediosDia: 2.3, porQue: 'Eres el más rico del valle. Todos los estandartes de por aquí apuntan a tu plaza.' }
+]
+
+/** Respiro garantizado tras defender, gane o pierda: nunca dos asedios seguidos. */
+const RESPIRO_TRAS_DEFENDER_MIN = 15
+/** Suelo de reloj real: aunque juegues del tirón, dos asedios no se pisan. */
+const ENTRE_ATAQUES_RELOJ = 12 * 60000
 /** Margen para reforzar la defensa antes de que lleguen (3 a 8 minutos). */
 const AVISO_MIN_SEG = 180
 const AVISO_MAX_SEG = 480
+/** Fuera más de esto y, si te tocaba asedio, se resuelve solo (uno, y contado). */
+const FUERA_PARA_ASEDIO_SOLO = 45 * 60
 
 /** Rivales que la lista de asalto tiene SIEMPRE, desde el primer minuto. */
 const RIVALES_MINIMOS = 3
@@ -878,10 +919,10 @@ function alcanzables () {
   return cerca.length ? cerca : todos
 }
 
-/** Cuándo se acaban las horas de gracia de esta partida. */
+/** Cuándo se acaban las horas de calma del principio de la partida. */
 function finGracia () {
   const s = game.state
-  return ((s && s.creada) || Date.now()) + GRACIA_HORAS * HORA
+  return ((s && s.creada) || Date.now()) + HORAS_TRANQUILAS * HORA
 }
 
 /**
@@ -1436,6 +1477,7 @@ export function devolverPlaza (enemigo, señorId = null) {
   enemigo.señor = señorId || null
   enemigo.titulo = enemigo.tituloPrevio || enemigo.titulo
   enemigo.rencor = clamp((enemigo.rencor || 0) + 1, 0, 5)
+  enemigo.motivoRencor = 'plaza'    // te la tiene jurada por la comarca, no por el grano
   reconstruir(enemigo)
   enemigo.proximoAtaque = Date.now() + intervaloAtaque(enemigo)
   return enemigo
@@ -1537,6 +1579,7 @@ export function derrotar (enemigo) {
   if (enemigo.derrotas >= DERROTAS_PARA_VASALLO) return hacerVasallo(enemigo)
   enemigo.derrotado = true
   enemigo.rencor = clamp((enemigo.rencor || 0) + 1, 0, 5)
+  enemigo.motivoRencor = 'saqueo'   // para que el aviso pueda decirle POR QUÉ viene
   enemigo.reaparece = Date.now() + horasReaparicion(enemigo.nivel) * HORA
   // el que ha sido saqueado no espera su turno: la próxima visita la hace él
   const p = PERSONALIDADES[enemigo.personalidad] || PERSONALIDADES.bandido
@@ -1586,6 +1629,7 @@ function endurecerDetras (caido) {
     if ((ex * dx + ey * dy) / (de * d0) < 0.55) continue          // que estén detrás, no a un lado
     if (Math.hypot(e.x - caido.x, e.y - caido.y) > 4.5) continue  // vecinos suyos, no el confín entero
     subirDeNivel(e, 1)
+    e.motivoRencor = 'plaza'          // han visto el humo de la comarca de al lado
     if (++tocados >= 3) break
   }
   if (tocados) {
@@ -1648,15 +1692,152 @@ export function escudoActivo () {
   return hasta > Date.now()
 }
 
+/** Nivel del ayuntamiento terminado: la vara más honesta de "cuánto tengo". */
+function nivelAyuntamiento () {
+  const bs = (game.state && game.state.buildings) || []
+  let n = 0
+  for (const b of bs) if (b.tipo === 'ayuntamiento' && !b.enObra) n = Math.max(n, b.nivel || 0)
+  return n
+}
+
+/** Plazas que ya te deben algo: vasallos y comarcas bajo tu bandera. */
+const plazasSometidas = () => enemigos().filter(e => e.vasallo || e.conquistado).length
+
 /**
- * Las dos primeras horas de partida son sagradas: que aprenda a construir en
- * paz. Antes esto pedía ADEMÁS ser nivel 2, y como el nivel se sube despacio,
- * había partidas enteras sin un solo ataque: las murallas no servían de nada.
+ * EN QUÉ ESCALÓN DE GUERRA ESTÁ EL JUGADOR. No lo decide el reloj ni el azar:
+ * lo decide lo que tiene que perder. Los primeros días, cero; luego sube con el
+ * ayuntamiento, con las parcelas que ha ganado y con las plazas que ha sometido.
+ * @returns {number} índice dentro de ESCALERA_ASEDIOS
  */
-function enGracia () {
+export function escalonAsedios () {
   const s = game.state
-  if (!s) return true
-  return Date.now() < finGracia()
+  if (!s) return 0
+  if (Date.now() < finGracia()) return 0
+  const ayto = nivelAyuntamiento()
+  if (ayto < AYTO_MINIMO) return 0
+  const parcelas = parcelasGanadas()
+  const plazas = plazasSometidas()
+  let n = 1
+  if (ayto >= 4 || parcelas >= 1) n = 2
+  if (ayto >= 6 || parcelas >= 3 || plazas >= 1) n = 3
+  if (ayto >= 8 || parcelas >= 6 || plazas >= 3) n = 4
+  if (ayto >= 10 || parcelas >= 10 || plazas >= 6) n = 5
+  return n
+}
+
+/** El bloque de estado del ritmo, saneado. Es JSON puro y se guarda con la partida. */
+function relojAsedios () {
+  const s = game.state
+  if (!s) return { jugado: 0, total: 0, ultimo: 0 }
+  if (!s.asedios || typeof s.asedios !== 'object') s.asedios = {}
+  const a = s.asedios
+  if (!Number.isFinite(a.jugado)) a.jugado = 0
+  if (!Number.isFinite(a.total)) a.total = 0
+  if (!Number.isFinite(a.ultimo)) a.ultimo = 0
+  return a
+}
+
+/**
+ * CADA CUÁNTO TE VISITAN, en segundos DE JUEGO. Cero significa "hoy no viene
+ * nadie". La interfaz lo cuenta tal cual con EV.ASEDIO_RITMO.
+ */
+export function ritmoAsedios () {
+  const i = escalonAsedios()
+  const paso = ESCALERA_ASEDIOS[i]
+  const a = relojAsedios()
+  const descanso = paso.descansoMin * 60
+  return {
+    escalon: i,
+    nombre: paso.nombre,
+    porQue: paso.porQue,
+    asediosDia: paso.asediosDia,
+    descansoMin: paso.descansoMin,
+    faltanMin: descanso ? Math.max(0, Math.round((descanso - a.jugado) / 60)) : 0,
+    enCalma: i === 0,
+    total: a.total
+  }
+}
+
+/** ¿Le toca ya? Solo con el reloj de JUEGO cumplido: estar fuera no acumula. */
+function tocaAsedio () {
+  const i = escalonAsedios()
+  if (!i) return false
+  const descanso = ESCALERA_ASEDIOS[i].descansoMin * 60
+  return relojAsedios().jugado >= descanso
+}
+
+/** Se anuncia un asedio: el descanso vuelve a cero y se apunta en la cuenta. */
+function marcarAsedio () {
+  const a = relojAsedios()
+  a.jugado = 0
+  a.ultimo = Date.now()
+  a.total = (a.total || 0) + 1
+}
+
+/**
+ * NUNCA DOS SEGUIDOS. Después de defender —se gane o se pierda— hay un respiro
+ * garantizado. Entra como "tiempo jugado en negativo": hasta que no lo agote,
+ * el descanso ni siquiera empieza a contar.
+ */
+function darRespiro (minutos = RESPIRO_TRAS_DEFENDER_MIN) {
+  const a = relojAsedios()
+  a.jugado = Math.min(a.jugado, -minutos * 60)
+}
+
+/**
+ * POR QUÉ TE ATACA ESTE. El jugador tiene derecho a entenderlo: nadie viene
+ * porque sí. Se devuelve todo masticado para que la interfaz lo cuente sin
+ * tener que deducir nada.
+ * @returns {{clave:string, icono:string, titulo:string, porQue:string}}
+ */
+export function motivoDelAsedio (enemigo) {
+  const e = enemigo || {}
+  if (e.motivoRencor === 'plaza' || e.señor) {
+    return {
+      clave: 'plaza',
+      icono: '🏴',
+      titulo: 'Le tomaste una plaza',
+      porQue: `Tu estandarte ondea en tierra que era de ${e.nombre}. Viene a recuperar lo suyo.`
+    }
+  }
+  if ((e.saqueos || 0) > 0) {
+    return {
+      clave: 'venganza',
+      icono: '🔥',
+      titulo: 'Le saqueaste',
+      porQue: 'Le quemaste el granero y no lo ha olvidado. Viene a cobrárselo.'
+    }
+  }
+  if ((e.fracasos || 0) > 0) {
+    return {
+      clave: 'orgullo',
+      icono: '⚔️',
+      titulo: 'Te paró una vez y quiere más',
+      porQue: `${e.nombre} aguantó tu asalto. Ahora le toca a él salir de casa.`
+    }
+  }
+  if (escalonAsedios() >= 3) {
+    return {
+      clave: 'riqueza',
+      icono: '💰',
+      titulo: 'Eres el más rico de la comarca',
+      porQue: 'Tus almacenes son el mejor botín del valle y todo el mundo lo sabe.'
+    }
+  }
+  if (parcelasGanadas() >= 1) {
+    return {
+      clave: 'frontera',
+      icono: '🚩',
+      titulo: 'Tu bandera llegó a su linde',
+      porQue: `Has crecido hasta tocar el territorio de ${e.nombre}, y eso no gusta a nadie.`
+    }
+  }
+  return {
+    clave: 'saqueo',
+    icono: '🏴',
+    titulo: 'Vienen a por el granero',
+    porQue: `${e.nombre} anda buscando qué llevarse y tu aldea le queda de camino.`
+  }
 }
 
 /** Cada cuánto se decide a venir un rival concreto. El rencor lo acelera. */
@@ -1710,9 +1891,33 @@ function reforzarGuarniciones (ahora) {
   }
 }
 
+/** Último escalón anunciado, para no repetir el aviso en cada tick. */
+let escalonAnunciado = -1
+
+/** Cuenta a la interfaz en qué escalón de guerra está, cuando cambia. */
+function avisarRitmo (forzar = false) {
+  const r = ritmoAsedios()
+  if (!forzar && r.escalon === escalonAnunciado) return r
+  escalonAnunciado = r.escalon
+  events.emit(EV.ASEDIO_RITMO, r)
+  return r
+}
+
+/** Quién está en condiciones de venir hoy a por ti. */
+function candidatosDeAsedio () {
+  return enemigos().filter(e =>
+    !e.derrotado && !e.vasallo && !e.conquistado &&
+    Object.keys(e.guarnicion || {}).length            // sin gente no se sale de casa
+  )
+}
+
 /** Revisa reconstrucciones y decide si alguien se anima a visitarte. */
 function alTick (p) {
-  acumulado += (p && p.dt) ? p.dt : 0.25
+  const dt = (p && p.dt) ? p.dt : 0.25
+  // EL RELOJ DEL ASEDIO CORRE SOLO MIENTRAS SE JUEGA. Es la pieza que arregla lo
+  // de "siempre me atacan al abrir": cerrar la app ya no acumula nada.
+  relojAsedios().jugado += dt
+  acumulado += dt
   if (acumulado < 5) return            // basta con mirar esto cada cinco segundos
   acumulado = 0
   const ahora = Date.now()
@@ -1731,17 +1936,29 @@ function alTick (p) {
   reforzarGuarniciones(ahora)
 
   // --- ¿viene alguien? ---
-  if (escudoActivo() || enGracia()) return
+  // El reloj no crece sin fin: si no, al salir de los días de calma (o del
+  // escudo) caería un asedio en el primer segundo por todo lo acumulado.
+  const escalon = escalonAsedios()
+  const tope = (escalon ? ESCALERA_ASEDIOS[escalon].descansoMin : 40) * 60
+  const reloj = relojAsedios()
+  if (reloj.jugado > tope) reloj.jugado = tope
+  avisarRitmo()
+  if (escudoActivo()) return
+  // EL RITMO LO MARCA EL ESCALÓN, no los relojes de treinta rivales sueltos.
+  if (!tocaAsedio()) return
   if (ahora < descansoHasta) return
 
   // Ojo: aquí ya NO se exige que el rival esté avistado. Las partidas de
   // bandidos salen de la niebla; si no, un jugador que no explora no recibía
   // una sola visita en toda la partida.
-  const candidatos = lista.filter(e =>
-    !e.derrotado && !e.vasallo && !e.conquistado && e.proximoAtaque && ahora >= e.proximoAtaque &&
-    Object.keys(e.guarnicion || {}).length            // sin gente no se sale de casa
-  )
-  if (!candidatos.length) return
+  const puede = candidatosDeAsedio()
+  if (!puede.length) return
+  // Si a ninguno le toca todavía su turno, viene el que lo tenga más cerca: el
+  // descanso ya se ha cumplido y prometer un ritmo y no cumplirlo es peor.
+  const suyos = puede.filter(e => e.proximoAtaque && ahora >= e.proximoAtaque)
+  const candidatos = suyos.length
+    ? suyos
+    : [puede.slice().sort((a, b) => (a.proximoAtaque || Infinity) - (b.proximoAtaque || Infinity))[0]]
 
   lanzarAtaque(elegirAtacante(candidatos))
 }
@@ -1764,7 +1981,7 @@ function elegirAtacante (candidatos) {
  * Avisa de un ataque enemigo con margen para reforzar la defensa.
  * No resuelve nada: emite el aviso y sim/combat decide qué pasa al llegar.
  */
-export function lanzarAtaque (enemigo, segundos = null) {
+export function lanzarAtaque (enemigo, segundos = null, opciones = {}) {
   if (!enemigo) return null
   // Un rival al que le mataste la guarnición entera no puede venir a por ti:
   // primero recluta (reforzarGuarniciones) y ya vendrá.
@@ -1783,7 +2000,10 @@ export function lanzarAtaque (enemigo, segundos = null) {
   enemigo.ultimoAtaque = ahora
   enemigo.proximoAtaque = ahora + intervaloAtaque(enemigo)
   ultimoAviso = ahora
-  descansoHasta = ahora + llegaEn * 1000 + ENTRE_ATAQUES_MIN + rng.float(0, ENTRE_ATAQUES_AZAR)
+  // El descanso de verdad va por tiempo JUGADO (marcarAsedio); este de reloj es
+  // solo un suelo para que dos asedios no se pisen si juegas del tirón.
+  descansoHasta = ahora + llegaEn * 1000 + ENTRE_ATAQUES_RELOJ
+  marcarAsedio()
   // Al que te visita se le ve la cara: a partir de ahora sale en tu lista de
   // rivales y puedes devolvérsela. Ese es el bucle: te pegan, te vengas.
   enemigo.descubierto = true
@@ -1802,6 +2022,11 @@ export function lanzarAtaque (enemigo, segundos = null) {
   const pt = poderTropas(hueste)
   if (pt > tope) escalarGuarnicion(hueste, tope / Math.max(1, pt))
 
+  // POR QUÉ VIENE ESTE. Nadie ataca porque sí: el aviso lleva el motivo ya
+  // explicado para que la interfaz pueda contarlo con todas las letras.
+  const causa = motivoDelAsedio(enemigo)
+  const ritmo = ritmoAsedios()
+
   const aviso = {
     enemigo,
     llegaEn,
@@ -1810,15 +2035,38 @@ export function lanzarAtaque (enemigo, segundos = null) {
     hueste,
     poder: poderTropas(hueste),
     unidades: Object.values(hueste).reduce((a, b) => a + b, 0),
-    motivo: (enemigo.rencor || 0) > 0 ? 'venganza' : 'saqueo',
+    motivo: causa.clave,
+    motivoIcono: causa.icono,
+    motivoTitulo: causa.titulo,
+    porQue: causa.porQue,
+    // en qué escalón de guerra estás y cada cuánto te toca: la interfaz lo cuenta
+    escalon: ritmo.escalon,
+    escalonNombre: ritmo.nombre,
+    ritmo,
+    mientrasFuera: !!opciones.mientrasFuera,
     avisoAvanzadilla: adelanto,
-    texto: ((enemigo.rencor || 0) > 0
-      ? `${enemigo.nombre} no ha olvidado lo del granero. Viene a cobrárselo.`
-      : `${enemigo.nombre} ha puesto los ojos en tus almacenes.`) +
+    texto: `${causa.icono} ${causa.porQue}` +
       (adelanto ? ' Tus avanzadillas los han visto cruzar la linde: tienes más tiempo.' : '')
   }
   events.emit(EV.ATTACK_INCOMING, aviso)
+  avisarRitmo(true)
   return aviso
+}
+
+/**
+ * VOLVER DE ESTAR FUERA. Los asedios ya NO se acumulan con la app cerrada,
+ * porque el descanso va por tiempo jugado. Lo único que puede haber pasado es
+ * que ya te tocase uno cuando cerraste: entonces se resuelve UNO —solo uno— y
+ * se te cuenta nada más entrar, con su parte. Nunca hay cola esperándote.
+ * @returns {any|null} el aviso del asedio que pasó sin ti, o null
+ */
+export function asedioMientrasFuera (segundosFuera = 0) {
+  if (!(segundosFuera >= FUERA_PARA_ASEDIO_SOLO)) return null
+  if (escudoActivo() || !tocaAsedio()) return null
+  const candidatos = candidatosDeAsedio()
+  if (!candidatos.length) return null
+  // llegaEn = 0: sim/combat lo resuelve en el siguiente tick y suelta el parte.
+  return lanzarAtaque(elegirAtacante(candidatos), 0, { mientrasFuera: true })
 }
 
 // ============================================================================
@@ -1839,8 +2087,16 @@ export async function init () {
   banco = await cargarBanco()
   asegurar()
 
-  events.on(EV.STATE_LOADED, () => asegurar())
+  events.on(EV.STATE_LOADED, (p) => {
+    asegurar()
+    // Si le tocaba asedio cuando cerró la app, se resuelve UNO y se le cuenta.
+    asedioMientrasFuera((p && p.offlineSeconds) || 0)
+    avisarRitmo(true)
+  })
   events.on(EV.TICK, alTick)
+
+  // NUNCA DOS SEGUIDOS: defender (ganando o perdiendo) da respiro garantizado.
+  events.on(EV.DEFENSE_RESOLVED, () => { darRespiro(); avisarRitmo(true) })
 
   events.on(EV.WORLD_REVEALED, (p) => {
     const tiles = (p && p.tiles) || null

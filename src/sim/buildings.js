@@ -1055,6 +1055,620 @@ function alTocarCasilla (p) {
   toast(`🚩 Reclamar este terreno cuesta ${precio}. Tócalo otra vez para plantar la bandera.`, 'info')
 }
 
+/* ===========================================================================
+   MODO REORGANIZAR — el plano de la aldea y los diseños guardados
+   ===========================================================================
+   La interfaz (ui/editor-aldea.js) trabaja sobre una COPIA del plano y no toca
+   nada hasta que el jugador pulsa Guardar. Entonces manda aquí el plan entero y
+   este módulo lo aplica de una pieza: o entra todo, o no entra nada. Esa es la
+   garantía de que reorganizar no puede dejar la aldea rota a medias.
+
+   Mover es gratis y sin esperas (recolocar es medio juego). Lo que se PINTA
+   nuevo dentro del editor —muros, fosos— sí se paga y sí pasa por la cola de
+   obras, porque es construir de verdad.
+   =========================================================================== */
+
+const MAX_DISEÑOS = 8
+
+/** `state.disenos` siempre con forma, venga la partida de donde venga. JSON puro. */
+function disenos () {
+  const s = game.state
+  if (!s.disenos || typeof s.disenos !== 'object' || Array.isArray(s.disenos)) s.disenos = { activo: null, lista: [] }
+  if (!Array.isArray(s.disenos.lista)) s.disenos.lista = []
+  // Un guardado a medias no puede tumbar el editor: fuera lo que no tenga forma.
+  s.disenos.lista = s.disenos.lista.filter(d => d && d.id && Array.isArray(d.piezas))
+  if (s.disenos.activo && !s.disenos.lista.some(d => d.id === s.disenos.activo)) s.disenos.activo = null
+  return s.disenos
+}
+
+/** Una pieza del plano: lo mínimo que necesitan el editor y la validación. */
+function piezaDe (b) {
+  const d = def(b.tipo)
+  return {
+    id: b.id,
+    tipo: b.tipo,
+    x: b.x | 0,
+    z: b.z | 0,
+    rot: (b.rot | 0) % 4,
+    nivel: b.nivel || 0,
+    ancho: b.ancho ?? d.ancho ?? 1,
+    alto: b.alto ?? d.alto ?? 1,
+    enObra: !!b.enObra,
+    enEspera: !!b.enEspera
+  }
+}
+
+/** La aldea tal y como está ahora, en piezas movibles. El editor parte de aquí. */
+export function planoActual () {
+  return game.state.buildings.filter(b => def(b.tipo)).map(piezaDe)
+}
+
+/** Encargos que todavía caben en la cola de obras. Mover no gasta ninguno. */
+export const huecosEnCola = () => Math.max(0, MAX_COLA - cola().length)
+export const topeDeCola = () => MAX_COLA
+
+/**
+ * «2 murallas», «1 granja», «3 torres de vigía». El plural va en la PRIMERA
+ * palabra, que es donde lo lleva el español: «torres de vigía», no «torre de
+ * vigías». Suena a persona y no a listado de inventario.
+ */
+function cuantos (tipo, n) {
+  const d = def(tipo)
+  if (!d) return `${n} pieza${n === 1 ? '' : 's'}`
+  const nombre = d.nombre.toLowerCase()
+  if (n === 1) return `1 ${nombre}`
+  const trozos = nombre.split(' ')
+  trozos[0] = /[aeiouáéíóú]$/.test(trozos[0]) ? `${trozos[0]}s` : `${trozos[0]}es`
+  return `${n} ${trozos.join(' ')}`
+}
+
+/**
+ * ¿Este plano se puede aplicar ENTERO? Se comprueba el RESULTADO, no los pasos:
+ * da igual que dos edificios se crucen por el camino, lo que no puede pasar es
+ * que al final dos ocupen la misma casilla, algo se salga del valle o alguien
+ * acabe en tierra que todavía no es tuya.
+ *
+ * @param {{mover?:Array, nuevos?:Array, borrar?:Array}} plan
+ * @returns {{ok:boolean, errores:string[], piezas:Array}}
+ */
+export function validarPlan (plan = {}, opciones = {}) {
+  const s = game.state
+  const errores = []
+  // Solapes que ya venían de antes (un guardado raro, una versión vieja) no son
+  // culpa de este cambio: si se bloquearan, el jugador no podría mover NADA y
+  // encima con un error que habla de dos edificios que ni ha tocado.
+  const tocadas = opciones.tocadas instanceof Set
+    ? opciones.tocadas
+    : new Set((plan.mover || []).map(m => m && m.id).filter(Boolean))
+  const añadir = (t) => { if (!errores.includes(t)) errores.push(t) }
+  const borrar = new Set(plan.borrar || [])
+  const movs = new Map()
+  for (const m of plan.mover || []) if (m && m.id) movs.set(m.id, m)
+
+  const piezas = []
+  for (const b of s.buildings) {
+    if (!def(b.tipo)) continue
+    if (borrar.has(b.id)) {
+      if (b.tipo === 'ayuntamiento') añadir('El Ayuntamiento no se demuele: devuélvelo al plano.')
+      continue
+    }
+    const p = piezaDe(b)
+    const m = movs.get(b.id)
+    if (m) { p.x = Math.round(m.x); p.z = Math.round(m.z); p.rot = ((m.rot | 0) % 4 + 4) % 4 }
+    piezas.push(p)
+  }
+  for (const n of plan.nuevos || []) {
+    const d = def(n && n.tipo)
+    if (!d) continue
+    piezas.push({
+      id: null, tipo: n.tipo, x: Math.round(n.x), z: Math.round(n.z),
+      rot: ((n.rot | 0) % 4 + 4) % 4, nivel: 0, ancho: d.ancho, alto: d.alto, nuevo: true
+    })
+  }
+
+  // 1) cada pieza dentro del valle y en tierra tuya
+  for (const p of piezas) {
+    if (!p.nuevo && !tocadas.has(p.id)) continue        // lo que no tocas, no se juzga
+    if (!dentro(p.x, p.z) || !dentro(p.x + p.ancho - 1, p.z + p.alto - 1)) {
+      añadir(`${def(p.tipo).nombre} se sale del valle.`)
+    } else if (!territorioLibre(s, p.x, p.z, p.ancho, p.alto)) {
+      añadir(`${def(p.tipo).nombre} cae en tierra que todavía no es tuya.`)
+    }
+  }
+
+  // 2) que nadie se pise con nadie
+  const G = CONFIG.GRID
+  const ocupa = new Int32Array(G * G)          // 0 = libre, i+1 = índice de la pieza
+  for (let i = 0; i < piezas.length; i++) {
+    const p = piezas[i]
+    for (let dz = 0; dz < p.alto; dz++) {
+      for (let dx = 0; dx < p.ancho; dx++) {
+        const x = p.x + dx; const z = p.z + dz
+        if (!dentro(x, z)) continue
+        const k = z * G + x
+        if (ocupa[k]) {
+          const otro = piezas[ocupa[k] - 1]
+          const mia = p.nuevo || tocadas.has(p.id) || otro.nuevo || tocadas.has(otro.id)
+          if (mia) añadir(`${def(p.tipo).nombre} y ${def(otro.tipo).nombre} se pisan en la casilla ${x}, ${z}.`)
+        } else ocupa[k] = i + 1
+      }
+    }
+  }
+
+  // 3) lo nuevo: edad, requisitos y tope de unidades (mover no pide nada de esto)
+  const porTipo = {}
+  for (const p of piezas) porTipo[p.tipo] = (porTipo[p.tipo] || 0) + 1
+  const tiposNuevos = [...new Set((plan.nuevos || []).map(n => n && n.tipo).filter(t => def(t)))]
+  for (const t of tiposNuevos) {
+    const d = def(t)
+    const iEdad = ORDEN_EDADES.indexOf(d.age)
+    if (iEdad > ORDEN_EDADES.indexOf(s.age)) { añadir(`${d.nombre}: solo se construye en la ${AGE_NOMBRE[d.age]}.`); continue }
+    const fallo = requisitosQueFaltan(d)
+    if (fallo) { añadir(`${d.nombre}: ${fallo.charAt(0).toLowerCase()}${fallo.slice(1)}.`); continue }
+    const tope = d.unico ? 1 : (d.max ?? Infinity)
+    if (porTipo[t] > tope) añadir(`Te pasas del tope de ${d.nombre}: ${porTipo[t]} de ${tope}.`)
+  }
+
+  return { ok: errores.length === 0, errores: errores.slice(0, 5), piezas }
+}
+
+/**
+ * Aplica el plano de golpe. Antes valida ENTERO: si algo no cuadra no se toca
+ * ni una piedra y se devuelve el porqué, que es lo que pidió el dueño.
+ * @returns {{ok:boolean, errores:string[], movidos:number, nuevos:number, borrados:number, encargados:number}}
+ */
+export function aplicarPlan (plan = {}) {
+  const v = validarPlan(plan)
+  const salida = { ok: false, errores: v.errores, movidos: 0, nuevos: 0, borrados: 0, encargados: 0, sinCola: 0 }
+  if (!v.ok) return salida
+
+  // 1) lo que se quita: libera sitio antes de que nadie se mude ahí
+  for (const id of plan.borrar || []) { if (demoler(id)) salida.borrados++ }
+
+  // 2) los traslados. Van a pelo y no por mover(), porque el hueco de cada uno
+  //    puede estar ocupado por otro que también se mueve: el plano ya se validó
+  //    como un todo y comprobarlo pieza a pieza daría falsos «ahí no cabe».
+  for (const m of plan.mover || []) {
+    const b = getBuilding(m.id)
+    if (!b) continue
+    const x = Math.round(m.x); const z = Math.round(m.z); const rot = ((m.rot | 0) % 4 + 4) % 4
+    if (b.x === x && b.z === z && (b.rot | 0) === rot) continue
+    const desde = { x: b.x, z: b.z }
+    b.x = x; b.z = z; b.rot = rot
+    salida.movidos++
+    events.emit(EV.BUILD_PLACED, { building: b, movido: true, desde })
+  }
+
+  // 3) lo pintado nuevo: eso sí se paga y sí pasa por la cola de obras, y la
+  //    cola tiene tope. Lo que no quepa hoy se dice con su número, no se traga
+  //    en silencio ni se suelta un aviso por cada tramo.
+  for (const n of plan.nuevos || []) {
+    if (cola().length >= MAX_COLA) { salida.sinCola++; continue }
+    const antes = cola().length
+    const b = colocar(n.tipo, n.x, n.z, n.rot || 0)
+    if (!b) continue
+    salida.nuevos++
+    if (cola().length > antes && b.enEspera) salida.encargados++
+  }
+
+  salida.ok = true
+  if (salida.movidos) events.emit(EV.SFX, { nombre: 'construir' })
+  return salida
+}
+
+/* --- LA SESIÓN DE REORGANIZAR: en vivo, sobre la aldea de verdad ------------
+ *
+ * El dueño lo pidió así: «que se vea cómo quedará en la realidad, como si lo
+ * moviera de normal». O sea que el editor NO trabaja sobre una maqueta: mueve
+ * los edificios de verdad, en la aldea de verdad, y lo que se deshace es el
+ * cambio, no una copia. Para que eso no sea un peligro, al entrar se guarda un
+ * ANTES completo (`state.reorganizando.antes`) y Descartar lo devuelve tal cual.
+ *
+ * LA CAJA es el almacén de diseño: un edificio metido en la caja SALE de
+ * `state.buildings`, así que ni se ve, ni produce, ni defiende, ni estorba al
+ * recolocar. Se guarda entero (con su nivel, su vida y sus obras) y vuelve al
+ * tablero como estaba. Por eso no se puede guardar con la caja llena.
+ */
+
+function sesion () {
+  const s = game.state
+  if (!s.reorganizando || typeof s.reorganizando !== 'object') return null
+  const r = s.reorganizando
+  if (!Array.isArray(r.antes)) r.antes = []
+  if (!Array.isArray(r.caja)) r.caja = []
+  if (!Array.isArray(r.obras)) r.obras = []
+  return r
+}
+
+export const reorganizando = () => !!sesion()
+
+/** Entra en modo reorganizar: se guarda el ANTES para poder descartar. */
+export function iniciarReorganizacion () {
+  if (sesion()) return sesion()
+  game.state.reorganizando = {
+    activo: true,
+    desde: Date.now(),
+    antes: game.state.buildings.map(b => ({ id: b.id, x: b.x | 0, z: b.z | 0, rot: b.rot | 0 })),
+    caja: [],
+    obras: []
+  }
+  return sesion()
+}
+
+/** Traslado libre: sin coste, sin esperas y sin tocar la obra que tenga encima. */
+export function moverLibre (id, x, z, rot = null) {
+  const b = getBuilding(id)
+  if (!b) return false
+  x = Math.round(x); z = Math.round(z)
+  const nuevoRot = rot == null ? (b.rot | 0) : ((rot | 0) % 4 + 4) % 4
+  if (x === b.x && z === b.z && nuevoRot === (b.rot | 0)) return true
+  if (!huecoLibre(game.state, x, z, b.ancho ?? 2, b.alto ?? 2, b.id)) return false
+  const desde = { x: b.x, z: b.z }
+  b.x = x; b.z = z; b.rot = nuevoRot
+  events.emit(EV.BUILD_PLACED, { building: b, movido: true, desde })
+  return true
+}
+
+/** Lo que hay ahora mismo en la caja, listo para pintar una lista. */
+export function caja () {
+  const r = sesion()
+  if (!r) return []
+  return r.caja.map(b => {
+    const d = def(b.tipo)
+    return {
+      id: b.id, tipo: b.tipo, nombre: d ? d.nombre : b.tipo, icono: d ? d.icono : '📦',
+      nivel: b.nivel || 0, ancho: b.ancho ?? (d ? d.ancho : 2), alto: b.alto ?? (d ? d.alto : 2),
+      desde: { x: b.x | 0, z: b.z | 0 }
+    }
+  })
+}
+
+export const cuantoEnLaCaja = () => (sesion()?.caja.length) || 0
+
+/**
+ * A la caja: el edificio sale del tablero para dejar sitio. Se lleva consigo su
+ * obra y su sitio en la cola, para que al volver siga donde estaba.
+ * @returns {{ok:boolean, motivo:string}}
+ */
+export function aLaCaja (id) {
+  const r = sesion()
+  if (!r) return { ok: false, motivo: 'Esto solo se puede en el modo reorganizar.' }
+  const b = getBuilding(id)
+  if (!b) return { ok: false, motivo: 'Ese edificio ya no está.' }
+  if (b.tipo === 'ayuntamiento') return { ok: false, motivo: 'El Ayuntamiento no se mueve a la caja: es el corazón de la aldea.' }
+
+  const obras = game.state.obras.filter(o => o.buildingId === b.id)
+  const espera = cola().filter(e => e.buildingId === b.id)
+  game.state.obras = game.state.obras.filter(o => o.buildingId !== b.id)
+  game.state.colaObras = cola().filter(e => e.buildingId !== b.id)
+  game.state.buildings = game.state.buildings.filter(x => x.id !== b.id)
+
+  r.caja.push(JSON.parse(JSON.stringify(b)))
+  r.obras.push({ id: b.id, obras, espera })
+  events.emit(EV.BUILD_DEMOLISHED, { buildingId: b.id })   // el render solo quita la malla
+  return { ok: true, motivo: '' }
+}
+
+/**
+ * Sacar de la caja y plantarlo. Si la casilla no vale, no sale: así nunca se
+ * pierde nada por un dedo mal puesto.
+ * @returns {{ok:boolean, motivo:string, building:any}}
+ */
+export function deLaCaja (id, x, z, rot = null) {
+  const r = sesion()
+  if (!r) return { ok: false, motivo: 'Esto solo se puede en el modo reorganizar.', building: null }
+  const i = r.caja.findIndex(b => b.id === id)
+  if (i < 0) return { ok: false, motivo: 'Eso no está en la caja.', building: null }
+  const b = r.caja[i]
+  x = Math.round(x); z = Math.round(z)
+  const ancho = b.ancho ?? 2; const alto = b.alto ?? 2
+  if (!huecoLibre(game.state, x, z, ancho, alto, b.id)) return { ok: false, motivo: 'Ahí no cabe', building: null }
+
+  b.x = x; b.z = z
+  if (rot != null) b.rot = ((rot | 0) % 4 + 4) % 4
+  r.caja.splice(i, 1)
+  game.state.buildings.push(b)
+  const guardado = r.obras.find(o => o.id === b.id)
+  if (guardado) {
+    for (const o of guardado.obras) game.state.obras.push(o)
+    for (const e of guardado.espera) cola().push(e)
+    r.obras = r.obras.filter(o => o.id !== b.id)
+  }
+  events.emit(EV.BUILD_PLACED, { building: b })
+  return { ok: true, motivo: '', building: b }
+}
+
+/** Foto del momento, para deshacer y rehacer. JSON puro y pequeño. */
+export function fotoReorganizacion () {
+  const r = sesion()
+  return {
+    piezas: game.state.buildings.map(b => ({ id: b.id, x: b.x | 0, z: b.z | 0, rot: b.rot | 0 })),
+    caja: r ? r.caja.map(b => b.id) : []
+  }
+}
+
+/**
+ * Vuelve a una foto: recoloca lo que se movió, saca de la caja lo que estaba
+ * fuera y mete lo que estaba dentro. El render se entera por los eventos.
+ */
+export function aplicarFoto (f) {
+  const r = sesion()
+  if (!r || !f) return false
+  const quiereCaja = new Set(f.caja || [])
+  const destino = new Map((f.piezas || []).map(p => [p.id, p]))
+
+  // 1) lo que tiene que volver al tablero
+  for (const b of [...r.caja]) {
+    if (quiereCaja.has(b.id)) continue
+    const p = destino.get(b.id)
+    // se saca a su sitio de la foto; el hueco lo libera el paso 3 si hace falta
+    deLaCaja(b.id, p ? p.x : b.x, p ? p.z : b.z, p ? p.rot : b.rot)
+  }
+  // 2) lo que tiene que irse a la caja
+  for (const b of [...game.state.buildings]) if (quiereCaja.has(b.id)) aLaCaja(b.id)
+  // 3) y ahora las posiciones, a pelo: la foto ya era un plano válido
+  for (const b of game.state.buildings) {
+    const p = destino.get(b.id)
+    if (!p || (b.x === p.x && b.z === p.z && (b.rot | 0) === p.rot)) continue
+    const desde = { x: b.x, z: b.z }
+    b.x = p.x; b.z = p.z; b.rot = p.rot
+    events.emit(EV.BUILD_PLACED, { building: b, movido: true, desde })
+  }
+  return true
+}
+
+/** Lo que impide guardar, dicho con nombres y números. */
+export function faltaPorColocar () {
+  const r = sesion()
+  if (!r || !r.caja.length) return null
+  const cuenta = {}
+  for (const b of r.caja) cuenta[b.tipo] = (cuenta[b.tipo] || 0) + 1
+  const lista = Object.keys(cuenta).map(t => cuantos(t, cuenta[t])).join(' y ')
+  const n = r.caja.length
+  return { total: n, texto: n === 1 ? `Te queda 1 edificio por plantar: ${lista}.` : `Te quedan ${n} edificios por plantar: ${lista}.` }
+}
+
+/**
+ * Guardar la reorganización. No se guarda a medias: con algo en la caja, o con
+ * un edificio en mal sitio, no se guarda y se dice exactamente qué pasa.
+ * @returns {{ok:boolean, errores:string[]}}
+ */
+export function guardarReorganizacion () {
+  const r = sesion()
+  if (!r) return { ok: true, errores: [] }
+  const falta = faltaPorColocar()
+  if (falta) return { ok: false, errores: [falta.texto] }
+
+  // Se revisa TODO lo que esta sesión ha tocado: lo que se movió y lo que salió
+  // de la caja. Lo que no se ha tocado se queda como estaba, con sus rarezas.
+  const antes = new Map(r.antes.map(p => [p.id, p]))
+  const tocadas = new Set()
+  for (const b of game.state.buildings) {
+    const p = antes.get(b.id)
+    if (!p || p.x !== b.x || p.z !== b.z || (p.rot | 0) !== (b.rot | 0)) tocadas.add(b.id)
+  }
+  const v = validarPlan({}, { tocadas })
+  if (!v.ok) return { ok: false, errores: v.errores }
+
+  delete game.state.reorganizando
+  return { ok: true, errores: [] }
+}
+
+/** Descartar: la aldea vuelve EXACTAMENTE a como estaba al entrar. */
+export function descartarReorganizacion () {
+  const r = sesion()
+  if (!r) return false
+  const antes = new Map(r.antes.map(p => [p.id, p]))
+  // primero vuelve todo lo de la caja a su sitio de antes
+  for (const b of [...r.caja]) {
+    const p = antes.get(b.id) || { x: b.x, z: b.z, rot: b.rot }
+    const i = r.caja.findIndex(x => x.id === b.id)
+    if (i >= 0) {
+      b.x = p.x; b.z = p.z; b.rot = p.rot
+      r.caja.splice(i, 1)
+      game.state.buildings.push(b)
+      const guardado = r.obras.find(o => o.id === b.id)
+      if (guardado) {
+        for (const o of guardado.obras) game.state.obras.push(o)
+        for (const e of guardado.espera) cola().push(e)
+      }
+      events.emit(EV.BUILD_PLACED, { building: b })
+    }
+  }
+  // y cada uno a las coordenadas que tenía
+  for (const b of game.state.buildings) {
+    const p = antes.get(b.id)
+    if (!p || (b.x === p.x && b.z === p.z && (b.rot | 0) === p.rot)) continue
+    const desde = { x: b.x, z: b.z }
+    b.x = p.x; b.z = p.z; b.rot = p.rot
+    events.emit(EV.BUILD_PLACED, { building: b, movido: true, desde })
+  }
+  delete game.state.reorganizando
+  return true
+}
+
+/**
+ * Si la app se cerró con el editor abierto, lo de la caja NO se pierde: vuelve
+ * al tablero (a su sitio, o al hueco libre más cercano) y la sesión se cierra.
+ * Se queda lo movido, que es lo que el jugador estaba haciendo.
+ */
+function rescatarReorganizacion () {
+  const r = sesion()
+  if (!r) return 0
+  let rescatados = 0
+  for (const b of [...r.caja]) {
+    const ancho = b.ancho ?? 2; const alto = b.alto ?? 2
+    let sitio = huecoLibre(game.state, b.x, b.z, ancho, alto, b.id) ? { x: b.x, z: b.z } : null
+    if (!sitio) {
+      sitio = huecoMasCerca({ x: b.x | 0, z: b.z | 0, ancho, alto },
+        (x, z, an, al) => huecoLibre(game.state, x, z, an, al, b.id))
+    }
+    if (!sitio) continue
+    b.x = sitio.x; b.z = sitio.z
+    game.state.buildings.push(b)
+    const guardado = r.obras.find(o => o.id === b.id)
+    if (guardado) {
+      for (const o of guardado.obras) game.state.obras.push(o)
+      for (const e of guardado.espera) cola().push(e)
+    }
+    rescatados++
+  }
+  delete game.state.reorganizando
+  return rescatados
+}
+
+// --- diseños guardados -------------------------------------------------------
+
+/** Lo que enseña la lista de diseños. Sin las piezas: solo la ficha. */
+export function disenosGuardados () {
+  const d = disenos()
+  return d.lista.map(x => ({
+    id: x.id, nombre: x.nombre || 'Sin nombre', cuando: x.cuando || 0,
+    piezas: x.piezas.length, activo: x.id === d.activo
+  }))
+}
+
+export const disenoActivo = () => disenos().activo
+export const topeDisenos = () => MAX_DISEÑOS
+
+/**
+ * Guarda un plano con nombre. `piezas` es lo que hay en el editor ahora mismo;
+ * si no se manda, se guarda la aldea tal cual está.
+ * @returns {{ok:boolean, id:string, motivo:string}}
+ */
+export function guardarDiseno (nombre, piezas = null, id = null) {
+  const d = disenos()
+  const limpio = String(nombre || '').trim().slice(0, 24) || 'Sin nombre'
+  const lista = (piezas || planoActual())
+    .filter(p => p && def(p.tipo))
+    .map(p => ({ tipo: p.tipo, x: p.x | 0, z: p.z | 0, rot: (p.rot | 0) % 4 }))
+
+  const existente = id ? d.lista.find(x => x.id === id) : null
+  if (existente) {
+    existente.nombre = limpio
+    existente.piezas = lista
+    existente.cuando = Date.now()
+    d.activo = existente.id
+    return { ok: true, id: existente.id, motivo: '' }
+  }
+  if (d.lista.length >= MAX_DISEÑOS) return { ok: false, id: '', motivo: `Solo caben ${MAX_DISEÑOS} diseños: borra uno.` }
+
+  const nuevo = { id: nuevoId('d'), nombre: limpio, cuando: Date.now(), piezas: lista }
+  d.lista.push(nuevo)
+  d.activo = nuevo.id
+  return { ok: true, id: nuevo.id, motivo: '' }
+}
+
+export function borrarDiseno (id) {
+  const d = disenos()
+  const antes = d.lista.length
+  d.lista = d.lista.filter(x => x.id !== id)
+  if (d.activo === id) d.activo = null
+  return d.lista.length < antes
+}
+
+export function renombrarDiseno (id, nombre) {
+  const x = disenos().lista.find(d => d.id === id)
+  if (!x) return false
+  x.nombre = String(nombre || '').trim().slice(0, 24) || 'Sin nombre'
+  return true
+}
+
+export const marcarDisenoActivo = (id) => { disenos().activo = id || null }
+
+/**
+ * Convierte un diseño guardado en piezas para el editor, con la aldea de HOY.
+ *
+ * Un diseño no guarda ids: guarda «aquí va una casa, aquí una muralla». Así
+ * aguanta aunque desde que lo guardaste hayas demolido cosas o levantado otras:
+ *   - hueco del diseño sin edificio -> se salta y se avisa.
+ *   - edificio que el diseño no contempla -> se queda donde está, y si el sitio
+ *     lo ha pillado el diseño, se le busca el hueco libre más cercano.
+ * Nunca falla: devuelve el mejor plano posible y la lista de avisos.
+ *
+ * @returns {{piezas:Array, avisos:string[]}|null}
+ */
+export function cargarDiseno (id) {
+  const dis = disenos().lista.find(d => d.id === id)
+  if (!dis) return null
+  const avisos = []
+
+  // los edificios de hoy, por tipo y con los más mejorados primero
+  const porTipo = new Map()
+  for (const b of game.state.buildings) {
+    if (!def(b.tipo)) continue
+    if (!porTipo.has(b.tipo)) porTipo.set(b.tipo, [])
+    porTipo.get(b.tipo).push(b)
+  }
+  for (const lista of porTipo.values()) lista.sort((a, b) => (b.nivel || 0) - (a.nivel || 0) || String(a.id).localeCompare(String(b.id)))
+
+  const G = CONFIG.GRID
+  const ocupa = new Uint8Array(G * G)
+  const marcar = (p) => {
+    for (let dz = 0; dz < p.alto; dz++) {
+      for (let dx = 0; dx < p.ancho; dx++) {
+        const x = p.x + dx; const z = p.z + dz
+        if (dentro(x, z)) ocupa[z * G + x] = 1
+      }
+    }
+  }
+  const cabe = (x, z, ancho, alto) => {
+    if (!dentro(x, z) || !dentro(x + ancho - 1, z + alto - 1)) return false
+    if (!territorioLibre(game.state, x, z, ancho, alto)) return false
+    for (let dz = 0; dz < alto; dz++) {
+      for (let dx = 0; dx < ancho; dx++) if (ocupa[(z + dz) * G + x + dx]) return false
+    }
+    return true
+  }
+
+  const piezas = []
+  const faltan = {}
+  for (const slot of dis.piezas) {
+    const lista = porTipo.get(slot.tipo)
+    const b = lista && lista.shift()
+    if (!b) { faltan[slot.tipo] = (faltan[slot.tipo] || 0) + 1; continue }
+    const p = piezaDe(b)
+    p.x = slot.x | 0; p.z = slot.z | 0; p.rot = (slot.rot | 0) % 4
+    piezas.push(p)
+    marcar(p)
+  }
+
+  // los que el diseño no conocía: se quedan donde están, o al hueco más cercano
+  let recolocados = 0
+  let sinSitio = 0
+  const sobrantes = []
+  for (const lista of porTipo.values()) for (const b of lista) sobrantes.push(b)
+  for (const b of sobrantes) {
+    const p = piezaDe(b)
+    if (!cabe(p.x, p.z, p.ancho, p.alto)) {
+      const hueco = huecoMasCerca(p, cabe)
+      if (hueco) { p.x = hueco.x; p.z = hueco.z; recolocados++ } else sinSitio++
+    }
+    piezas.push(p)
+    marcar(p)
+  }
+
+  for (const t in faltan) avisos.push(`El diseño esperaba ${cuantos(t, faltan[t])} que ya no tienes: ese hueco se queda vacío.`)
+  if (recolocados) avisos.push(`${recolocados} edificio${recolocados > 1 ? 's' : ''} que no estaba${recolocados > 1 ? 'n' : ''} en el diseño: colocado${recolocados > 1 ? 's' : ''} en el hueco libre más cercano.`)
+  if (sinSitio) avisos.push(`${sinSitio} edificio${sinSitio > 1 ? 's' : ''} sin sitio: míralo${sinSitio > 1 ? 's' : ''} en rojo antes de guardar.`)
+
+  return { piezas, avisos }
+}
+
+/** Búsqueda en anillos alrededor del sitio original. El más cercano, siempre. */
+function huecoMasCerca (p, cabe, radio = 14) {
+  for (let r = 1; r <= radio; r++) {
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue   // solo el borde del anillo
+        const x = p.x + dx; const z = p.z + dz
+        if (cabe(x, z, p.ancho, p.alto)) return { x, z }
+      }
+    }
+  }
+  return null
+}
+
 // --- partida nueva: la aldea inicial ----------------------------------------
 
 /**
@@ -1109,6 +1723,7 @@ function montarAldeaInicial () {
 function normalizar () {
   const s = game.state
   territorio()                      // toda partida tiene su núcleo, venga de donde venga
+  disenos()                         // y su cajón de diseños, aunque venga vacío
   if (!Array.isArray(s.buildings)) s.buildings = []
   if (!Array.isArray(s.obras)) s.obras = []
   if (!Array.isArray(s.colaObras)) s.colaObras = []
@@ -1143,6 +1758,11 @@ function arranque () {
     montarAldeaInicial()
     return
   }
+  // El editor se quedó abierto al cerrar la app: lo que hubiera en la caja
+  // vuelve al tablero. Un edificio no se pierde por cerrar el navegador.
+  const rescatados = rescatarReorganizacion()
+  if (rescatados) toast(`${rescatados} edificio${rescatados > 1 ? 's' : ''} volvió a su sitio: te quedó abierta la reorganización.`, 'info')
+
   // Obras que vencieron con la app cerrada: se completan de golpe, con un solo
   // aviso. Detrás entra lo que estuviera esperando turno en la cola.
   const hechas = revisarObras(false)
