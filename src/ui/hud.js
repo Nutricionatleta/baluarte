@@ -18,8 +18,8 @@
 import { events, EV } from '../core/events.js'
 import { CONFIG, ICONO } from '../core/config.js'
 import { game } from '../core/state.js'
-import { def as defEdificio, AGE_NOMBRE } from '../data/buildings.js'
-import { defUnidad } from '../data/units.js'
+import { def as defEdificio, AGE_NOMBRE, efectosDe, paraQueSirve, GRUPOS_AYUDA } from '../data/buildings.js'
+import { defUnidad, UNIDADES, PIEDRA_PAPEL } from '../data/units.js'
 import { centroDe, dist } from '../core/grid.js'
 import * as guardado from '../core/save.js'
 import {
@@ -201,6 +201,16 @@ button.pastilla:active { background: rgba(90, 58, 34, .12); }
 .mini > b { flex: none; font-size: .62em; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .mini > small { display: none; }
 .mini.sin-cuenta > i { font-size: 1.5em; }
+/* el de las fugas, en rojo y con latido: es el único que pide que lo toques */
+.mini-aviso {
+  background-image: linear-gradient(180deg, var(--rojo-claro), var(--rojo));
+  border-color: var(--rojo-oscuro); color: #fff3ec;
+  box-shadow: 0 4px 0 var(--rojo-oscuro), var(--brillo);
+}
+/* late el icono, no el botón entero: un botón que se mueve se falla al tocarlo */
+.mini-aviso > i { animation: latido 2.2s var(--curva) infinite; }
+.mini-aviso > b { font-size: .72em; }
+.mini-aviso:active { box-shadow: 0 1px 0 var(--rojo-oscuro); }
 /* el de aldeanos es más ancho: «120/120» son siete caracteres y tienen que
    caber enteros dentro del botón, sin recortes ni globos encima */
 .mini-ancho { width: 68px; min-width: 68px; padding: 2px 3px; border-radius: var(--r-g); }
@@ -327,6 +337,17 @@ button.pastilla:active { background: rgba(90, 58, 34, .12); }
 /* ---------- ficha de edificio ---------- */
 .ficha-cab { display: flex; align-items: center; gap: 12px; }
 .ficha-cab .icono-gr { font-size: 2.4em; }
+/* la frase de «para qué sirve» es lo primero que se lee: tinta normal y
+   cuerpo entero. La frase de sabor va debajo, pequeña y en cursiva. */
+.ficha-paraque { font-size: .88em; font-weight: 700; line-height: 1.3; color: var(--tinta); }
+.ficha-sabor { font-style: italic; line-height: 1.3; margin-top: -4px; }
+/* «Qué hace»: una fila por efecto, con su número y el porqué debajo */
+.que-hace { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.que-fila { display: flex; align-items: flex-start; gap: 9px; }
+.que-fila > i { flex: none; font-style: normal; font-size: 1.3em; line-height: 1.15; width: 24px; text-align: center; }
+.que-txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: .86em; line-height: 1.3; }
+.que-txt b { font-weight: 800; }
+.que-txt small { font-size: .82em; font-weight: 600; color: var(--tinta-suave); line-height: 1.25; }
 .ficha-gente { display: flex; align-items: center; gap: 10px; }
 .ficha-gente .btn { min-width: 62px; font-size: 1.3em; }
 .ficha-gente-num { flex: 1; text-align: center; font-size: 1.1em; font-weight: 800; line-height: 1.15; font-variant-numeric: tabular-nums; }
@@ -552,6 +573,149 @@ function produccionDe (id) {
 }
 
 /* ===========================================================================
+   LO QUE TE ESTÁ HACIENDO DAÑO
+   El jugador no puede arreglar lo que no ve. Aquí se buscan las cuatro fugas
+   que más caras salen —almacén rebosando, puestos vacíos, sin camas y sin
+   quien dispare— y se dicen con su número y su botón para arreglarlo. Salen en
+   el botón ⚠️ del borde derecho, que es donde el jugador ya mira.
+   =========================================================================== */
+
+function problemas () {
+  const s = game.state
+  const eco = economia()
+  const g = gente()
+  const lista = []
+  const mas = (o) => lista.push(o)
+
+  // 1. almacén al tope: cada hora que pasa se tira producción de verdad
+  for (const r of CONFIG.RECURSOS) {
+    const e = eco[r]
+    if (!e.lleno) continue
+    const guarda = (r === 'comida' || r === 'oro') ? 'granero' : 'almacen'
+    const nombre = (defEdificio(guarda)?.nombre || 'almacén').toLowerCase()
+    mas({
+      clave: `lleno-${r}`, icono: ICONO[r], peso: 100,
+      titulo: `${NOMBRE_RECURSO[r]} al tope`,
+      detalle: e.desperdicio > 0
+        ? `Estás perdiendo ${formatoNumero(Math.round(e.desperdicio))} de ${r} por hora: no cabe más. Gástalo o levanta otro ${nombre}.`
+        : `No cabe más ${r}: lo que produzcas de más se tira. Gástalo o levanta otro ${nombre}.`,
+      boton: 'Ver', accion: () => abrirEconomia(r)
+    })
+  }
+
+  // 2. se gasta más de lo que entra (la tropa come)
+  for (const r of CONFIG.RECURSOS) {
+    const e = eco[r]
+    if (e.neto >= 0 || e.cantidad <= 0) continue
+    mas({
+      clave: `mengua-${r}`, icono: '📉', peso: 90,
+      titulo: `Se te acaba ${NOMBRE_RECURSO[r].toLowerCase()}`,
+      detalle: `Sale más de lo que entra: en ${formatoTiempo(e.cantidad / (-e.neto) * 3600)} te quedas a cero.`,
+      boton: 'Ver', accion: () => abrirEconomia(r)
+    })
+  }
+
+  // 3. puestos de trabajo vacíos: producción tirada sin que se note
+  const vacios = []
+  for (const r of CONFIG.RECURSOS) for (const e of eco[r].edificios) {
+    if (e.plazas > e.dentro) vacios.push(e)
+  }
+  if (vacios.length) {
+    const faltan = vacios.reduce((n, e) => n + (e.plazas - e.dentro), 0)
+    mas({
+      clave: 'puestos', icono: '🧑‍🌾', peso: 80,
+      titulo: `${faltan} ${faltan === 1 ? 'puesto vacío' : 'puestos vacíos'}`,
+      detalle: g.parados > 0
+        ? `Tienes ${g.parados} ${g.parados === 1 ? 'aldeano' : 'aldeanos'} sin oficio y ${faltan} ${faltan === 1 ? 'puesto' : 'puestos'} sin cubrir. Un puesto vacío rinde la cuarta parte.`
+        : `Te falta gente para llenarlos (${vacios[0].nombre} tiene ${vacios[0].dentro} de ${vacios[0].plazas}). Sube el tope con casas y contrata.`,
+      boton: g.parados > 0 ? 'Repartir' : 'Ver',
+      accion: g.parados > 0
+        ? () => { pedir('aldeanos', 'asignarAutomatico', 0); pintarRecursos(); toast('Cada uno a su faena', 'bien') }
+        : () => abrirEconomia(null)
+    })
+  }
+
+  // 4. sin camas: la aldea deja de crecer y no se entiende por qué
+  if (g.maxima > 0 && g.actual >= g.maxima) {
+    mas({
+      clave: 'camas', icono: '🛏️', peso: 70,
+      titulo: 'No quedan camas',
+      detalle: `${g.actual} de ${g.maxima} vecinos: no llegará gente nueva hasta que levantes casas o mejores el Ayuntamiento.`,
+      boton: 'Construir', accion: () => events.emit(EV.UI_PANEL, { panel: 'construir', datos: { categoria: 'centro' } })
+    })
+  }
+
+  // 5. un hueco en la defensa: que nadie cubra el Ayuntamiento es el peor
+  const ayto = (s.buildings || []).find(b => b.tipo === 'ayuntamiento')
+  if (ayto) {
+    const torres = (s.buildings || []).filter(b => !b.enObra && typeof defEdificio(b.tipo)?.dano === 'function')
+    const c = centroDe(ayto)
+    const cubren = torres.filter(t => {
+      const d = defEdificio(t.tipo)
+      const ct = centroDe(t)
+      return dist(c.x, c.z, ct.x, ct.z) <= (d.radio?.(t.nivel || 1) || 0) + 2
+    }).length
+    if (!cubren) {
+      mas({
+        clave: 'defensa', icono: '🗼', peso: 60,
+        titulo: torres.length ? 'Tu Ayuntamiento está descubierto' : 'Nadie defiende la aldea',
+        detalle: torres.length
+          ? 'Ninguna torre llega hasta el Ayuntamiento: si el enemigo se planta ahí, no le dispara nadie.'
+          : 'No tienes ni una torre. Los muros solo dan tiempo; quien mata al que entra son las torres.',
+        boton: 'Poner torre', accion: () => events.emit(EV.UI_PANEL, { panel: 'construir', datos: { categoria: 'defensa' } })
+      })
+    }
+  }
+
+  return lista.sort((a, b) => b.peso - a.peso)
+}
+
+/** El botón ⚠️: cuántas fugas hay y, al tocarlo, cuáles y cómo se arreglan. */
+function abrirProblemas () {
+  const cuerpo = el('div', { clase: 'col' })
+  const panel = hoja({
+    titulo: '⚠️ Qué te está costando partida',
+    contenido: cuerpo,
+    alCerrar: () => refrescadores.delete(pintar)
+  })
+
+  // Se repinta solo cuando cambia la LISTA, no cuatro veces por segundo: si no,
+  // el dedo del jugador se queda sin tarjeta a mitad de toque.
+  let firma = null
+  function pintar () {
+    const lista = problemas()
+    const nueva = lista.map(p => p.clave).join('|')
+    if (nueva === firma) return
+    firma = nueva
+    vaciar(cuerpo)
+    if (!lista.length) {
+      cuerpo.appendChild(el('div', { clase: 'aviso aviso-bien' }, [
+        el('i', { texto: '✅' }),
+        el('span', { texto: 'La aldea va fina: no se pierde nada, todo el mundo trabaja y hay quien vigile.' })
+      ]))
+      return
+    }
+    cuerpo.appendChild(el('p', { clase: 'tenue pequeño', estilo: { margin: '0' }, texto: 'Ninguna de estas cosas te para el juego, pero todas te cuestan partida. De más grave a menos:' }))
+    for (const p of lista) {
+      cuerpo.appendChild(el('div', { clase: 'panel col', estilo: { padding: '10px 12px', gap: '6px' } }, [
+        el('div', { clase: 'fila', estilo: { gap: '9px' } }, [
+          el('span', { clase: 'icono-gr', texto: p.icono }),
+          el('b', { clase: 'crece', texto: p.titulo })
+        ]),
+        el('div', { clase: 'pequeño', estilo: { lineHeight: '1.35' }, texto: p.detalle }),
+        el('button', {
+          clase: 'btn btn-oro btn-gordo', type: 'button', texto: p.boton,
+          onclick: () => { panel.cerrar(); p.accion() }
+        })
+      ]))
+    }
+  }
+  pintar()
+  refrescadores.add(pintar)
+  return panel
+}
+
+/* ===========================================================================
    Montaje
    =========================================================================== */
 
@@ -575,6 +739,7 @@ export async function init () {
   pintarObras()
   pintarConsejo()
   pintarBadges()
+  pintarAvisos()
   medirTop()
 
   // Un solo latido para todo lo que cuenta hacia atrás. Nada de rAF: el HUD no
@@ -589,7 +754,7 @@ function refrescoLigero () {
   vueltas++
   pintarObras()
   pintarAlarma()
-  if (vueltas % 4 === 0) { pintarRecursos(); pintarBadges(); medirTop() }   // 1 vez/s
+  if (vueltas % 4 === 0) { pintarRecursos(); pintarBadges(); pintarAvisos(); medirTop() }   // 1 vez/s
   if (vueltas % 12 === 0) pintarConsejo()                            // 1 vez cada 3 s
   for (const f of refrescadores) { try { f() } catch (err) { console.warn('[hud] refresco', err) } }
 }
@@ -1079,6 +1244,14 @@ function montarObras () {
   }, [el('i', { texto: ICONO.aldeano }), nodos.poblacion, nodos.parados])
   nodos.botonGente._globo = nodos.parados
 
+  // ⚠️ EL BOTÓN DE LAS FUGAS. Solo aparece cuando de verdad se está perdiendo
+  // algo (almacén rebosando, puestos vacíos, sin camas, sin torres) y dice
+  // cuántas cosas hay. Antes todo esto estaba escondido y el jugador perdía
+  // producción durante días sin enterarse.
+  nodos.miniAvisos = pastillaMini('⚠️', abrirProblemas, 'Qué te está costando partida')
+  nodos.miniAvisos.classList.add('mini-aviso')
+  nodos.miniAvisos.style.display = 'none'
+
   nodos.miniExplorador = pastillaMini('🐎', abrirExplorador, 'Exploradores')
   nodos.miniTropa = pastillaMini('⚔️', () => events.emit(EV.UI_PANEL, { panel: 'ejercito' }), 'Tropa en entrenamiento')
   nodos.miniCiencia = pastillaMini('📜', () => events.emit(EV.UI_PANEL, { panel: 'investigar' }), 'Investigación en curso')
@@ -1094,7 +1267,7 @@ function montarObras () {
   })
 
   nodos.minis = el('div', { clase: 'hud-minis' }, [
-    nodos.botonGente, nodos.botonVolver, nodos.miniExplorador, nodos.miniTropa, nodos.miniCiencia
+    nodos.botonGente, nodos.miniAvisos, nodos.botonVolver, nodos.miniExplorador, nodos.miniTropa, nodos.miniCiencia
   ])
   raiz().appendChild(nodos.minis)
 }
@@ -1503,6 +1676,18 @@ function pintarBadges () {
   fijarBadge('encargos', porCobrar)
 }
 
+/** El botón ⚠️ del borde: sale solo si hay fugas, y dice cuántas. */
+function pintarAvisos () {
+  const nodo = nodos.miniAvisos
+  if (!nodo) return
+  const lista = problemas()
+  if (!lista.length) { nodo.style.display = 'none'; return }
+  if (nodo.style.display === 'none') { nodo.style.display = ''; latir(nodo) }
+  const texto = String(lista.length)
+  if (nodo._cifra.textContent !== texto) { nodo._cifra.textContent = texto; latir(nodo) }
+  nodo.setAttribute('aria-label', `${lista.length} ${lista.length === 1 ? 'cosa te está costando' : 'cosas te están costando'} partida. La peor: ${lista[0].titulo}`)
+}
+
 const fijarBadge = (panel, n) => fijarBadgeNodo(nodos.badges?.[panel], n)
 
 function fijarBadgeNodo (globo, n) {
@@ -1582,8 +1767,11 @@ function firmaDe (b) {
   }
   if (b.tipo === 'monasterio') gestion.push(pedir('ejercito', 'tiempoRecuperacion', { heridos: 0 }).heridos)
   if (b.tipo === 'campamento_explorador') gestion.push((s.expediciones || []).length)
+  // qué recursos están al tope: es lo que enciende y apaga el aviso de «estás
+  // tirando madera» de la ficha del almacén y del granero
+  const topes = CONFIG.RECURSOS.map(r => ((s.almacen?.[r] || 0) > 0 && (s.recursos?.[r] || 0) >= s.almacen[r]) ? 1 : 0).join('')
   return [
-    b.nivel, !!b.enObra, !!b.mejorando, !!b.arruinado, Math.round(b.hp || 0),
+    b.nivel, !!b.enObra, !!b.mejorando, !!b.arruinado, Math.round(b.hp || 0), topes,
     (b.trabajadores || []).length, (game.state.villagers || []).filter(v => !v.buildingId).length,
     puede.ok, puede.motivo, (s.ejercito?.cola || []).length, gestion.join(',')
   ].join('|')
@@ -1600,9 +1788,12 @@ function contenidoFicha (b, panel) {
     el('span', { clase: 'icono-gr', texto: d?.icono || '🏚️' }),
     el('div', { clase: 'col', estilo: { gap: '2px' } }, [
       el('div', { clase: 'titular', texto: b.nivel === 0 ? 'En construcción' : `Nivel ${nivel}${d?.maxNivel ? ` de ${d.maxNivel}` : ''}` }),
-      d?.desc ? el('div', { clase: 'tenue pequeño', texto: d.desc }) : null
+      // PARA QUÉ SIRVE, en cristiano y en tinta normal. La frase de sabor pasa a
+      // segundo plano: es simpática, pero no contesta «¿y esto qué hace?».
+      el('div', { clase: 'ficha-paraque', texto: paraQueSirve(b.tipo) })
     ])
   ]))
+  if (d?.desc) caja.appendChild(el('div', { clase: 'tenue pequeño ficha-sabor', texto: d.desc }))
 
   // --- obra en curso: cuenta atrás y acelerar ---
   if (enObra) {
@@ -1637,7 +1828,9 @@ function contenidoFicha (b, panel) {
 
   if (d?.produce && typeof d.porMinuto === 'function') {
     baldosas.push(el('div', { clase: 'stat' }, [
-      el('small', { texto: `Produce ${ICONO[d.produce] || ''}` }),
+      // «ahora»: es lo que entra de verdad con la gente que hay dentro, no lo
+      // que pone el catálogo (eso se explica abajo, en «Qué hace»)
+      el('small', { texto: `Ahora produce ${ICONO[d.produce] || ''}` }),
       el('b', {
         clase: `ritmo ${tonoRitmo(prod ? prod.porHora : 0)}`,
         texto: enObra ? '—' : porHora(prod ? prod.porHora : d.porMinuto(nivel) * 60)
@@ -1651,26 +1844,10 @@ function contenidoFicha (b, panel) {
       el('b', { clase: dentroAhora < plazas ? 'ritmo-mal' : '', texto: `${dentroAhora} de ${plazas}` })
     ]))
   }
-  if (typeof d?.poblacionMax === 'function') {
-    baldosas.push(el('div', { clase: 'stat' }, [el('small', { texto: 'Población' }), el('b', { texto: `${ICONO.aldeano} ${d.poblacionMax(nivel)}` })]))
-  }
-  if (typeof d?.obrasSimultaneas === 'function') {
-    baldosas.push(el('div', { clase: 'stat' }, [el('small', { texto: 'Obras a la vez' }), el('b', { texto: `🔨 ${d.obrasSimultaneas(nivel)}` })]))
-  }
-  if (typeof d?.dano === 'function') {
-    baldosas.push(el('div', { clase: 'stat' }, [el('small', { texto: 'Daño' }), el('b', { texto: `⚔️ ${formatoNumero(d.dano(nivel))}` })]))
-  }
-  if (typeof d?.exploradores === 'function') {
-    baldosas.push(el('div', { clase: 'stat' }, [el('small', { texto: 'Batidores' }), el('b', { texto: `🐎 ${d.exploradores(nivel)}` })]))
-  }
-  if (typeof d?.capacidad === 'function') {
-    const extra = d.capacidad(nivel) || {}
-    const partes = CONFIG.RECURSOS.filter(r => extra[r]).map(r => `${ICONO[r]}${formatoNumero(extra[r])}`)
-    if (partes.length) baldosas.push(el('div', { clase: 'stat' }, [el('small', { texto: 'Guarda' }), el('b', { texto: partes.join(' ') })]))
-  }
-  if (typeof d?.aloja === 'function') {
-    baldosas.push(el('div', { clase: 'stat' }, [el('small', { texto: 'Camas' }), el('b', { texto: `${ICONO.aldeano} ${d.aloja(nivel)}` })]))
-  }
+  // Población, camas, daño, batidores y lo que guarda ya NO van en baldosas: son
+  // números del catálogo y ahora se explican enteros, con sus unidades y su
+  // porqué, en «Qué hace». Aquí arriba solo se queda lo que cambia solo: lo que
+  // produce de verdad, quién está trabajando dentro y cómo anda de salud.
   if (b.hpMax) {
     const roto = b.hp < b.hpMax
     baldosas.push(el('div', { clase: 'stat' }, [
@@ -1679,6 +1856,12 @@ function contenidoFicha (b, panel) {
     ]))
   }
   if (baldosas.length) caja.appendChild(el('div', { clase: 'stats' }, baldosas))
+
+  // --- QUÉ HACE, con el número de ESTE edificio a ESTE nivel ---
+  if (!enObra) caja.appendChild(bloqueQueHace(b.tipo, nivel))
+
+  // --- POR QUÉ TE CONVIENE: lo que le está pasando ahora mismo ---
+  if (!enObra) for (const av of avisosDeEdificio(b, d, nivel)) caja.appendChild(av)
 
   // --- aldeanos asignados: los + y − son lo que más se toca de la ficha ---
   if (plazas > 0) {
@@ -1762,6 +1945,121 @@ function contenidoFicha (b, panel) {
 
   caja.appendChild(acciones)
   return caja
+}
+
+/**
+ * QUÉ HACE ESTE EDIFICIO. Los números salen de `efectosDe()` (data/buildings),
+ * o sea del MISMO sitio del que los saca la simulación: si mañana alguien
+ * reequilibra el juego, esta ficha sigue diciendo la verdad sin tocarla.
+ */
+function bloqueQueHace (tipo, nivel) {
+  const caja = el('div', { clase: 'panel que-hace' })
+  caja.appendChild(el('div', { clase: 'ficha-seccion', texto: 'Qué hace, a este nivel' }))
+  // la vida ya sale arriba en su baldosa de «Resistencia»: repetirla es ruido
+  const lista = efectosDe(tipo, nivel).filter(e => e.clave !== 'vida')
+  if (!lista.length) {
+    caja.appendChild(el('div', { clase: 'ficha-nota', texto: 'Nada de nada: está aquí de adorno.' }))
+    return caja
+  }
+  for (const e of lista) {
+    caja.appendChild(el('div', { clase: 'que-fila' }, [
+      el('i', { texto: e.icono }),
+      el('div', { clase: 'crece que-txt' }, [
+        el('div', {}, [el('b', { texto: `${e.etiqueta}: ` }), el('span', { texto: e.valor })]),
+        e.nota ? el('small', { texto: e.nota }) : null
+      ])
+    ]))
+  }
+  return caja
+}
+
+/**
+ * POR QUÉ TE CONVIENE (o por qué te está haciendo daño) ESTE edificio, con el
+ * estado de la partida en la mano: el almacén que rebosa, el molino plantado
+ * donde no llega a ninguna granja, el puesto de trabajo vacío. Es la diferencia
+ * entre saber qué hace un edificio y saber qué hacer con él.
+ */
+function avisosDeEdificio (b, d, nivel) {
+  const s = game.state
+  const out = []
+  const aviso = (tono, icono, texto) => out.push(
+    el('div', { clase: `aviso aviso-${tono}` }, [el('i', { texto: icono }), el('span', { texto })])
+  )
+  if (!d) return out
+  const eco = economia()
+
+  // almacén y granero: ¿se está tirando algo por culpa de su tope?
+  if (typeof d.capacidad === 'function') {
+    const guarda = Object.keys(d.capacidad(nivel) || {})
+    const tirando = guarda.filter(r => eco[r]?.lleno)
+    if (tirando.length) {
+      const txt = tirando.map(r => `${formatoNumero(Math.round(eco[r].desperdicio))} de ${r}`).join(' y ')
+      aviso('mal', '🚨', `Estás perdiendo ${txt} por hora: ya no cabe más. Mejora este ${d.nombre.toLowerCase()} o levanta otro.`)
+    } else {
+      const pronto = guarda.map(r => eco[r]).filter(e => e && e.llenaEn != null).sort((a, c) => a.llenaEn - c.llenaEn)[0]
+      if (pronto && pronto.llenaEn < 3600) {
+        aviso('info', '⏳', `Se te llena en ${formatoTiempo(pronto.llenaEn)}. A partir de ahí, lo que produzcas de más se tira.`)
+      }
+    }
+  }
+
+  // molino: solo vale si de verdad llega a las granjas
+  if (d.aura && typeof d.aura.bonus === 'function') {
+    const c = centroDe(b)
+    const vecina = defEdificio(d.aura.afecta)
+    const nombre = (vecina?.nombre || 'edificio').toLowerCase()
+    const tocadas = (s.buildings || []).filter(x => {
+      if (x.tipo !== d.aura.afecta || x.enObra) return false
+      const cc = centroDe(x)
+      return dist(c.x, c.z, cc.x, cc.z) <= d.aura.radio
+    }).length
+    if (!tocadas) {
+      aviso('mal', '⚠️', `Aquí no le llega a ninguna ${nombre}: así no sirve absolutamente de nada. Muévelo al centro de un grupo de ${nombre}s.`)
+    } else {
+      aviso('bien', '✅', `Ahora mismo mejora ${tocadas} ${nombre}${tocadas > 1 ? 's' : ''}: cada una produce un ${Math.round(d.aura.bonus(nivel) * 100)} % más.`)
+    }
+  }
+
+  // herrería: a cuánta gente le está subiendo el ataque
+  if (typeof d.bonusAtaque === 'function') {
+    const tropas = Object.values(s.ejercito?.tropas || {}).reduce((a, n) => a + (Number(n) || 0), 0)
+    const pct = Math.round(d.bonusAtaque(nivel) * 100)
+    aviso(tropas ? 'bien' : 'info', '⚔️', tropas
+      ? `Tus ${tropas} soldados están pegando un ${pct} % más por esto, y los que entrenes saldrán ya mejorados.`
+      : `Todavía no tienes tropa, pero en cuanto entrenes saldrá con ese ${pct} % de más puesto.`)
+  }
+
+  // puestos vacíos: es la fuga de producción más tonta del juego
+  const plazas = typeof d.plazas === 'function' ? d.plazas(nivel) : 0
+  if (plazas > 0) {
+    const dentro = (b.trabajadores || []).length
+    if (dentro < plazas) {
+      const libres = (s.villagers || []).filter(v => !v.buildingId).length
+      aviso('mal', '🧑‍🌾', libres
+        ? `Le faltan ${plazas - dentro} en el puesto y tienes ${libres} sin oficio: métel${libres > 1 ? 'os' : 'o'} con el + y producirá más.`
+        : `Le faltan ${plazas - dentro} en el puesto y no hay nadie libre. Levanta una casa para que llegue gente nueva.`)
+    }
+  }
+
+  // camas: si el tope está tocado, subirlo es lo que desatasca la aldea
+  if (typeof d.poblacionMax === 'function' || typeof d.aloja === 'function') {
+    const g = gente()
+    if (g.maxima > 0 && g.actual >= g.maxima) {
+      aviso('mal', '🛏️', `No queda ni una cama libre (${g.actual} de ${g.maxima}): no llegará gente nueva hasta que subas el tope.`)
+    }
+  }
+
+  // monasterio: los heridos que tiene dentro
+  if (typeof d.curacion === 'function') {
+    const h = pedir('ejercito', 'tiempoRecuperacion', { heridos: 0 }).heridos || 0
+    if (h) aviso('info', '⛪', `Tienes ${h} heridos remendándose aquí dentro: volverán a pelear solos.`)
+  }
+
+  // taller de asedio: la lección que el juego no contaba
+  if (Array.isArray(d.entrena) && d.entrena.includes('ariete')) {
+    aviso('info', '🧱', `Contra un tramo de muro, un lancero hace ${danoAMuro('lancero')} de daño y un ariete ${danoAMuro('ariete')}: es lo único que abre una muralla deprisa. Sin arietes, una plaza amurallada es un muro de verdad.`)
+  }
+  return out
 }
 
 /* ---------------------------------------------------------------------------
@@ -2140,6 +2438,110 @@ function celebrar (icono, titulo, texto) {
 }
 
 /* ===========================================================================
+   AYUDA: para qué sirve cada cosa
+   Agrupada por PARA QUÉ SIRVE (no por pestaña del catálogo) y escrita para
+   leerse de un tirón en dos minutos. Los grupos y las frases viven en
+   data/buildings.js, y los números de cada edificio salen de `efectosDe()`:
+   aquí no se escribe ni una cifra a mano.
+   =========================================================================== */
+
+/**
+ * Las cuatro reglas que el juego nunca contaba y que explican casi todo lo que
+ * le desespera a un jugador nuevo. La del muro y los arietes es la que más:
+ * sin ella, las plazas amuralladas parecen un callejón sin salida.
+ */
+/** Daño que le hace a un tramo de muro un golpe de esa tropa (catálogo puro). */
+const danoAMuro = (tipo) => Math.round((UNIDADES[tipo]?.ataque || 0) * (PIEDRA_PAPEL[tipo]?.muro ?? 1))
+
+const LECCIONES = [
+  {
+    icono: '⏳',
+    titulo: 'Todo produce solo, también con el móvil guardado',
+    texto: 'Las serrerías, canteras, granjas y minas trabajan sin ti (hasta 8 horas guardadas). Tú decides qué se construye y cuánta gente trabaja en cada sitio.'
+  },
+  {
+    icono: '📦',
+    titulo: 'Si el almacén está lleno, estás tirando lo que produces',
+    texto: 'Cada recurso tiene un tope. Al llegar al tope no se acumula nada más: se pierde. El almacén sube el tope de madera y piedra, el granero el de comida y oro. Cuando arriba veas «¡LLENO!», o gastas o amplías.'
+  },
+  {
+    icono: '🧑‍🌾',
+    titulo: 'Un edificio vacío rinde la cuarta parte',
+    texto: 'Los aldeanos necesitan cama (casas y Ayuntamiento) y un puesto donde trabajar. Con los puestos llenos produces cuatro veces más que con ellos vacíos, y no cuesta nada: solo repartir.'
+  },
+  {
+    icono: '🧱',
+    titulo: 'Contra murallas, arietes. No hay otra',
+    texto: `Un lancero le hace ${danoAMuro('lancero')} de daño a un tramo de muro; un ariete, ${danoAMuro('ariete')}. Si atacas una plaza amurallada sin llevar asedio, tu gente se queda picando piedra mientras las torres los siegan. Los arietes salen del taller de asedio, que pide Ayuntamiento de nivel 5, herrería de nivel 3 y la Edad de los Castillos.`
+  },
+  {
+    icono: '♟️',
+    titulo: 'Cada tropa se come a otra',
+    texto: 'Los lanceros destrozan a la caballería; la caballería, a los arqueros; los arqueros, a la infantería a pie; los espadachines protegen a tus máquinas de asedio. Ir con un solo tipo de tropa es la forma más rápida de perder una hueste entera.'
+  }
+]
+
+let hojaAyuda = null
+
+function abrirAyuda () {
+  if (hojaAyuda) return hojaAyuda
+  const s = game.state
+  const cuerpo = el('div', { clase: 'col' })
+
+  cuerpo.appendChild(el('p', {
+    clase: 'pequeño', estilo: { margin: '0', lineHeight: '1.4' },
+    texto: 'Levantas una aldea, la llenas de gente que trabaja, la rodeas de muros y torres, y con lo que produces entrenas tropa para saquear a los vecinos. Esto es lo que hace cada cosa.'
+  }))
+
+  cuerpo.appendChild(el('div', { clase: 'ficha-seccion', texto: 'Las cinco reglas del juego' }))
+  for (const l of LECCIONES) {
+    cuerpo.appendChild(el('div', { clase: 'panel col', estilo: { padding: '10px 12px', gap: '4px' } }, [
+      el('div', { clase: 'fila', estilo: { gap: '9px' } }, [
+        el('span', { clase: 'icono-gr', texto: l.icono }),
+        el('b', { clase: 'crece', texto: l.titulo })
+      ]),
+      el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: l.texto })
+    ]))
+  }
+
+  for (const g of GRUPOS_AYUDA) {
+    cuerpo.appendChild(el('div', { clase: 'ficha-seccion', texto: `${g.icono} ${g.titulo}` }))
+    cuerpo.appendChild(el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: g.texto }))
+    const lista = el('div', { clase: 'panel col', estilo: { padding: '8px 10px', gap: '10px' } })
+    for (const tipo of g.tipos) {
+      const d = defEdificio(tipo)
+      if (!d) continue
+      // el nivel que TIENE el jugador: así los números de la ayuda son los suyos
+      const mio = (s.buildings || []).filter(b => b.tipo === tipo).reduce((n, b) => Math.max(n, b.nivel || 1), 0)
+      const nivel = mio || 1
+      const efectos = efectosDe(tipo, nivel).filter(e => e.clave !== 'vida').slice(0, 3)
+      lista.appendChild(el('div', { clase: 'que-fila' }, [
+        el('i', { texto: d.icono }),
+        el('div', { clase: 'crece que-txt' }, [
+          el('div', {}, [
+            el('b', { texto: d.nombre }),
+            // sin género: «el tuyo» chirría en la cantera y en la granja
+            el('span', { clase: 'tenue', texto: mio ? ` · el que tienes: nivel ${nivel}` : ' · aún no tienes' })
+          ]),
+          el('div', { estilo: { lineHeight: '1.35' }, texto: paraQueSirve(tipo) }),
+          efectos.length
+            ? el('small', { estilo: { color: 'var(--verde-oscuro)', fontWeight: '800' }, texto: efectos.map(e => e.corto).join(' · ') })
+            : null
+        ])
+      ]))
+    }
+    cuerpo.appendChild(lista)
+  }
+
+  hojaAyuda = hoja({
+    titulo: '📖 Para qué sirve cada cosa',
+    contenido: cuerpo,
+    alCerrar: () => { hojaAyuda = null }
+  })
+  return hojaAyuda
+}
+
+/* ===========================================================================
    Ajustes
    =========================================================================== */
 
@@ -2172,6 +2574,13 @@ function abrirAjustes () {
       })
     ])
 
+    // la ayuda, lo primero de todo: es lo que busca quien abre los ajustes sin
+    // saber muy bien para qué sirve el granero
+    cuerpo.appendChild(el('button', {
+      clase: 'btn btn-oro btn-gordo', type: 'button', texto: '📖 Para qué sirve cada cosa',
+      onclick: () => abrirAyuda()
+    }))
+    cuerpo.appendChild(el('div', { clase: 'separador' }))
     cuerpo.appendChild(interruptor('sonido', '🔊', 'Sonido'))
     cuerpo.appendChild(interruptor('musica', '🎵', 'Música'))
     cuerpo.appendChild(el('div', { clase: 'separador' }))
@@ -2305,6 +2714,9 @@ function conectarEventos () {
   events.on(EV.UI_PANEL, (p) => {
     if (p?.panel === 'edificio' && p.datos?.id) abrirFicha(p.datos.id)
     else if (p?.panel === 'produccion' || p?.panel === 'economia') abrirEconomia(p.datos?.recurso || null)
+    // la ayuda la pide el taller con su botón ❓: el HUD es quien la pinta
+    else if (p?.panel === 'ayuda') abrirAyuda()
+    else if (p?.panel === 'avisos') abrirProblemas()
   })
 
   events.on(EV.VISTA_CAMBIADA, (p) => { if (p?.vista) { vistaActual = p.vista; pintarVista() } })

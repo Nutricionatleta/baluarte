@@ -18,7 +18,7 @@ import {
   dentro, huecoLibre, parcelaDe, coordsParcela, rectParcela,
   parcelaDisponible, parcelaEsMia, fronteraDe, PARCELAS, NUCLEO
 } from '../core/grid.js'
-import { EDIFICIOS, def, AGE_NOMBRE, ORDEN_EDADES } from '../data/buildings.js'
+import { EDIFICIOS, def, AGE_NOMBRE, ORDEN_EDADES, efectosDe, paraQueSirve } from '../data/buildings.js'
 import {
   el, hoja, toast, confirmar, vaciar, formatoNumero, formatoTiempo,
   costeHTML, alcanza, chip, barraProgreso, pestañas
@@ -72,12 +72,16 @@ const gemas = () => estado().jugador?.gemas || 0
    Catálogo: categorías y pesos
    =========================================================================== */
 
+/**
+ * Las cinco pestañas del catálogo. `explica` es lo que hace falta para no tener
+ * que abrir tarjeta por tarjeta: en una línea, para qué sirve TODA la pestaña.
+ */
 const CATEGORIAS = [
-  { id: 'centro', texto: 'Centro', icono: '🏛️' },
-  { id: 'recursos', texto: 'Recursos', icono: '🪵' },
-  { id: 'militar', texto: 'Militar', icono: '⚔️' },
-  { id: 'defensa', texto: 'Defensa', icono: '🛡️' },
-  { id: 'decoracion', texto: 'Adornos', icono: '🚩' }
+  { id: 'centro', texto: 'Gente', icono: '🏛️', explica: 'Camas y mando: suben el tope de vecinos y el número de constructores. Sin gente, nada produce.' },
+  { id: 'recursos', texto: 'Recursos', icono: '🪵', explica: 'De aquí sale la madera, la piedra, la comida y el oro… y aquí se guardan: el almacén y el granero suben el TOPE, y lo que pasa del tope se tira.' },
+  { id: 'militar', texto: 'Tropa', icono: '⚔️', explica: 'Donde se entrena y se mejora la tropa. La herrería no entrena a nadie: mejora a todos tus soldados a la vez.' },
+  { id: 'defensa', texto: 'Defensa', icono: '🛡️', explica: 'Muros y fosos dan tiempo; las torres son las que matan. Un muro sin torres detrás no defiende nada.' },
+  { id: 'decoracion', texto: 'Adornos', icono: '🚩', explica: 'Puro adorno: no hacen absolutamente nada.' }
 ]
 
 const SECCIONES = [
@@ -265,36 +269,14 @@ function textoInventario (tipo) {
  * @returns {Array<{etiqueta:string, valor:string}>}
  */
 function efectos (tipo, n = 1) {
-  const d = def(tipo)
-  if (!d) return []
-  const l = []
-  const mas = (etiqueta, valor) => l.push({ etiqueta, valor })
-
-  if (typeof d.porMinuto === 'function') mas('Produce', `${ICONO[d.produce] || ''} ${num(d.porMinuto(n))}/min`)
-  if (typeof d.plazas === 'function' && d.plazas(n) > 0) mas('Puestos', `🧑‍🌾 ${d.plazas(n)}`)
-  if (typeof d.aloja === 'function') mas('Aloja', `🛏️ ${d.aloja(n)}`)
-  if (typeof d.poblacionMax === 'function') mas('Población', `👥 ${d.poblacionMax(n)}`)
-  if (typeof d.obrasSimultaneas === 'function') mas('Constructores', `🔨 ${d.obrasSimultaneas(n)}`)
-  if (typeof d.capacidad === 'function') {
-    const c = d.capacidad(n) || {}
-    const txt = Object.keys(c).map(r => `${ICONO[r]} ${formatoNumero(c[r])}`).join(' ')
-    if (txt) mas('Guarda', txt)
-  }
-  if (typeof d.dano === 'function') mas('Dispara', `💥 ${d.dano(n)}`)
-  if (typeof d.radio === 'function') mas('Alcance', `🎯 ${num(d.radio(n))}`)
-  if (typeof d.velocidad === 'function') mas('Entrena', `⏱️ ×${num(d.velocidad(n))}`)
-  if (typeof d.bonusAtaque === 'function') mas('Ataque', `⚔️ +${Math.round(d.bonusAtaque(n) * 100)} %`)
-  if (typeof d.bonusArmadura === 'function') mas('Armadura', `🛡️ +${Math.round(d.bonusArmadura(n) * 100)} %`)
-  if (d.aura && typeof d.aura.bonus === 'function') mas('Granjas cerca', `🌬️ +${Math.round(d.aura.bonus(n) * 100)} %`)
-  if (typeof d.curacion === 'function') mas('Cura heridos', `⛪ ${Math.round(d.curacion(n) * 100)} %`)
-  if (typeof d.exploradores === 'function') mas('Exploradores', `🧭 ${d.exploradores(n)}`)
-  if (typeof d.velocidadInvestigacion === 'function') mas('Investiga', `📜 ×${num(d.velocidadInvestigacion(n))}`)
-  if (typeof d.hp === 'function') mas('Aguanta', `❤️ ${formatoNumero(d.hp(n))}`)
-  return l
+  // Sale del catálogo (data/buildings.js), que es el mismo sitio del que lo saca
+  // la simulación: reequilibrar el juego no deja estos textos mintiendo.
+  // La vida no entra: ocupa una cinta y no ayuda a decidir qué construir.
+  return efectosDe(tipo, n).filter(e => e.clave !== 'vida')
 }
 
 /** Los efectos como cintas verdes: se leen de un vistazo sin abrir nada. */
-function cintasEfecto (tipo, n = 1, cuantas = 2) {
+function cintasEfecto (tipo, n = 1, cuantas = 3) {
   const caja = el('div', { estilo: { display: 'flex', flexWrap: 'wrap', gap: '6px' } })
   for (const e of efectos(tipo, n).slice(0, cuantas)) {
     caja.appendChild(el('span', {
@@ -306,7 +288,7 @@ function cintasEfecto (tipo, n = 1, cuantas = 2) {
       }
     }, [
       el('span', { estilo: { fontWeight: '600', opacity: '.85' }, texto: e.etiqueta }),
-      el('span', { texto: e.valor })
+      el('span', { texto: e.corto })
     ]))
   }
   return caja
@@ -563,9 +545,31 @@ function botonDespejar () {
   ])
 }
 
+/**
+ * ❓ LA AYUDA. El dueño lo pidió tal cual: «un info para ver qué hace cada
+ * edificio». La pinta el HUD (es suya la hoja); aquí solo se pide por el bus.
+ */
+function botonAyuda () {
+  return el('button', {
+    clase: 'btn btn-fantasma', type: 'button',
+    estilo: {
+      minHeight: '48px', width: '100%', display: 'flex', alignItems: 'center',
+      gap: '10px', justifyContent: 'flex-start', padding: '0 14px', textAlign: 'left', marginTop: '8px'
+    },
+    onclick: () => { salirDeColocacion(true); cerrar(); events.emit(EV.UI_PANEL, { panel: 'ayuda' }) }
+  }, [
+    el('span', { estilo: { fontSize: '1.4em', lineHeight: '1' }, texto: '❓' }),
+    el('span', { estilo: { display: 'grid', lineHeight: '1.15' } }, [
+      el('span', { estilo: { fontWeight: '900' }, texto: '¿Para qué sirve cada edificio?' }),
+      el('span', { estilo: { fontSize: '.72em', fontWeight: '700', opacity: '.85' }, texto: 'El juego entero explicado en dos minutos' })
+    ])
+  ])
+}
+
 function pintarCatalogo (destino) {
   destino.appendChild(botonReorganizar())
   destino.appendChild(botonDespejar())
+  destino.appendChild(botonAyuda())
 
   // aviso de constructores: afecta a TODO, mejor arriba que repetido en 20 fichas
   const obras = estado().obras?.length || 0
@@ -599,9 +603,24 @@ function pintarCatalogo (destino) {
   if (consejos.length) destino.appendChild(panelConsejos(consejos))
 
   // al cambiar de categoría, la lista empieza arriba: nadie quiere aterrizar a medias
-  const nav = pestañas(CATEGORIAS, (id) => { categoria = id; pintarRejilla(true); centrarPestaña(nav.nodo) })
+  const explicacion = el('div', {
+    clase: 'pequeño',
+    estilo: {
+      lineHeight: '1.35', padding: '7px 11px', margin: '2px 0',
+      background: 'rgba(212,164,55,.18)', border: '2px solid rgba(156,116,19,.45)',
+      borderRadius: 'var(--r-m)', fontWeight: '700'
+    }
+  })
+  const nav = pestañas(CATEGORIAS, (id) => { categoria = id; explicarCategoria(); pintarRejilla(true); centrarPestaña(nav.nodo) })
   nav.activar(categoria, false)
   destino.appendChild(nav.nodo)
+  // Qué es esta pestaña, en una línea: así no hay que abrir tarjeta por tarjeta
+  // para saber si lo que buscas está aquí.
+  function explicarCategoria () {
+    explicacion.textContent = CATEGORIAS.find(c => c.id === categoria)?.explica || ''
+  }
+  explicarCategoria()
+  destino.appendChild(explicacion)
 
   // Una sola columna: a 390 px, dos tarjetas por fila dejaban el nombre partido y
   // la frase de "para qué sirve" en cuatro líneas apretadas. Se lee mejor así.
@@ -659,12 +678,14 @@ function tarjetaEdificio (tipo) {
   }, [nombre, novedad])
 
   const cuenta = el('div', { clase: 'tarjeta-detalle', texto: `${textoInventario(tipo)} · ${d.ancho}×${d.alto}` })
+  // PARA QUÉ SIRVE, no la frase de sabor: «el granero y el almacén no sé para
+  // qué sirven» fue la queja exacta del dueño, y la contestaba el catálogo.
   const frase = el('div', {
     clase: 'tarjeta-detalle',
     estilo: { fontSize: '.86em', color: 'var(--tinta)', lineHeight: '1.35' },
-    texto: d.desc
+    texto: paraQueSirve(tipo)
   })
-  const cintas = cintasEfecto(tipo, 1, 2)
+  const cintas = cintasEfecto(tipo, 1, 3)
   const costeNodo = costeVivo(coste)
   const pie = el('div', {
     clase: 'pequeño',

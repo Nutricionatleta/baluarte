@@ -13,7 +13,7 @@ import { game } from '../core/state.js'
 import { ICONO } from '../core/config.js'
 import { limitesDelTerritorio } from '../core/grid.js'
 import { UNIDADES, PIEDRA_PAPEL } from '../data/units.js'
-import { EDIFICIOS, valorEdificio } from '../data/buildings.js'
+import { EDIFICIOS, valorEdificio, ORDEN_EDADES, AGE_NOMBRE } from '../data/buildings.js'
 import * as UI from './styles.js'
 import * as Ejercito from '../sim/army.js'
 import * as Combate from '../sim/combat.js'
@@ -121,6 +121,123 @@ const costeUnidad = (tipo, n = 1) => {
   const c = {}
   for (const [r, v] of Object.entries(UNIDADES[tipo]?.coste || {})) if (v) c[r] = v * n
   return c
+}
+
+/* ------------------------------------------------- murallas y arietes ---
+ * «Estoy un poco estancado con los lanceros porque es imposible atacar a nadie
+ * con murallas». No es imposible: es un puzle con solución, y la solución es el
+ * ariete (×12 contra muro). Lo que fallaba es que el juego no lo contaba en
+ * ninguna parte. Todo lo de aquí sale del catálogo: si mañana se reequilibra el
+ * ariete, estos avisos cambian solos.
+ * ------------------------------------------------------------------------ */
+
+/** Lo que hay de piedra en una base: muros, fosos y quién los cubre. */
+function defensasDe (base) {
+  const lista = base?.buildings || []
+  let muros = 0; let fosos = 0; let torres = 0; let vidaMuro = 0
+  for (const b of lista) {
+    const d = EDIFICIOS[b.tipo]
+    if (!d) continue
+    if (b.tipo === 'muralla' || b.tipo === 'puerta') {
+      muros++
+      vidaMuro += typeof d.hp === 'function' ? d.hp(b.nivel || 1) : 0
+    } else if (b.tipo === 'foso') fosos++
+    else if (typeof d.dano === 'function') torres++
+  }
+  return { muros, fosos, torres, vidaMuro: Math.round(vidaMuro) }
+}
+
+/** Daño que le hace a un tramo de muro cada golpe de esa tropa. */
+const danoAMuro = (tipo) => Math.round((UNIDADES[tipo]?.ataque || 0) * (PIEDRA_PAPEL[tipo]?.muro ?? 1))
+
+/** Cuántas máquinas de asedio hay en un reparto de tropa. */
+const asedioEn = (tropas) => Object.entries(tropas || {})
+  .reduce((n, [t, c]) => n + (UNIDADES[t]?.clase === 'asedio' ? (c || 0) : 0), 0)
+
+const nivelPropio = (tipo) => (game.state.buildings || [])
+  .reduce((n, b) => b.tipo === tipo && !b.enObra ? Math.max(n, b.nivel || 0) : n, 0)
+
+/**
+ * Qué le falta al jugador para tener arietes, leído del catálogo.
+ * @returns {{estado:'tiene'|'puede'|'falta', texto:string, boton:string}}
+ */
+function comoTenerArietes () {
+  const d = EDIFICIOS.taller_asedio
+  if (nivelPropio('taller_asedio') > 0) {
+    return { estado: 'tiene', boton: '⚒️ Entrenar arietes', texto: 'Ya tienes taller de asedio: entra en él y encarga arietes antes de salir.' }
+  }
+  const falta = []
+  if (ORDEN_EDADES.indexOf(d.age) > ORDEN_EDADES.indexOf(game.state.age)) falta.push(`llegar a la ${AGE_NOMBRE[d.age]}`)
+  for (const [req, n] of Object.entries(d.requiere || {})) {
+    if (nivelPropio(req) < n) falta.push(`${EDIFICIOS[req]?.nombre || req} de nivel ${n}`)
+  }
+  if (!falta.length) {
+    return { estado: 'puede', boton: '🔨 Construir el taller de asedio', texto: 'Ya puedes levantar el taller de asedio, que es de donde salen los arietes. Es lo que te falta para poder entrar aquí.' }
+  }
+  return {
+    estado: 'falta',
+    boton: '🔨 Ver qué me falta',
+    texto: `Los arietes salen del taller de asedio, y para levantarlo te falta: ${falta.join(', ')}.`
+  }
+}
+
+/** La tropa tuya que MÁS le hace a un muro sin ser asedio: la vara de comparar. */
+function mejorPicapedrero (tropas) {
+  let mejor = 'lancero'
+  for (const t of Object.keys(tropas || {})) {
+    if (!tropas[t] || UNIDADES[t]?.clase === 'asedio' || !UNIDADES[t]?.ataque) continue
+    if (danoAMuro(t) > danoAMuro(mejor)) mejor = t
+  }
+  return mejor
+}
+
+/**
+ * EL AVISO DE LA MURALLA. Sale en la pantalla de preparar el asalto, arriba,
+ * y cambia en cuanto metes o quitas máquinas de la hueste.
+ * @returns {HTMLElement|null} null si esa plaza no tiene muros
+ */
+function avisoMuralla (base, tropas) {
+  const d = defensasDe(base)
+  if (!d.muros) return null
+  const maquinas = asedioEn(tropas)
+  const conAriete = danoAMuro('ariete')
+  const vara = mejorPicapedrero(tropasDe())
+  const aPelo = Math.max(1, danoAMuro(vara))
+  const veces = Math.round(conAriete / aPelo)
+  const suNombre = (UNIDADES[vara]?.nombre || 'soldado').toLowerCase()
+
+  if (maquinas > 0) {
+    return el('div', { clase: 'aviso aviso-bien', estilo: { lineHeight: '1.35' } }, [
+      el('i', { texto: '🪵' }),
+      el('span', { texto: `Llevas ${maquinas} ${maquinas === 1 ? 'máquina de asedio' : 'máquinas de asedio'}: cada golpe suyo le hace ${conAriete} de daño al muro, donde un ${suNombre} hace ${aPelo}. ${maquinas === 1 ? 'Métela' : 'Mételas'} por el lado que quieras abrir y que la infantería les cubra las espaldas.` })
+    ])
+  }
+
+  const como = comoTenerArietes()
+  const caja = el('div', { clase: 'panel col', estilo: { borderColor: 'var(--rojo)', background: '#fbe4e0', gap: '6px' } })
+  caja.append(
+    el('div', { clase: 'fila', estilo: { gap: '9px' } }, [
+      el('span', { clase: 'icono-gr', texto: '🧱' }),
+      el('b', { clase: 'crece', texto: 'Esa plaza está amurallada' })
+    ]),
+    el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: `${d.muros} tramos de muro, ${formatoNumero(d.vidaMuro)} de piedra que picar${d.torres ? ` y ${d.torres} ${d.torres === 1 ? 'torre cubriéndolos' : 'torres cubriéndolos'}` : ''}. Sin arietes, tu gente se va a quedar picando piedra mientras las torres los siegan.` }),
+    el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: `Un ariete le hace ${conAriete} de daño a cada tramo; un ${suNombre}, ${aPelo}. ${veces} veces más: es lo único que abre brecha deprisa.` })
+  )
+  if (d.fosos) {
+    caja.appendChild(el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: `Además tienen ${d.fosos} casillas de foso: el que las cruza va al ralentí y quieto a tiro, y la caballería ni lo intenta.` }))
+  }
+  caja.appendChild(el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4', fontWeight: '800' }, texto: como.texto }))
+  caja.appendChild(el('button', {
+    clase: 'btn btn-oro btn-gordo', type: 'button',
+    texto: como.boton,
+    onclick: () => {
+      if (como.estado === 'tiene') { rival = null; solapa = 'entrenar'; pintar(); return }
+      panel?.cerrar()
+      events.emit(EV.UI_PANEL, { panel: 'construir', datos: { categoria: 'militar' } })
+    }
+  }))
+  caja.appendChild(el('div', { clase: 'pequeño tenue', estilo: { lineHeight: '1.3' }, texto: 'Puedes atacar igual: se puede entrar por la puerta o rodear, pero cuesta mucha más tropa.' }))
+  return caja
 }
 
 /** Registra un refresco periódico (cuentas atrás) mientras la hoja esté abierta. */
@@ -1468,9 +1585,14 @@ function vistaAtacar (zona) {
     ]))
   }
 
+  // ¿llevo con qué romper piedra? Se mira una vez: vale para todas las tarjetas
+  const llevoAsedio = asedioEn(tropas) > 0
+
   for (const r of rivales) {
     const e = r.enemigo
     const amenaza = pedir(Enemigos, 'amenazaPara', [e, poder], e.amenaza) || e.amenaza || ''
+    // avisar del muro ANTES de entrar: así no se prepara un asalto condenado
+    const muros = defensasDe(pedir(Enemigos, 'baseDe', [e], null) || e.base || {}).muros
     const tono = r.etiqueta === 'cómodo' ? 'bien' : r.etiqueta === 'igualado' ? 'oro' : 'mal'
     const horas = horasDeProduccion(r.recompensa)
     const premio = r.recompensa || {}
@@ -1485,7 +1607,8 @@ function vistaAtacar (zona) {
       el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } }, [
         premio.gemas ? chip('💎', `${premio.gemas}`, { tono: 'oro' }) : null,
         horas ? chip('⏳', `${horas} h de producción`, { tono: horas >= 2 ? 'bien' : '' }) : null,
-        chip('💪', `${Math.round((r.ratio || 1) * 100)} % de tu fuerza`, { tono })
+        chip('💪', `${Math.round((r.ratio || 1) * 100)} % de tu fuerza`, { tono }),
+        muros ? chip('🧱', llevoAsedio ? 'amurallada' : 'amurallada: hacen falta arietes', { tono: llevoAsedio ? '' : 'mal' }) : null
       ]),
       el('div', { clase: 'pequeño tenue', texto: r.consejo }),
       el('button', {
@@ -1817,6 +1940,11 @@ function prepararAsalto () {
     filaLados
   ]))
 
+  // --- ¿hay muros? Entonces esto va ARRIBA, antes que nada: es lo que decide
+  //     si el asalto tiene sentido tal y como lo estás preparando ---
+  const cajaMuro = el('div', { clase: 'col' })
+  zona.appendChild(cajaMuro)
+
   zona.appendChild(el('div', { clase: 'panel pequeño', estilo: { lineHeight: '1.35' }, texto: `🕵️ ${e.descripcion || ''}` }))
 
   // --- quién sale de casa y quién se queda guardándola ---
@@ -1828,6 +1956,12 @@ function prepararAsalto () {
   const tipos = Object.keys(disponibles).filter(t => (UNIDADES[t]?.espacio || 0) > 0 && disponibles[t] > 0)
 
   function actualizarResumen () {
+    // el aviso del muro se rehace con la hueste: en cuanto metes un ariete deja
+    // de ser una regañina y pasa a decirte cómo usarlo
+    vaciar(cajaMuro)
+    const av = avisoMuralla(base, seleccion)
+    if (av) cajaMuro.appendChild(av)
+
     vaciar(resumen)
     const total = suma(seleccion)
     let poder = 0

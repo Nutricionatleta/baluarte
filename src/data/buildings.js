@@ -9,6 +9,10 @@
  * veces al día en ratos muertos siempre encuentra una obra terminada.
  */
 
+// Solo para poner el NOMBRE de la tropa que entrena cada cuartel en su ficha.
+// data/ puede leer de data/: units.js no mira aquí, así que no hay pescadilla.
+import { UNIDADES } from './units.js'
+
 const HORA = 3600
 
 export const ORDEN_EDADES = ['oscura', 'feudal', 'castillos', 'imperial']
@@ -123,6 +127,7 @@ export const EDIFICIOS = {
     unico: true,
     age: 'oscura',
     desc: 'El corazón del baluarte. Si él no crece, aquí no crece nada.',
+    paraQue: 'Manda en toda la aldea: sube el tope de vecinos, da constructores y ningún otro edificio puede subir por encima de su nivel. Encima recauda impuestos en oro.',
     // Piedra por encima de la madera: el primer cuello del juego es la cantera.
     // Catorce niveles: los cuatro primeros caen en la primera tarde, el 11 abre
     // la Edad Imperial y el 13 y el 14 son para después, ya en el imperio. Nada
@@ -159,6 +164,7 @@ export const EDIFICIOS = {
     max: 16,
     age: 'oscura',
     desc: 'Adobe, paja y sitio para dormir. Sin camas no hay quien trabaje.',
+    paraQue: 'Sube el tope de vecinos. Sin camas libres no llega gente nueva, y sin gente los edificios rinden a medio gas.',
     coste: coste(35, 25, 20, 0, 1.8),
     tiempo: obra(8, 3.4, 2 * HORA),
     hp: vida(260),
@@ -182,6 +188,7 @@ export const EDIFICIOS = {
     max: 4,
     age: 'oscura',
     desc: 'Aquí el bosque se convierte en vigas. Y en ampollas.',
+    paraQue: 'Fabrica madera ella sola, juegues o no. Cuanta más gente metas dentro, más madera entra por hora.',
     coste: coste(70, 55, 20, 0, 1.85),
     tiempo: obra(15, 3.1, 6 * HORA),
     hp: vida(420),
@@ -201,6 +208,7 @@ export const EDIFICIOS = {
     age: 'oscura',
     // La piedra es el cuello de botella del juego: rinde ~2/3 de la serrería.
     desc: 'Picar roca es lento y aburrido, pero las murallas no salen del huerto.',
+    paraQue: 'Saca piedra ella sola. La piedra es lo que más se atasca: murallas, torres y Ayuntamiento salen de aquí.',
     coste: coste(95, 35, 20, 0, 1.9),
     tiempo: obra(18, 3.1, 6 * HORA),
     hp: vida(460),
@@ -221,6 +229,7 @@ export const EDIFICIOS = {
     max: 5,
     age: 'oscura',
     desc: 'Trigo, nabos y un espantapájaros con más carisma que el alcalde.',
+    paraQue: 'Da comida sin parar. La comida paga a los aldeanos nuevos y el plato diario de la tropa.',
     coste: coste(50, 20, 40, 0, 1.8),
     tiempo: obra(12, 3.0, 5 * HORA),
     hp: vida(340),
@@ -240,6 +249,7 @@ export const EDIFICIOS = {
     age: 'feudal',
     // El oro es el recurso de lujo: paga tropa cara y tecnología. Nunca sobra.
     desc: 'Un filón, tres picos y la certeza de que nunca tendrás suficiente.',
+    paraQue: 'Saca oro, que es lo que paga la tropa cara, la investigación y las prisas.',
     coste: coste(110, 150, 60, 0, 1.9),
     tiempo: obra(28, 3.1, 8 * HORA),
     hp: vida(500),
@@ -259,6 +269,7 @@ export const EDIFICIOS = {
     max: 3,
     age: 'feudal',
     desc: 'Muele el grano de las granjas de al lado. Colócalo con cabeza.',
+    paraQue: 'Él no produce nada: sube la cosecha de las granjas que tenga alrededor. Va plantado en medio de un grupo de granjas, no en cualquier esquina.',
     coste: coste(110, 80, 80, 0, 1.85),
     tiempo: obra(20, 3.2, 3 * HORA),
     hp: vida(300),
@@ -303,6 +314,7 @@ export const EDIFICIOS = {
     // que aún sobre. Si el tope se queda por debajo del siguiente Ayuntamiento,
     // la partida se atasca para siempre (pasó con la comida en el nivel 9).
     desc: 'Madera y piedra bajo techo. Lo que no cabe, se apila fuera... y se pudre.',
+    paraQue: 'Guarda tu madera y tu piedra: sube el tope de las dos. Si llegas al tope, todo lo que produzcas de más se pierde.',
     coste: coste(80, 130, 0, 20, 1.85),
     tiempo: obra(14, 3.0, 4 * HORA),
     hp: vida(520),
@@ -322,6 +334,7 @@ export const EDIFICIOS = {
     max: 3,
     age: 'oscura',
     desc: 'Grano seco y monedas bien contadas. Vigila a los ratones.',
+    paraQue: 'Guarda tu comida y tu oro: sube el tope de los dos. Si llegas al tope, todo lo que produzcas de más se pierde.',
     coste: coste(70, 120, 0, 15, 1.85),
     tiempo: obra(14, 3.0, 4 * HORA),
     hp: vida(500),
@@ -341,6 +354,7 @@ export const EDIFICIOS = {
     unico: true,
     age: 'feudal',
     desc: 'Cambia lo que te sobra por lo que te falta. El tendero se lleva lo suyo.',
+    paraQue: 'Cambia el recurso que te sobra por el que te falta. El tendero se queda una comisión, y esa comisión baja al mejorarlo.',
     coste: coste(170, 200, 120, 150, 1.9),
     tiempo: obra(30, 3.2, 4 * HORA),
     hp: vida(480),
@@ -360,6 +374,7 @@ export const EDIFICIOS = {
     max: 2,
     age: 'oscura',
     desc: 'Cuatro jergones, un sargento con mal despertar y ganas de gresca.',
+    paraQue: 'Entrena la infantería que va a pie: lanceros y espadachines. Cuanto más alto, antes sale cada soldado.',
     coste: coste(95, 70, 60, 0, 1.85),
     tiempo: obra(20, 3.1, 5 * HORA),
     hp: vida(600),
@@ -378,6 +393,7 @@ export const EDIFICIOS = {
     max: 2,
     age: 'feudal',
     desc: 'Dianas de paja, astillas en los dedos y flechas que ya casi vuelan rectas.',
+    paraQue: 'Entrena la tropa que pega de lejos: arqueros y ballesteros.',
     coste: coste(140, 90, 60, 90, 1.85),
     tiempo: obra(24, 3.1, 5 * HORA),
     hp: vida(560),
@@ -396,6 +412,7 @@ export const EDIFICIOS = {
     max: 1,
     age: 'castillos',
     desc: 'Huele a lo que huele, pero de aquí salen los que deciden las batallas.',
+    paraQue: 'Entrena la caballería: la tropa rápida, la que entra, revienta a los arqueros y sale.',
     coste: coste(220, 170, 260, 350, 1.9),
     tiempo: obra(30, 3.2, 6 * HORA),
     hp: vida(700),
@@ -414,6 +431,7 @@ export const EDIFICIOS = {
     max: 1,
     age: 'castillos',
     desc: 'Máquinas grandes, lentas y con pésimas intenciones hacia las murallas ajenas.',
+    paraQue: 'Fabrica arietes y catapultas, las únicas máquinas que abren una muralla deprisa. Sin él, atacar una plaza amurallada es regalar tropa.',
     coste: coste(300, 250, 120, 610, 1.95),
     tiempo: obra(30, 3.3, 6 * HORA),
     hp: vida(760),
@@ -432,6 +450,7 @@ export const EDIFICIOS = {
     unico: true,
     age: 'feudal',
     desc: 'Chispas, yunque y un herrero que jura en arameo. Mejora a TODA la tropa.',
+    paraQue: 'Mejora a TODA tu tropa a la vez, la que ya tienes y la que entrenes después: más ataque y más armadura, en casa y en los asaltos.',
     coste: coste(150, 190, 60, 210, 1.9),
     tiempo: obra(26, 3.1, 6 * HORA),
     hp: vida(640),
@@ -452,6 +471,7 @@ export const EDIFICIOS = {
     unico: true,
     age: 'castillos',
     desc: 'Monjes copistas discutiendo de arados. De ahí salen todas las ideas buenas.',
+    paraQue: 'Es donde se investiga y donde se cambia de edad. Cuanto más alta, antes termina cada investigación.',
     coste: coste(290, 380, 200, 790, 1.95),
     tiempo: obra(30, 3.3, 6 * HORA),
     hp: vida(600),
@@ -469,6 +489,7 @@ export const EDIFICIOS = {
     unico: true,
     age: 'castillos',
     desc: 'Rezan por tus tropas y, lo que importa, remiendan a las que vuelven rotas.',
+    paraQue: 'Salva soldados: parte de los que caen en un asalto vuelven heridos en vez de morir, se curan solos en la aldea y vuelven a pelear. También entrena monjes.',
     coste: coste(240, 330, 160, 550, 1.9),
     tiempo: obra(28, 3.2, 6 * HORA),
     hp: vida(580),
@@ -490,6 +511,7 @@ export const EDIFICIOS = {
     unico: true,
     age: 'oscura',
     desc: 'Una hoguera, un mapa mal dibujado y gente con ganas de ver qué hay detrás.',
+    paraQue: 'Manda batidores al mapa del valle: descubren terreno, recursos y bases enemigas. Sin explorar no hay a quién atacar.',
     coste: coste(55, 35, 50, 0, 1.8),
     tiempo: obra(12, 3.2, 3 * HORA),
     hp: vida(300),
@@ -511,6 +533,7 @@ export const EDIFICIOS = {
     max: 10,
     age: 'oscura',
     desc: 'Dos arqueros aburridos con muy buena puntería cuando hace falta.',
+    paraQue: 'Dispara sola a todo el que entre en su alcance. Es la defensa barata: varias repartidas valen más que una sola muy alta.',
     coste: coste(45, 215, 0, 0, 1.85),
     tiempo: obra(15, 3.1, 5 * HORA),
     hp: vida(480),
@@ -532,6 +555,7 @@ export const EDIFICIOS = {
     // Pega más del doble que la vigía pero ve menos y dispara más lento:
     // hay que colocarla en el pasillo bueno, no repartirlas al tuntún.
     desc: 'Pega como una mula y ve poco. Guárdala para el pasillo bueno.',
+    paraQue: 'Torre de pegada: hace más del doble de daño que la vigía, pero ve mucho menos. Va en el pasillo por donde entran de verdad.',
     coste: coste(90, 380, 0, 300, 1.9),
     tiempo: obra(25, 3.2, 6 * HORA),
     hp: vida(620),
@@ -551,6 +575,7 @@ export const EDIFICIOS = {
     unico: true,
     age: 'castillos',
     desc: 'Torreón, almenas y estandarte. Quien lo tire, se lleva la aldea.',
+    paraQue: 'La defensa más dura que tienes: pega fuerte, ve lejos y aguanta lo que no aguanta nada. Si lo tiran, se llevan la aldea.',
     coste: coste(450, 1150, 300, 980, 2.0),
     tiempo: obra(30, 3.4, 6 * HORA),
     hp: vida(3000, 1.4),
@@ -572,6 +597,7 @@ export const EDIFICIOS = {
     // Barata y dura a propósito: hay que poder levantar cien tramos sin arruinarse,
     // pero cada mejora se paga en piedra, el recurso escaso.
     desc: 'Un tramo de piedra. Solo no sirve de nada; cien, cambian la batalla.',
+    paraQue: 'Corta el paso. El que quiera entrar tiene que echarla abajo a golpes mientras tus torres le disparan desde arriba.',
     coste: coste(0, 55, 0, 0, 1.72),
     tiempo: obra(5, 2.2, 30 * 60),
     hp: vida(550, 1.38),
@@ -589,6 +615,7 @@ export const EDIFICIOS = {
     max: 6,
     age: 'oscura',
     desc: 'Por algún sitio hay que entrar. Que sea por donde a ti te conviene.',
+    paraQue: 'El hueco por el que se entra y se sale. Puesta con cabeza, decide por dónde te va a atacar el enemigo.',
     coste: coste(30, 90, 0, 0, 1.75),
     tiempo: obra(8, 2.4, 45 * 60),
     hp: vida(700, 1.36),
@@ -607,6 +634,7 @@ export const EDIFICIOS = {
     max: 4,
     age: 'oscura',
     desc: 'No produce nada, pero una plaza sin pozo no es una plaza.',
+    paraQue: 'No sirve para nada: es adorno para que la plaza tenga cara de plaza.',
     coste: coste(20, 25, 0, 0),
     tiempo: obra(6, 1, 60),
     hp: vida(120)
@@ -622,6 +650,7 @@ export const EDIFICIOS = {
     max: 8,
     age: 'oscura',
     desc: 'Tela al viento con tus colores. Puro orgullo, cero utilidad.',
+    paraQue: 'No sirve para nada: es adorno.',
     coste: coste(15, 0, 0, 5),
     tiempo: obra(5, 1, 60),
     hp: vida(80)
@@ -650,6 +679,7 @@ export const EDIFICIOS = {
     max: 8,
     age: 'oscura',
     desc: 'Un poblado pequeño en tierra ganada: torre, empalizada y gente que avisa.',
+    paraQue: 'Un pueblito en tierra conquistada: cultiva su comida, aloja a su gente, dispara al que entra por ahí y te avisa ANTES de que llegue un asedio. A cambio le pagas la soldada cada minuto.',
     coste: coste(140, 170, 90, 35, 1.8),
     tiempo: obra(40, 2.7, 3 * HORA),
     hp: vida(900, 1.34),
@@ -698,6 +728,7 @@ export const EDIFICIOS = {
     max: 160,
     age: 'oscura',
     desc: 'Zanja de agua y estacas. No cierra el paso: lo hace lento. La infantería tarda el doble en cruzarlo, la caballería ni lo intenta y el asedio se atasca — y todos ellos, quietos a tiro de tus torres.',
+    paraQue: 'No corta el paso: lo hace lento. El que lo cruza se queda quieto a tiro de tus torres, y la caballería ni lo intenta: rodea hasta la puerta.',
     coste: coste(0, 22, 0, 0, 1.66),
     tiempo: obra(4, 2.1, 20 * 60),
     // Poca vida a propósito: un foso se ciega con tierra, no se asalta. Lo que
@@ -760,3 +791,208 @@ export function valorEdificio (tipo, nivel = 1) {
   }
   return Math.round(v)
 }
+
+/* ===========================================================================
+   PARA QUÉ SIRVE CADA EDIFICIO — el texto que lee el jugador
+   ---------------------------------------------------------------------------
+   El juego tiene 27 edificios y hasta ahora la única pista era la frase de
+   sabor del `desc`. El dueño lo dijo claro: «el granero y el almacén no sé
+   para qué sirven». Esto lo arregla, y lo arregla DESDE EL CATÁLOGO: cada
+   número sale de los mismos campos que usa la simulación (`capacidad`, `aura`,
+   `bonusAtaque`…), así que cuando alguien reequilibre el juego los textos
+   siguen cuadrando solos. Nadie escribe un número a mano en la interfaz.
+   =========================================================================== */
+
+const ES = new Intl.NumberFormat('es-ES')
+/** Cifra a la española, con punto de los miles y como mucho un decimal. */
+const cifra = (v) => {
+  const n = Number(v) || 0
+  const r = Math.round(n * 10) / 10
+  return ES.format(r)
+}
+const porciento = (v) => `${Math.round((Number(v) || 0) * 100)} %`
+const NOMBRE_RECURSO = { madera: 'madera', piedra: 'piedra', comida: 'comida', oro: 'oro' }
+const ICONO_RECURSO = { madera: '🪵', piedra: '🪨', comida: '🌾', oro: '🪙' }
+
+/** La frase de «qué hace esto», en cristiano. Nunca repite el nombre. */
+export function paraQueSirve (tipo) {
+  const d = def(tipo)
+  return d?.paraQue || d?.desc || ''
+}
+
+/**
+ * LO QUE HACE ESTE EDIFICIO A ESTE NIVEL, en números y con unidades.
+ *
+ * @param {string} tipo
+ * @param {number} n nivel
+ * @returns {Array<{clave:string, icono:string, etiqueta:string, valor:string, corto:string, nota:string}>}
+ *   `valor` es la frase entera («madera +12.000 · piedra +12.000»), `corto` la
+ *   versión de cintita y `nota` el porqué, para quien quiera entender la regla.
+ */
+export function efectosDe (tipo, n = 1) {
+  const d = def(tipo)
+  if (!d) return []
+  const nivel = Math.max(1, Math.round(Number(n) || 1))
+  const l = []
+  const mas = (clave, icono, etiqueta, valor, corto, nota = '') =>
+    l.push({ clave, icono, etiqueta, valor, corto: corto || valor, nota })
+
+  if (typeof d.capacidad === 'function') {
+    const c = d.capacidad(nivel) || {}
+    const rec = Object.keys(c).filter(r => c[r])
+    if (rec.length) {
+      mas('capacidad', '📦', 'Sube el tope',
+        rec.map(r => `${NOMBRE_RECURSO[r] || r} +${cifra(c[r])}`).join(' · '),
+        rec.map(r => `${ICONO_RECURSO[r] || ''} +${cifra(c[r])}`).join(' '),
+        'El tope es lo que te cabe guardado. Todo lo que produzcas por encima se tira.')
+    }
+  }
+
+  if (d.produce && typeof d.porMinuto === 'function') {
+    const min = d.porMinuto(nivel)
+    mas('produce', ICONO_RECURSO[d.produce] || '⚙️', 'Produce',
+      `${cifra(min * 60)} de ${NOMBRE_RECURSO[d.produce] || d.produce} por hora`,
+      `${ICONO_RECURSO[d.produce] || ''} ${cifra(min * 60)}/hora`,
+      'Con todos sus puestos llenos. Con los puestos vacíos rinde la cuarta parte.')
+  }
+
+  if (d.aura && typeof d.aura.bonus === 'function') {
+    const afectado = def(d.aura.afecta)
+    const quien = afectado ? `${afectado.nombre.toLowerCase()}s` : 'los de al lado'
+    mas('aura', '🌬️', 'Mejora a los de al lado',
+      `sube un ${porciento(d.aura.bonus(nivel))} lo que producen las ${quien} que tenga a ${cifra(d.aura.radio)} casillas`,
+      `+${porciento(d.aura.bonus(nivel))} a las ${quien}`,
+      `Juntando varios la mejora no pasa del ${porciento(d.aura.tope ?? 1)}: amontonarlos encima de las mismas ${quien} no sirve.`)
+  }
+
+  if (typeof d.bonusAtaque === 'function') {
+    mas('ataque', '⚔️', 'Ataque de TODA tu tropa', `+${porciento(d.bonusAtaque(nivel))}`,
+      `⚔️ +${porciento(d.bonusAtaque(nivel))} a toda la tropa`,
+      'Vale para los soldados que ya tienes y para los que entrenes después, sin hacer nada más.')
+  }
+  if (typeof d.bonusArmadura === 'function') {
+    mas('armadura', '🛡️', 'Armadura de TODA tu tropa', `+${porciento(d.bonusArmadura(nivel))}`,
+      `🛡️ +${porciento(d.bonusArmadura(nivel))}`, 'Aguantan más golpes antes de caer.')
+  }
+
+  if (typeof d.aloja === 'function') {
+    mas('aloja', '🛏️', 'Camas', `sitio para ${d.aloja(nivel)} vecinos más`, `🛏️ +${d.aloja(nivel)}`,
+      'Sube el tope de gente de la aldea. Sin camas libres no llega nadie nuevo.')
+  }
+  if (typeof d.poblacionMax === 'function') {
+    mas('poblacion', '👥', 'Tope de vecinos', `${d.poblacionMax(nivel)} en toda la aldea`, `👥 ${d.poblacionMax(nivel)}`,
+      'Las casas suman camas por encima de este techo.')
+  }
+  if (typeof d.obrasSimultaneas === 'function') {
+    const o = d.obrasSimultaneas(nivel)
+    mas('constructores', '🔨', 'Constructores', `${o} ${o === 1 ? 'obra' : 'obras'} a la vez`, `🔨 ${o}`,
+      'Lo que no cabe se queda en la cola y arranca solo cuando hay hueco.')
+  }
+  if (typeof d.plazas === 'function' && d.plazas(nivel) > 0) {
+    const p = d.plazas(nivel)
+    mas('plazas', '🧑‍🌾', 'Puestos de trabajo', `caben ${p} ${p === 1 ? 'aldeano' : 'aldeanos'} dentro`,
+      `🧑‍🌾 ${p}`, 'Un puesto vacío es producción tirada: rinde la cuarta parte.')
+  }
+
+  if (Array.isArray(d.entrena) && d.entrena.length) {
+    const nombres = d.entrena.map(t => UNIDADES[t]?.nombre || t).join(', ')
+    mas('entrena', '⚒️', 'Entrena', nombres, `⚒️ ${nombres}`, '')
+  }
+  if (typeof d.velocidad === 'function' && d.velocidad(nivel) > 1) {
+    mas('velocidad', '⏱️', 'Rapidez', `la tropa tarda un ${porciento(1 - 1 / d.velocidad(nivel))} menos`,
+      `⏱️ −${porciento(1 - 1 / d.velocidad(nivel))} de espera`, 'Comparado con este mismo edificio a nivel 1.')
+  }
+  if (typeof d.velocidadInvestigacion === 'function' && d.velocidadInvestigacion(nivel) > 1) {
+    mas('investiga', '📜', 'Rapidez', `investigar tarda un ${porciento(1 - 1 / d.velocidadInvestigacion(nivel))} menos`,
+      `📜 −${porciento(1 - 1 / d.velocidadInvestigacion(nivel))}`, 'Comparado con esta misma universidad a nivel 1.')
+  }
+  if (typeof d.curacion === 'function') {
+    mas('cura', '⛪', 'Salva heridos', `vuelve a casa el ${porciento(d.curacion(nivel))} de los que caen`,
+      `⛪ salva el ${porciento(d.curacion(nivel))}`,
+      'Los heridos se curan solos en la aldea y vuelven a pelear: cada asalto sale más barato.')
+  }
+  if (typeof d.comision === 'function') {
+    mas('comision', '⚖️', 'Comisión del cambio', porciento(d.comision(nivel)), `⚖️ ${porciento(d.comision(nivel))}`,
+      'Es lo que se queda el tendero en cada trueque. Cuanto más alto el mercado, menos se lleva.')
+  }
+  if (typeof d.exploradores === 'function') {
+    const e = d.exploradores(nivel)
+    const alc = typeof d.alcance === 'function' ? `, hasta ${d.alcance(nivel)} casillas` : ''
+    mas('batidores', '🧭', 'Batidores', `${e} fuera a la vez${alc}`, `🧭 ${e} batidores`,
+      'Descubren el valle: sin explorar no aparecen rivales a los que atacar.')
+  }
+
+  if (typeof d.dano === 'function') {
+    const cad = d.cadencia || 0
+    const alcance = typeof d.radio === 'function' ? d.radio(nivel) : 0
+    mas('dispara', '🎯', 'Dispara sola',
+      `${cifra(d.dano(nivel))} de daño por tiro, alcance ${cifra(alcance)} casillas`,
+      `🎯 ${cifra(d.dano(nivel))} de daño`,
+      cad ? `Tira ${cifra(cad)} veces por segundo: unos ${cifra(d.dano(nivel) * cad)} de daño por segundo a lo que tenga a tiro.` : '')
+  }
+  if (d.bloquea) {
+    mas('bloquea', '🧱', 'Corta el paso', 'hay que derribarla para entrar', '🧱 Corta el paso',
+      'Los arietes la tiran muchísimo más deprisa que la tropa normal: por eso los asaltos serios llevan asedio.')
+  }
+  if (typeof d.frena === 'function') {
+    const f = d.frena(nivel) || {}
+    const veces = cifra(1 / Math.max(0.01, f.infanteria || 1))
+    mas('frena', '🕳️', 'Frena al que cruza',
+      `a pie se cruza ${veces} veces más lento${f.caballeria === 0 ? ' y la caballería ni lo intenta' : ''}`,
+      `🕳️ ${veces} veces más lento`,
+      'No cierra el paso: deja al enemigo quieto delante de tus torres. Sin torres que lo cubran no vale nada.')
+  }
+  if (typeof d.hp === 'function') {
+    mas('vida', '❤️', 'Aguanta', `${cifra(d.hp(nivel))} de daño antes de caer`, `❤️ ${cifra(d.hp(nivel))}`, '')
+  }
+  return l
+}
+
+/**
+ * LA AYUDA, agrupada por PARA QUÉ SIRVE y no por pestaña del catálogo.
+ * Se lee de arriba abajo en dos minutos y explica el juego entero.
+ */
+export const GRUPOS_AYUDA = [
+  {
+    id: 'produce',
+    icono: '🪵',
+    titulo: 'De dónde salen los recursos',
+    texto: 'Estos trabajan solos, juegues o no (hasta 8 horas con el móvil guardado). Lo único que mandas tú es cuánta gente trabaja dentro: un edificio con los puestos vacíos rinde la cuarta parte. El molino es la excepción: él no produce nada, sube la cosecha de las granjas que tenga alrededor.',
+    tipos: ['serreria', 'cantera', 'granja', 'mina_oro', 'molino']
+  },
+  {
+    id: 'topes',
+    icono: '📦',
+    titulo: 'Dónde se guarda, y por qué se pierde',
+    texto: 'Cada recurso tiene un TOPE. Cuando llegas al tope, todo lo que produzcas de más se tira: no se acumula en ninguna parte. El almacén sube el tope de madera y piedra; el granero, el de comida y oro. Si arriba ves «¡LLENO!» en rojo, estás perdiendo producción cada hora que pasa.',
+    tipos: ['almacen', 'granero', 'mercado']
+  },
+  {
+    id: 'gente',
+    icono: '🛏️',
+    titulo: 'La gente: camas y puestos de trabajo',
+    texto: 'Los aldeanos son los que hacen producir a todo lo demás. Necesitan cama (el Ayuntamiento y las casas suben el tope) y un puesto donde trabajar. Si te sobran aldeanos sin faena están de brazos cruzados; si te faltan, tienes edificios a medio gas. Los que sobran se van solos a echar una mano en las obras.',
+    tipos: ['ayuntamiento', 'casa']
+  },
+  {
+    id: 'tropa',
+    icono: '⚔️',
+    titulo: 'Dónde se hace la tropa y cómo se mejora',
+    texto: 'Cada cuartel saca su clase de soldado. La herrería es distinta: no entrena a nadie, mejora a TODA tu tropa a la vez, la de ahora y la de mañana, así que casi siempre renta más que otro cuartel. El monasterio te devuelve parte de los muertos de cada asalto y el taller de asedio fabrica lo único que abre murallas deprisa.',
+    tipos: ['cuartel', 'arqueria', 'establo', 'taller_asedio', 'herreria', 'monasterio', 'universidad', 'campamento_explorador']
+  },
+  {
+    id: 'defensa',
+    icono: '🛡️',
+    titulo: 'Cómo se defiende la aldea',
+    texto: 'La muralla PARA: el que quiera entrar tiene que derribarla a golpes. El foso NO para, hace lento: el que lo cruza se queda quieto a tiro. Pero los que matan son las torres; los muros y los fosos solo les regalan tiempo, así que un muro sin torres detrás no sirve de nada. El puesto avanzado, además, avisa antes de que llegue un asedio.',
+    tipos: ['muralla', 'puerta', 'foso', 'torre_vigia', 'torre_ballesta', 'castillo', 'puesto_avanzado']
+  },
+  {
+    id: 'adorno',
+    icono: '🚩',
+    titulo: 'Adorno',
+    texto: 'No hacen nada de nada. Están para que la aldea tenga cara de aldea.',
+    tipos: ['pozo', 'estandarte']
+  }
+]
