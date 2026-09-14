@@ -526,6 +526,15 @@ function colocarDeco (rec, k) {
  * los de al lado y leen como un banco de nubes, no como piedras.
  */
 function construirNiebla (w) {
+  // FUERA LAS NUBES. El dueño las quitó de un plumazo: tapaban el mapa y no
+  // dejaban ver el reino. Lo desconocido se sigue distinguiendo porque su
+  // loseta va en penumbra (más oscura y sin paisaje encima), que basta para
+  // saber dónde no has estado sin taparte medio tablero.
+  // El resto del módulo ya tolera que no haya nubarrones: todos sus usos
+  // están protegidos, y `abrirNiebla()` sigue aclarando la loseta al explorar.
+  return
+
+  /* eslint-disable no-unreachable */
   const ocultas = w.tiles.filter(t => !descubierto(t.x, t.y))
   if (!ocultas.length) return
   const rng = makeRng(((game.state.seed >>> 0) ^ 0x2545f491) >>> 0)

@@ -102,7 +102,10 @@ export async function init () {
   const scene = new THREE.Scene()
   scene.background = new THREE.Color(PALETA.cielo)
   // niebla suave: difumina el borde del tablero para que no se vea cortado
-  scene.fog = new THREE.FogExp2(PALETA.niebla, 0.011)
+  // Sin niebla de distancia: emblanquecía el valle y tapaba la aldea al
+  // alejarse. El borde del tablero ya lo cierran el acantilado y el mar, así
+  // que no hace falta difuminar nada.
+  scene.fog = null
 
   // --- cámara ---
   const camera = new THREE.PerspectiveCamera(FOV, aspecto(), 1, 400)
