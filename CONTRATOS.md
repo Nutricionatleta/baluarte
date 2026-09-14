@@ -92,3 +92,13 @@ Híbrido. Construir/mejorar tarda **de 10 segundos a 2 horas** según el nivel
 La producción **sigue acumulándose con la app cerrada**, con tope de 8 horas.
 Se puede **acelerar con gemas** (1 gema = 60 s) y las gemas se ganan jugando,
 con misiones y asaltos. **Nunca habrá pagos reales.**
+
+## Deuda conocida (sep-2026)
+- `world/imperio.js → reforzarPlaza()` escribe directamente en
+  `game.state.ejercito.tropas`, que es de `sim/army.js`. Rompe la regla 4
+  ("sim/ manda sobre sus datos") y provocó que al jugador se le evaporara
+  tropa al recargar. Hoy `army.js` lo cuadra por detrás escuchando
+  `IMPERIO_CAMBIADO`, así que **no se pierde nada**, pero la propiedad del
+  dato sigue rota: lo limpio es que `reforzarPlaza()` pida la tropa a
+  `sim/army.js` en vez de restarla del censo. No se ha hecho para no arriesgar
+  un doble descuento con el arreglo que ya funciona y está probado.

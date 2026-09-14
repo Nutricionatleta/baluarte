@@ -1102,14 +1102,27 @@ function sanearEscuadrones () {
       acogida.tropas[tipo] = (acogida.tropas[tipo] || 0) + (total - suma)
       continue
     }
+    // Alguien ha bajado el censo por detrás (mandar tropa a guarnecer una plaza
+    // del imperio lo hace: ver reforzarPlaza en world/imperio.js). Hay que
+    // decidir QUIÉN pone esos hombres, y no vale el que caiga: primero la
+    // reserva, luego el escuadrón menos prioritario, y en dos vueltas —antes lo
+    // que a cada uno le sobra por encima de su plantilla que lo que su plantilla
+    // pide—. Así, mandar guarnición no desmonta el escuadrón que guarda un flanco.
     let sobra = suma - total
-    for (let i = lista.length - 1; i >= 0 && sobra > 0; i--) {
-      const hay = lista[i].tropas[tipo] || 0
-      if (!hay) continue
-      const quita = Math.min(hay, sobra)
-      lista[i].tropas[tipo] = hay - quita
-      sobra -= quita
-      if (!lista[i].tropas[tipo]) delete lista[i].tropas[tipo]
+    const orden = ordenDeMerma(lista)
+    for (const respetarPlantilla of [true, false]) {
+      if (sobra <= 0) break
+      for (const q of orden) {
+        if (sobra <= 0) break
+        const hay = q.tropas[tipo] || 0
+        if (!hay) continue
+        const suelo = respetarPlantilla ? (q.plantilla ? (q.plantilla[tipo] || 0) : 0) : 0
+        const quita = Math.min(Math.max(0, hay - suelo), sobra)
+        if (!quita) continue
+        q.tropas[tipo] = hay - quita
+        sobra -= quita
+        if (!q.tropas[tipo]) delete q.tropas[tipo]
+      }
     }
   }
   return lista
@@ -1391,6 +1404,16 @@ const enumerarNombres = (l) => (l.length <= 1 ? (l[0] || '') : `${l.slice(0, -1)
 const resumenTropa = (tropas) => Object.entries(tropas || {})
   .filter(([, n]) => n > 0)
   .map(([t, n]) => `${UNIDADES[t]?.icono || '🧍'} ${n}`).join(' · ')
+
+/**
+ * El orden en el que un escuadrón pone hombres cuando el censo mengua: primero
+ * la reserva (el de acogida) y después de menor a mayor prioridad. Es el espejo
+ * exacto del reparto, que va de mayor a menor.
+ */
+function ordenDeMerma (lista) {
+  const acogida = lista[0]
+  return [acogida, ...porPrioridad(lista).filter(q => q !== acogida).reverse()]
+}
 
 /** Los escuadrones por orden de reparto: el de prioridad 1 se llena primero. */
 function porPrioridad (lista) {
@@ -1974,6 +1997,15 @@ export function init () {
   // momento de rehacer los escuadrones que quedaron cojos.
   for (const ev of [EV.RAID_RESOLVED, EV.DEFENSE_RESOLVED]) {
     events.on(ev, () => cuadrarYRepartir('vuelta'))
+  }
+  // EL IMPERIO TOCA EL CENSO POR SU CUENTA. `reforzarPlaza()` (world/imperio.js)
+  // resta la guarnición directamente de `ejercito.tropas` sin pasar por aquí, así
+  // que los escuadrones se quedaban con hombres que ya no existen y la cuenta solo
+  // se cuadraba al cargar la partida: al jugador le "desaparecía" tropa cada vez
+  // que abría el juego. Cuadrando aquí, la baja se ve en el acto y en el escuadrón
+  // que toca. (Lo suyo sería que imperio.js pidiera la tropa con `bloquear()`.)
+  for (const ev of [EV.IMPERIO_CAMBIADO, EV.PLAZA_CONQUISTADA, EV.PLAZA_PERDIDA]) {
+    events.on(ev, () => cuadrarYRepartir('imperio'))
   }
   // Entrenar, curar o perder gente cambia el reparto: el panel y el render se
   // enteran por aquí en vez de tener que preguntar en cada frame.

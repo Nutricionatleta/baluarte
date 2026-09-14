@@ -225,6 +225,92 @@ comprobar('sin plantillas, los reclutas caen en la reserva como siempre',
 comprobar('y nadie le toca la tropa a los demás',
   JSON.stringify(lista9.slice(1).map(q => q.tropas)) === JSON.stringify(JSON.parse(antesSin).slice(1)))
 
+// ═══════ 10. EL DESCUADRE DEL CENSO (el fallo que cazó el banco) ═══════
+// Reproduce el ciclo entero de una partida de verdad: herir, curar, mandar un
+// asalto, y —lo que de verdad lo rompía— MANDAR TROPA A GUARNECER UNA PLAZA.
+// `reforzarPlaza()` (world/imperio.js) resta la guarnición directamente de
+// `ejercito.tropas` sin avisar a nadie, así que los escuadrones se quedaban con
+// hombres que ya no existían y la cuenta solo se cuadraba al cargar: al jugador
+// le desaparecía tropa cada vez que abría el juego, y se acumulaba.
+linea('10. Censo y escuadrones cuadran SIEMPRE (heridos, asalto y guarnición)')
+const desfase = () => {
+  const e = game.state.ejercito
+  const tipos = new Set([...Object.keys(e.tropas), ...e.escuadrones.flatMap(q => Object.keys(q.tropas))])
+  const d = {}
+  for (const t of tipos) {
+    const suma = e.escuadrones.reduce((a, q) => a + (q.tropas[t] || 0), 0)
+    if (suma !== (e.tropas[t] || 0)) d[t] = suma - (e.tropas[t] || 0)
+  }
+  return d
+}
+const cuadra = (paso) => comprobar(`censo cuadra ${paso}`, !Object.keys(desfase()).length, JSON.stringify(desfase()))
+
+// punto de partida: hueste repartida y plantillas puestas
+for (const q of game.state.ejercito.escuadrones) delete q.plantilla
+A.fijarPlantilla(vado, { lancero: 6, arquero: 4 })
+A.fijarPlantilla(norte, { lancero: 4, arquero: 2 })
+A.entrenar('lancero', 14); A.entrenar('arquero', 8); A.entrenar('espadachin', 6)
+avanzar(60 * 60); events.emit(EV.TICK, { dt: 1 })
+console.log('   ' + pintar())
+cuadra('al empezar')
+
+// a) heridos y curación
+A.perderTropas({ lancero: 4, arquero: 2, espadachin: 2 }, { victoria: true })
+cuadra('tras herir')
+avanzar(8 * 3600); events.emit(EV.TICK, { dt: 1 })
+cuadra('tras curar')
+
+// b) un asalto: sale tropa, cae gente y vuelve lo que queda
+const salen = A.tropasDeAsalto()
+const rb = A.bloquear(salen, 'asalto')
+comprobar('la tropa sale de asalto', rb.ok, JSON.stringify(salen))
+cuadra('con tropa fuera')
+A.perderTropas({ lancero: 3, espadachin: 1 }, { victoria: true })
+cuadra('con bajas estando fuera')
+A.liberar('asalto')
+events.emit(EV.RAID_RESOLVED, { victoria: true })
+cuadra('al volver del asalto')
+
+// c) LA GUARNICIÓN: exactamente lo que hace world/imperio.js reforzarPlaza(),
+//    que resta del censo y se va sin avisar a nadie.
+const sumaAntes = A.escuadrones().reduce((a, q) => a + q.total, 0)
+const guarnicion = {}
+for (const tipo of Object.keys({ ...game.state.ejercito.tropas })) {
+  if (game.state.ejercito.tropas[tipo] > 1) {
+    game.state.ejercito.tropas[tipo] -= 1          // 1 de cada tipo, como el refuerzo real
+    guarnicion[tipo] = 1
+  }
+}
+events.emit(EV.IMPERIO_CAMBIADO, { motivo: 'refuerzo' })
+
+// OJO: a partir de aquí y hasta que se mire el desfase NO se puede llamar a la
+// API del ejército (escuadrones(), pintar()…): cualquier consulta cuadra el
+// reparto de rebote y taparía el fallo. El juego real tampoco la llama.
+const desfaseCrudo = desfase()
+const guardado = JSON.stringify(game.state)                       // esto es lo que iría al disco
+const escuadronesGuardados = JSON.stringify(game.state.ejercito.escuadrones)
+console.log('   a la guarnición:', JSON.stringify(guarnicion), '· desfase crudo:', JSON.stringify(desfaseCrudo))
+comprobar('el censo no se descuadra ni un soldado al mandar guarnición',
+  !Object.keys(desfaseCrudo).length, JSON.stringify(desfaseCrudo))
+
+console.log('   ' + pintar())
+comprobar('la merma sale de la reserva, no del escuadrón que guarda un flanco',
+  ver(vado).completo && ver(norte).completo,
+  `Vado ${JSON.stringify(ver(vado).tropas)} · Norte ${JSON.stringify(ver(norte).tropas)}`)
+comprobar('los escuadrones pierden exactamente los que se fueron',
+  A.escuadrones().reduce((a, q) => a + q.total, 0) === sumaAntes - suma(guarnicion),
+  `${A.escuadrones().reduce((a, q) => a + q.total, 0)} de ${sumaAntes - suma(guarnicion)}`)
+
+// d) y ahora lo que cazó el banco: guardar y cargar no puede cambiar NADA
+const copia10 = JSON.parse(guardado)
+for (const k of Object.keys(game.state)) delete game.state[k]
+Object.assign(game.state, copia10)
+events.emit(EV.STATE_LOADED, { state: game.state, offlineSeconds: 0 })
+comprobar('guardar y cargar NO evapora tropa de los escuadrones',
+  JSON.stringify(game.state.ejercito.escuadrones) === escuadronesGuardados,
+  `desfase ${JSON.stringify(desfase())}`)
+cuadra('tras guardar y cargar')
+
 // ═════════════════ resultado ═════════════════
 console.log(`\n${'═'.repeat(60)}`)
 console.log(fallos.length ? `❌ ${fallos.length} FALLOS:\n - ${fallos.join('\n - ')}` : '✅ TODO BIEN: 0 fallos')
