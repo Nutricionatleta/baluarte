@@ -23,6 +23,7 @@ import * as UI from './styles.js'
 import * as Mapa from '../world/map.js'
 import * as Expediciones from '../world/expeditions.js'
 import * as Enemigos from '../world/enemies.js'
+import * as Imperio from '../world/imperio.js'
 
 const { el, hoja, formatoNumero, formatoTiempo, costeHTML, chip, barraProgreso, pestañas, badge, vaciar } = UI
 
@@ -108,7 +109,18 @@ const CSS = `
 .mundo-fila-txt small { font-size: .72em; font-weight: 700; color: var(--tinta-suave); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mundo-fila .barra-progreso { height: 9px; margin-top: 4px; }
 .mundo-fila.aviso-informe { background-image: linear-gradient(180deg, var(--oro-claro), var(--oro)); border-color: var(--oro-oscuro); }
-.mundo-ayuda { align-self: flex-start; padding: 6px 14px; font-size: .8em; }
+/* La chuleta del mapa: un botón REDONDO y pequeño en la esquina de arriba a la
+   izquierda, debajo del marcador. Antes era una barra de texto ancha que se
+   plantaba sobre el valle; ahora es solo el icono, y lo que hace lo dice su
+   etiqueta accesible. */
+.mundo-ayuda {
+  align-self: flex-start;
+  width: 40px; height: 40px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.2em; line-height: 1; border-radius: 50%;
+  opacity: .8;
+}
+.mundo-ayuda:active { opacity: 1; }
 
 /* ---------- botón de acción de la ficha de casilla ---------- */
 .acciones { display: flex; flex-direction: column; gap: 8px; }
@@ -377,9 +389,11 @@ function refrescarTira () {
   if (enMundo) {
     if (!ayuda) {
       ayuda = el('button', {
-        clase: 'btn btn-piedra mundo-ayuda', type: 'button', texto: '🗺️ ¿Qué es cada cosa?',
+        clase: 'btn btn-piedra mundo-ayuda', type: 'button', texto: '🗺️',
         onclick: () => { solapa = 'leyenda'; if (panel) pintar(); else abrir({ solapa: 'leyenda' }) }
       })
+      ayuda.setAttribute('aria-label', '¿Qué es cada cosa? Abrir la leyenda del mapa')
+      ayuda.title = '¿Qué es cada cosa?'
       tira.appendChild(ayuda)
     } else {
       tira.appendChild(ayuda)      // siempre la última
@@ -438,6 +452,31 @@ function rumboDe (x, y) {
   return `al ${v}`
 }
 
+/**
+ * DE QUIÉN ES Y SI LA ALCANZAS. En el mapa eso se ve por el color de la mancha
+ * y por el marco dorado; aquí se dice con palabras, que es lo que se lee bien.
+ */
+function chipsDeBandera (x, y) {
+  const fuera = []
+  const casa = casaMundo()
+  const dueño = pedir(Imperio, 'dueñoDe', [x, y], null)
+  const propia = x === casa.x && y === casa.y
+
+  if (propia) fuera.push(chip('🏰', 'tu aldea', { tono: 'bien' }))
+  else if (dueño === 'jugador') {
+    const plaza = pedir(Imperio, 'plazaEn', [x, y], null)
+    fuera.push(chip('🚩', plaza ? `plaza tuya · nivel ${plaza.nivel || 1}` : 'tuya', { tono: 'bien' }))
+  } else if (dueño) fuera.push(chip('🏴', 'de un señor rival', { tono: 'mal' }))
+  else fuera.push(chip('⚪', 'tierra de nadie', {}))
+
+  if (!propia && dueño !== 'jugador') {
+    const a = pedir(Imperio, 'alcanzable', [x, y], null)
+    if (a) fuera.push(chip(a.ok ? '⚔️' : '🚫', a.ok ? 'la alcanzas ya' : 'fuera de tu alcance',
+      { tono: a.ok ? 'bien' : '' }))
+  }
+  return fuera
+}
+
 function vistaCasilla (zona) {
   if (!casilla) {
     zona.appendChild(el('div', { clase: 'panel col' }, [
@@ -471,7 +510,10 @@ function vistaCasilla (zona) {
       chip('📏', `${coma(dist.toFixed(1))} casillas`, {}),
       visto ? chip('🌍', Mapa.BIOMAS?.[tile?.bioma]?.nombre || 'tierra rara', {}) : chip('☁️', 'sin explorar', {}),
       nodo ? chip(Mapa.TIPOS_NODO?.[nodo.tipo]?.icono || '⛏️', nodo.nombre, { tono: nodo.agotado ? '' : 'bien' }) : null,
-      enemigo ? chip('🏴', enemigo.derrotado ? 'en ruinas' : enemigo.vasallo ? 'vasallo tuyo' : `nivel ${enemigo.nivel}`, { tono: enemigo.derrotado || enemigo.vasallo ? '' : 'mal' }) : null
+      enemigo ? chip('🏴', enemigo.derrotado ? 'en ruinas' : enemigo.vasallo ? 'vasallo tuyo' : `nivel ${enemigo.nivel}`, { tono: enemigo.derrotado || enemigo.vasallo ? '' : 'mal' }) : null,
+      // lo que antes flotaba en carteles encima del mapa vive aquí: de quién es
+      // la comarca y si la tienes a tiro
+      ...(visto ? chipsDeBandera(x, y) : [])
     ]),
     el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: `📜 ${narrar(x, y, tile, nodo, enemigo, riqueza, dist)}` }),
     ...eventos.map(ev => el('div', { clase: 'pequeño', texto: `⚡ ${ev.texto || 'Algo se mueve por aquí.'}` }))
@@ -868,21 +910,25 @@ function vistaSugerencias (zona) {
 // ============================================================= 5. LEYENDA ==
 
 const LEYENDA = [
+  ['🎨', 'Comarcas pintadas', 'El color de la casilla es la bandera que ondea en ella: el tuyo en lo que has tomado, el de cada señor rival en lo suyo. Lo que no lleva color no es de nadie todavía.'],
+  ['⚔️', 'Marco dorado', 'Esa comarca la alcanzas AHORA: toca tu frontera. Sin marco, primero hay que acercar la frontera tomando algo por el camino.'],
+  ['🚩', 'Torreones con aro de oro', 'Plazas tuyas. Producen para ti cada minuto y te sirven de trampolín para llegar a la siguiente comarca.'],
+  ['🏰', 'Tu aldea', 'El centro del valle, con su aro de oro. De aquí sale y aquí vuelve cada expedición.'],
   ['☁️', 'Nubarrones', 'Ahí no ha pisado nadie. Manda a alguien a explorar y la niebla se levanta.'],
-  ['🏰', 'Tu aldea', 'El centro del valle. De aquí sale y aquí vuelve cada expedición.'],
   ['⛳', 'La cerca verde', 'Hasta ahí llegan hoy tus exploradores. Más lejos, ni con comida de sobra: sube el campamento de nivel.'],
-  ['🌲', 'Fichas de colores', 'Yacimientos. El cartel dice de qué son y cuánto queda: madera, piedra, grano, oro o reliquias.'],
+  ['🌲', 'Fichas de colores', 'Yacimientos: madera, piedra, grano, oro o reliquias. El dibujo de la ficha dice de qué es; toca la casilla y abajo te cuento cuánto queda.'],
   ['⚫', 'Fichas grises y hundidas', 'Yacimiento exprimido. Con el tiempo se rehace solo.'],
-  ['🏴', 'Castillos rojos', 'Señores rivales. El cartel lleva su nombre y su nivel; cuantas más calaveras, más duro.'],
-  ['🤝', 'Castillos verdes', 'Rivales que ya han hincado la rodilla: son vasallos tuyos y te pagan tributo.'],
-  ['🚶', 'Muñeco andando', 'Un explorador tuyo yendo o volviendo. El cartel dice quién es y a qué ha ido.'],
+  ['🏴', 'Castillos', 'Señores rivales. El tejado lleva el color de su casa, para saber de quién es cada mancha del mapa.'],
+  ['🤝', 'Castillos con rótulo verde', 'Rivales que ya han hincado la rodilla: son vasallos tuyos y te pagan tributo.'],
+  ['🚶', 'Muñeco andando', 'Un explorador tuyo yendo o volviendo por su camino punteado.'],
   ['⚡', 'Señales doradas', 'Algo pasa ahí ahora mismo: una caravana, bandidos o un hallazgo. No dura para siempre.']
 ]
 
 function vistaLeyenda (zona) {
   zona.appendChild(el('div', { clase: 'panel col' }, [
     el('div', { clase: 'titular', texto: 'Para qué sirve el mapa' }),
-    el('div', { clase: 'pequeño', estilo: { lineHeight: '1.45' }, texto: 'El valle es de donde sacas lo que tu aldea no produce y donde están tus rivales. Tocas una casilla, eliges qué hacer allí y mandas a un explorador: él va, hace lo suyo y vuelve con carga y con un informe.' })
+    el('div', { clase: 'pequeño', estilo: { lineHeight: '1.45' }, texto: 'El valle es de donde sacas lo que tu aldea no produce y donde están tus rivales. Tocas una casilla, eliges qué hacer allí y mandas a un explorador: él va, hace lo suyo y vuelve con carga y con un informe.' }),
+    el('div', { clase: 'pequeño', estilo: { lineHeight: '1.45' }, texto: 'En el tablero solo hay cuatro rótulos como mucho, y siempre los de lo que te importa. Todo lo demás se cuenta aquí abajo: toca una casilla y su ficha te dice qué hay, de quién es y qué puedes hacer.' })
   ]))
   zona.appendChild(el('div', { clase: 'panel leyenda' },
     LEYENDA.map(([ico, nombre, texto]) => el('div', { clase: 'leyenda-fila' }, [

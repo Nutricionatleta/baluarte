@@ -34,303 +34,378 @@ const DE_ESTADO = new Set([
 // --------------------------------------------------------------- LA CAMPAÑA
 /**
  * Cadena de encargos: del primer tronco a la Edad Imperial.
- * `consejo` es lo que el mayordomo suelta en grande cuando el jugador abre el
- * juego sin saber por dónde seguir; el `texto` es el sabor.
+ *
+ * REGLA DE ESCRITURA (el dueño no sabía qué tenía que hacer):
+ *   `titulo`  = LA ORDEN, en imperativo y de un vistazo. «Levanta una serrería».
+ *   `texto`   = el adorno del mayordomo: UNA frase corta, y en pequeño.
+ *   `consejo` = la misma orden en boca del mayordomo, para la tira del HUD.
+ *   `ir`      = a qué pantalla lleva el botón. Saber qué hacer sin poder ir, no sirve.
+ *   `unidad`  = qué se cuenta, para el «Te faltan 5 tramos».
+ *   `pasos`   = si el encargo pide varias cosas, se ven como lista de comprobación.
+ * Nada de párrafos: en un juego de ratos muertos, si hay que leer, se cierra.
  */
+
+// A dónde manda el botón grande. Los nombres de panel son los que ya escucha la UI.
+const IR_TALLER = { texto: '🔨 Ir al taller', panel: 'construir' }
+const IR_MEJORAS = { texto: '⬆️ Ir a mejoras', panel: 'mejorar' }
+const IR_CIENCIA = { texto: '📜 Ir a investigar', panel: 'investigar' }
+const IR_EDAD = { texto: '🏰 Ir a avanzar de edad', panel: 'investigar' }
+const IR_ENTRENAR = { texto: '⚔️ Ir a entrenar', panel: 'ejercito', datos: { solapa: 'entrenar' } }
+const IR_ATACAR = { texto: '🗡️ Ir a atacar', panel: 'ejercito', datos: { solapa: 'atacar' } }
+const IR_DEFENSA = { texto: '🛡️ Ver la defensa', panel: 'ejercito', datos: { solapa: 'defensa' } }
+const IR_MAPA = { texto: '🗺️ Abrir el mapa', panel: 'mundo' }
+
 const ENCARGOS = [
   {
     id: 'e01_serreria',
-    titulo: 'Sin madera no hay aldea',
-    texto: 'Mi señor, con buena voluntad no se levanta un tejado. Mandad alzar una serrería antes de que el invierno nos pille a la intemperie.',
+    titulo: 'Levanta una serrería',
+    texto: 'Mi señor, sin madera no hay aldea.',
     consejo: 'levantad una serrería: sin madera no hay aldea.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'serreria', total: 1 },
     recompensa: premio(rec(120, 60, 60), 5, 20),
     siguiente: 'e02_cantera'
   },
   {
     id: 'e02_cantera',
-    titulo: 'Piedra para lo serio',
-    texto: 'La madera arde, mi señor. La piedra no. Abrid una cantera y dormiremos todos más tranquilos.',
+    titulo: 'Abre una cantera',
+    texto: 'La madera arde. La piedra no.',
     consejo: 'abrid una cantera: la piedra es lo que siempre falta.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'cantera', total: 1 },
     recompensa: premio(rec(80, 120, 60), 5, 25),
     siguiente: 'e03_granja'
   },
   {
     id: 'e03_granja',
-    titulo: 'Nabos, gloriosos nabos',
-    texto: 'La tropa marcha con el estómago, no con el estandarte. Una granja, y que siembren de una vez.',
+    titulo: 'Siembra una granja',
+    texto: 'La tropa marcha con el estómago.',
     consejo: 'sembrad una granja: la gente trabaja mejor comida.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'granja', total: 1 },
     recompensa: premio(rec(100, 40, 150), 5, 25),
     siguiente: 'e04_casa'
   },
   {
     id: 'e04_casa',
-    titulo: 'Techo y jergón',
-    texto: 'Duermen en el pajar, mi señor, y ya murmuran. Una casa de adobe y paja bastará… por ahora.',
+    titulo: 'Construye una casa',
+    texto: 'Duermen en el pajar y ya murmuran.',
     consejo: 'construid una casa: sin camas no llegan aldeanos nuevos.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'casa', total: 1 },
     recompensa: premio(rec(120, 40, 100), 4, 30),
     siguiente: 'e05_gente'
   },
   {
     id: 'e05_gente',
-    titulo: 'Manos, que faltan manos',
-    texto: 'Cinco almas en la aldea y tres oficios sin cubrir. Llamad a más gente del camino.',
-    consejo: 'reclutad aldeanos hasta ser cinco: hacen falta manos.',
+    titulo: 'Ten 5 aldeanos',
+    texto: 'Tres oficios sin cubrir, mi señor.',
+    consejo: 'construid casas hasta llegar a cinco aldeanos.',
+    ir: IR_TALLER,
+    unidad: 'aldeanos',
     objetivo: { tipo: 'aldeanos', total: 5 },
     recompensa: premio(rec(150, 80, 150), 6, 35),
     siguiente: 'e06_ayto2'
   },
   {
     id: 'e06_ayto2',
-    titulo: 'La casa grande',
-    texto: 'Si el ayuntamiento no crece, mi señor, la aldea tampoco. Ampliadlo y todo lo demás os seguirá.',
+    titulo: 'Sube el Ayuntamiento a nivel 2',
+    texto: 'Si él no crece, la aldea tampoco.',
     consejo: 'subid el Ayuntamiento a nivel 2: manda sobre todo lo demás.',
+    ir: IR_MEJORAS,
     objetivo: { tipo: 'nivel', que: 'ayuntamiento', total: 2 },
     recompensa: premio(rec(200, 120, 100), 8, 50),
     siguiente: 'e07_almacen'
   },
   {
     id: 'e07_almacen',
-    titulo: 'Lo que no cabe, se pudre',
-    texto: 'Tenemos troncos apilados en la plaza y la lluvia no perdona. Un almacén, mi señor, y que sea hoy.',
+    titulo: 'Construye un almacén',
+    texto: 'Lo que no cabe bajo techo, se pudre.',
     consejo: 'construid un almacén: lo que no cabe bajo techo se pierde.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'almacen', total: 1 },
     recompensa: premio(rec(150, 150, 80), 6, 40),
     siguiente: 'e08_serreria2'
   },
   {
     id: 'e08_serreria2',
-    titulo: 'Más filo, más vigas',
-    texto: 'Una serrería de nivel dos rinde lo que dos de nivel uno y ocupa la mitad de sitio. Números, mi señor.',
+    titulo: 'Mejora la serrería a nivel 2',
+    texto: 'Rinde el doble y ocupa lo mismo.',
     consejo: 'mejorad la serrería a nivel 2: al principio la madera manda.',
+    ir: IR_MEJORAS,
     objetivo: { tipo: 'nivel', que: 'serreria', total: 2 },
     recompensa: premio(rec(180, 100, 100), 6, 45),
     siguiente: 'e09_hachas'
   },
   {
     id: 'e09_hachas',
-    titulo: 'Tinta y limadura',
-    texto: 'Los leñadores piden filo nuevo. Investigad las hachas afiladas: será la primera idea buena de vuestro reinado.',
+    titulo: 'Investiga «Hachas afiladas»',
+    texto: 'Los leñadores piden filo nuevo.',
     consejo: 'investigad «Hachas afiladas»: la primera tecnología cunde mucho.',
+    ir: IR_CIENCIA,
     objetivo: { tipo: 'tecnologia', que: 'hachas_afiladas', total: 1 },
     recompensa: premio(rec(200, 120, 120), 8, 60),
     siguiente: 'e10_campamento'
   },
   {
     id: 'e10_campamento',
-    titulo: 'Qué habrá detrás del monte',
-    texto: 'Nadie de aquí ha cruzado el río. Levantad un campamento de exploradores y salgamos de dudas.',
+    titulo: 'Construye el campamento explorador',
+    texto: 'Nadie de aquí ha cruzado el río.',
     consejo: 'levantad el campamento de exploradores: el mundo empieza ahí.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'campamento_explorador', total: 1 },
     recompensa: premio(rec(150, 80, 150), 8, 50),
     siguiente: 'e11_expedicion'
   },
   {
     id: 'e11_expedicion',
-    titulo: 'El primer camino',
-    texto: 'Mandad un explorador al valle. Volverá con los pies deshechos y con noticias; lo segundo nos interesa.',
-    consejo: 'mandad una expedición al mapa del mundo.',
+    titulo: 'Manda una expedición',
+    texto: 'Volverá con noticias. Eso interesa.',
+    consejo: 'mandad una expedición desde el mapa del mundo.',
+    ir: IR_MAPA,
     objetivo: { tipo: 'expedicion', total: 1 },
     recompensa: premio(rec(120, 60, 120), 10, 55),
     siguiente: 'e12_explorar'
   },
   {
     id: 'e12_explorar',
-    titulo: 'Dibujad el valle',
-    texto: 'Un mapa en blanco no vale nada. Descubrid quince palmos de tierra y empezaremos a tener uno.',
+    titulo: 'Descubre 15 casillas del mapa',
+    texto: 'Un mapa en blanco no vale nada.',
     consejo: 'explorad 15 casillas del mundo: ahí fuera hay grano y enemigos.',
+    ir: IR_MAPA,
+    unidad: 'casillas',
     objetivo: { tipo: 'explorar', total: 15 },
     recompensa: premio(rec(200, 100, 200), 10, 70),
     siguiente: 'e13_cuartel'
   },
   {
     id: 'e13_cuartel',
-    titulo: 'Cuatro jergones y un sargento',
-    texto: 'Corren bandidos por el camino, mi señor. Un cuartel, aunque sea pequeño, cambia mucho las conversaciones.',
+    titulo: 'Construye un cuartel',
+    texto: 'Corren bandidos por el camino.',
     consejo: 'construid un cuartel: hace falta algo más que buenas palabras.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'cuartel', total: 1 },
     recompensa: premio(rec(200, 100, 200), 10, 70),
     siguiente: 'e14_lanceros'
   },
   {
     id: 'e14_lanceros',
-    titulo: 'Lanzas al frente',
-    texto: 'Cuatro lanceros. Baratos, abundantes y la pesadilla de cualquiera que venga a caballo.',
+    titulo: 'Entrena 4 lanceros',
+    texto: 'Baratos, y pesadilla de la caballería.',
     consejo: 'entrenad cuatro lanceros en el cuartel.',
+    ir: IR_ENTRENAR,
+    unidad: 'lanceros',
     objetivo: { tipo: 'tropas', que: 'lancero', total: 4 },
     recompensa: premio(rec(150, 100, 250), 10, 80),
     siguiente: 'e15_muralla'
   },
   {
     id: 'e15_muralla',
-    titulo: 'Cerrad el flanco norte',
-    texto: 'Los muros no se alzan solos, mi señor. Ocho tramos de piedra por donde entran los que no llaman a la puerta.',
+    titulo: 'Levanta 8 tramos de muralla',
+    texto: 'Por ahí entran los que no llaman.',
     consejo: 'levantad ocho tramos de muralla y cerrad el flanco abierto.',
+    ir: IR_TALLER,
+    unidad: 'tramos',
     objetivo: { tipo: 'construir', que: 'muralla', total: 8 },
     recompensa: premio(rec(150, 250, 100), 10, 80),
     siguiente: 'e16_puerta'
   },
   {
     id: 'e16_puerta',
-    titulo: 'Por algún sitio hay que entrar',
-    texto: 'Hemos amurallado hasta el pozo y ahora nadie puede salir a por agua. Una puerta, por caridad.',
+    titulo: 'Pon una puerta en la muralla',
+    texto: 'Ahora nadie puede salir a por agua.',
     consejo: 'poned una puerta en la muralla, que por algún sitio hay que entrar.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'puerta', total: 1 },
     recompensa: premio(rec(120, 180, 100), 8, 70),
     siguiente: 'e17_torre'
   },
   {
     id: 'e17_torre',
-    titulo: 'Ojos en lo alto',
-    texto: 'Dos arqueros aburridos en una torre valen por veinte hombres corriendo. Alzad una torre vigía.',
+    titulo: 'Alza una torre vigía',
+    texto: 'Defenderse empieza por ver venir.',
     consejo: 'alzad una torre vigía: defenderse empieza por ver venir.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'torre_vigia', total: 1 },
     recompensa: premio(rec(150, 250, 100), 10, 90),
     siguiente: 'e18_donvela'
   },
   {
     id: 'e18_donvela',
-    titulo: 'El grano de Don Vela',
-    texto: 'Corre el rumor de que Don Vela guarda grano de sobra y guardias de menos. Sería una lástima desaprovecharlo.',
+    titulo: 'Gana un asalto a Don Vela',
+    texto: 'Grano de sobra y guardias de menos.',
     consejo: 'asaltad una base enemiga del mapa y traed el botín a casa.',
+    ir: IR_ATACAR,
     objetivo: { tipo: 'asalto', total: 1 },
     recompensa: premio(rec(250, 150, 350, 60), 15, 120),
     siguiente: 'e19_granero'
   },
   {
     id: 'e19_granero',
-    titulo: 'Grano seco, monedas contadas',
-    texto: 'El botín de Don Vela está en la plaza, a la vista de todo el mundo. Un granero, mi señor, y con cerrojo.',
+    titulo: 'Construye un granero',
+    texto: 'El grano y el oro necesitan cerrojo.',
     consejo: 'construid un granero: el grano y el oro necesitan cerrojo.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'granero', total: 1 },
     recompensa: premio(rec(180, 180, 150), 10, 90),
     siguiente: 'e20_feudal'
   },
   {
     id: 'e20_feudal',
-    titulo: 'Se acaba la Edad Oscura',
-    texto: 'Ya no somos cuatro chozas y un pozo. Avanzad a la Edad Feudal y que el valle se entere.',
+    titulo: 'Avanza a la Edad Feudal',
+    texto: 'Ya no somos cuatro chozas y un pozo.',
     consejo: 'avanzad a la Edad Feudal desde el Ayuntamiento.',
+    ir: IR_EDAD,
     objetivo: { tipo: 'edad', que: 'feudal', total: 1 },
     recompensa: premio(rec(400, 300, 300, 100), 25, 200),
     siguiente: 'e21_oro'
   },
   {
     id: 'e21_oro',
-    titulo: 'El metal que todo lo compra',
-    texto: 'Sin oro no hay tropa decente ni ciencia ninguna, mi señor. Abrid una mina y que piquen.',
+    titulo: 'Abre una mina de oro',
+    texto: 'Sin oro no hay tropa ni ciencia.',
     consejo: 'abrid una mina de oro: sin oro no hay buena tropa ni ciencia.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'mina_oro', total: 1 },
     recompensa: premio(rec(250, 200, 200, 80), 12, 110),
     siguiente: 'e22_molino'
   },
   {
     id: 'e22_molino',
-    titulo: 'Dos granjas y un molino',
-    texto: 'Dos granjas juntas y un molino en medio: la aldea deja de pasar hambre para siempre.',
+    titulo: 'Construye un molino',
+    texto: 'Con dos granjas al lado, se acaba el hambre.',
     consejo: 'tened dos granjas y poned un molino cerca de ellas.',
+    ir: IR_TALLER,
+    pasos: [
+      { texto: 'Dos granjas en pie', objetivo: { tipo: 'construir', que: 'granja', total: 2 } },
+      { texto: 'Un molino cerca de ellas', objetivo: { tipo: 'construir', que: 'molino', total: 1 } }
+    ],
     objetivo: { tipo: 'construir', que: 'molino', total: 1 },
     recompensa: premio(rec(250, 150, 350), 12, 110),
     siguiente: 'e23_mercado'
   },
   {
     id: 'e23_mercado',
-    titulo: 'Cambiad lo que sobra',
-    texto: 'Nos sobra madera y nos falta piedra. Un mercado, y que el tendero se lleve lo suyo sin robar del todo.',
+    titulo: 'Levanta el mercado',
+    texto: 'Cambia lo que sobra por lo que falta.',
     consejo: 'levantad el mercado: cambiad lo que os sobra por lo que os falta.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'mercado', total: 1 },
     recompensa: premio(rec(300, 250, 200, 100), 14, 130),
     siguiente: 'e24_herreria'
   },
   {
     id: 'e24_herreria',
-    titulo: 'Chispas y juramentos',
-    texto: 'La herrería mejora a TODA la tropa a la vez, mi señor. Es el dinero mejor gastado del reino.',
+    titulo: 'Construye la herrería',
+    texto: 'Mejora a todo el ejército de golpe.',
     consejo: 'construid la herrería: mejora a todo el ejército de golpe.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'herreria', total: 1 },
     recompensa: premio(rec(300, 250, 200, 120), 15, 140),
     siguiente: 'e25_arqueria'
   },
   {
     id: 'e25_arqueria',
-    titulo: 'Que vuelen rectas',
-    texto: 'Dianas de paja y astillas en los dedos. Seis arqueros y el cuartel dejará de ir a pecho descubierto.',
+    titulo: 'Entrena 6 arqueros',
+    texto: 'Antes hará falta una arquería.',
     consejo: 'construid la arquería y entrenad seis arqueros.',
+    ir: IR_ENTRENAR,
+    unidad: 'arqueros',
+    pasos: [
+      { texto: 'La arquería, construida', objetivo: { tipo: 'construir', que: 'arqueria', total: 1 } },
+      { texto: 'Seis arqueros entrenados', objetivo: { tipo: 'tropas', que: 'arquero', total: 6 } }
+    ],
     objetivo: { tipo: 'tropas', que: 'arquero', total: 6 },
     recompensa: premio(rec(300, 200, 300, 120), 15, 150),
     siguiente: 'e26_defender'
   },
   {
     id: 'e26_defender',
-    titulo: 'Vienen por el camino',
-    texto: 'Alguien ha decidido que vuestro granero es suyo. Recibidles como merecen y que cuenten lo que han visto.',
+    titulo: 'Aguanta un asalto enemigo',
+    texto: 'Alguien cree que tu granero es suyo.',
     consejo: 'aguantad un asalto enemigo: reforzad torres y murallas antes.',
+    ir: IR_DEFENSA,
     objetivo: { tipo: 'defensa', total: 1 },
     recompensa: premio(rec(350, 350, 250, 100), 18, 160),
     siguiente: 'e27_ayto5'
   },
   {
     id: 'e27_ayto5',
-    titulo: 'Corazón del baluarte',
-    texto: 'Nivel cinco, mi señor. A partir de ahí se puede hablar de castillos sin que la gente se ría.',
+    titulo: 'Sube el Ayuntamiento a nivel 5',
+    texto: 'Desde ahí se puede hablar de castillos.',
     consejo: 'subid el Ayuntamiento a nivel 5: abre la Edad de los Castillos.',
+    ir: IR_MEJORAS,
     objetivo: { tipo: 'nivel', que: 'ayuntamiento', total: 5 },
     recompensa: premio(rec(500, 400, 400, 150), 20, 200),
     siguiente: 'e28_castillos'
   },
   {
     id: 'e28_castillos',
-    titulo: 'La edad de la piedra grande',
-    texto: 'Avanzad a la Edad de los Castillos. Empieza la guerra de verdad, y conviene llegar antes que los vecinos.',
+    titulo: 'Avanza a la Edad de los Castillos',
+    texto: 'Empieza la guerra de verdad.',
     consejo: 'avanzad a la Edad de los Castillos.',
+    ir: IR_EDAD,
     objetivo: { tipo: 'edad', que: 'castillos', total: 1 },
     recompensa: premio(rec(800, 700, 600, 300), 35, 350),
     siguiente: 'e29_castillo'
   },
   {
     id: 'e29_castillo',
-    titulo: 'Torreón y estandarte',
-    texto: 'Quien tire el castillo se lleva la aldea, mi señor. Y quien lo levante, se lleva el respeto del valle.',
+    titulo: 'Construye el castillo',
+    texto: 'Quien lo tira, se lleva la aldea.',
     consejo: 'construid el castillo: es el corazón de vuestra defensa.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'castillo', total: 1 },
     recompensa: premio(rec(700, 600, 500, 250), 30, 300),
     siguiente: 'e30_establo'
   },
   {
     id: 'e30_establo',
-    titulo: 'Los que deciden las batallas',
-    texto: 'Huele a lo que huele, pero de un establo salen los jinetes, y de los jinetes salen las victorias.',
+    titulo: 'Entrena 3 jinetes',
+    texto: 'Del establo salen las victorias.',
     consejo: 'construid el establo y entrenad tres jinetes.',
+    ir: IR_ENTRENAR,
+    unidad: 'jinetes',
+    pasos: [
+      { texto: 'El establo, construido', objetivo: { tipo: 'construir', que: 'establo', total: 1 } },
+      { texto: 'Tres jinetes entrenados', objetivo: { tipo: 'tropas', que: 'jinete', total: 3 } }
+    ],
     objetivo: { tipo: 'tropas', que: 'jinete', total: 3 },
     recompensa: premio(rec(600, 400, 700, 250), 25, 280),
     siguiente: 'e31_universidad'
   },
   {
     id: 'e31_universidad',
-    titulo: 'Monjes discutiendo de arados',
-    texto: 'De esas discusiones salen todas las ideas buenas. Levantad la universidad y aguantad el ruido.',
+    titulo: 'Levanta la universidad',
+    texto: 'De ahí salen las mejores ideas.',
     consejo: 'levantad la universidad: de ahí salen las mejores tecnologías.',
+    ir: IR_TALLER,
     objetivo: { tipo: 'construir', que: 'universidad', total: 1 },
     recompensa: premio(rec(700, 600, 500, 300), 28, 300),
     siguiente: 'e32_ciencia'
   },
   {
     id: 'e32_ciencia',
-    titulo: 'Ocho ideas buenas',
-    texto: 'Ocho tecnologías en los libros, mi señor. Es lo que separa un baluarte de un montón de piedras.',
+    titulo: 'Investiga 8 tecnologías',
+    texto: 'La ciencia no se pierde nunca.',
     consejo: 'investigad hasta tener ocho tecnologías: la ciencia no se pierde nunca.',
+    ir: IR_CIENCIA,
+    unidad: 'tecnologías',
     objetivo: { tipo: 'tecnologias', total: 8 },
     recompensa: premio(rec(800, 700, 600, 400), 30, 350),
     siguiente: 'e33_imperial'
   },
   {
     id: 'e33_imperial',
-    titulo: 'La corona',
-    texto: 'Ayuntamiento siete, universidad tres y castillo dos. Después, la Edad Imperial. Y después, mi señor, ya solo quedan leyendas.',
+    titulo: 'Avanza a la Edad Imperial',
+    texto: 'Después ya solo quedan leyendas.',
     consejo: 'preparad Ayuntamiento, universidad y castillo: os espera la Edad Imperial.',
+    ir: IR_EDAD,
+    pasos: [
+      { texto: 'Ayuntamiento a nivel 7', objetivo: { tipo: 'nivel', que: 'ayuntamiento', total: 7 } },
+      { texto: 'Universidad a nivel 3', objetivo: { tipo: 'nivel', que: 'universidad', total: 3 } },
+      { texto: 'Castillo a nivel 2', objetivo: { tipo: 'nivel', que: 'castillo', total: 2 } }
+    ],
     objetivo: { tipo: 'edad', que: 'imperial', total: 1 },
     recompensa: premio(rec(2000, 1800, 1500, 900), 100, 1000),
     siguiente: null
@@ -341,22 +416,25 @@ const PRIMER_ENCARGO = ENCARGOS[0].id
 const POR_ID = new Map(ENCARGOS.map(e => [e.id, e]))
 
 // ------------------------------------------------------------ TAREAS DIARIAS
-/** Solo objetivos "de flujo": empiezan a cero cada día y se miden con eventos. */
+/**
+ * Solo objetivos "de flujo": empiezan a cero cada día y se miden con eventos.
+ * Mismo criterio que los encargos: el título ES la orden, el texto es el adorno.
+ */
 const DIARIAS = [
-  { id: 'd_madera', titulo: 'Leña para el día', texto: 'Quinientos troncos antes de que caiga el sol.', objetivo: { tipo: 'recolectar', que: 'madera', total: 500 }, gemas: 5 },
-  { id: 'd_piedra', titulo: 'Polvo de cantera', texto: 'Trescientas piedras. Los canteros protestarán; es su oficio.', objetivo: { tipo: 'recolectar', que: 'piedra', total: 300 }, gemas: 5 },
-  { id: 'd_comida', titulo: 'La despensa', texto: 'Cuatrocientas raciones de grano para la despensa.', objetivo: { tipo: 'recolectar', que: 'comida', total: 400 }, gemas: 5 },
-  { id: 'd_oro', titulo: 'Las arcas', texto: 'Cien monedas. Contadas dos veces, que hay manos largas.', objetivo: { tipo: 'recolectar', que: 'oro', total: 100 }, gemas: 6 },
-  { id: 'd_asalto', titulo: 'Una visita al vecino', texto: 'Ganad un asalto ahí fuera y volved con algo bajo el brazo.', objetivo: { tipo: 'asalto', total: 1 }, gemas: 8 },
-  { id: 'd_expediciones', titulo: 'Dos caminos', texto: 'Mandad dos expediciones; el mapa no se dibuja solo.', objetivo: { tipo: 'expedicion', total: 2 }, gemas: 6 },
-  { id: 'd_explorar', titulo: 'Diez palmos de tierra', texto: 'Descubrid diez casillas nuevas del mundo.', objetivo: { tipo: 'explorar', total: 10 }, gemas: 6 },
-  { id: 'd_tropas', titulo: 'Filas nuevas', texto: 'Cinco soldados nuevos en el patio de armas.', objetivo: { tipo: 'entrenar', total: 5 }, gemas: 6 },
-  { id: 'd_obra', titulo: 'Una obra más', texto: 'Terminad una construcción, la que sea. Hasta un pozo cuenta.', objetivo: { tipo: 'obras', total: 1 }, gemas: 5 },
-  { id: 'd_mejora', titulo: 'Un peldaño más', texto: 'Mejorad un edificio cualquiera de la aldea.', objetivo: { tipo: 'mejoras', total: 1 }, gemas: 6 },
-  { id: 'd_aldeano', titulo: 'Uno más a la mesa', texto: 'Que llegue un aldeano nuevo al baluarte.', objetivo: { tipo: 'nuevoAldeano', total: 1 }, gemas: 5 },
-  { id: 'd_ciencia', titulo: 'Tinta fresca', texto: 'Terminad una investigación, por pequeña que sea.', objetivo: { tipo: 'investigar', total: 1 }, gemas: 8 },
-  { id: 'd_defensa', titulo: 'Nadie pasa', texto: 'Rechazad un ataque sobre la aldea.', objetivo: { tipo: 'defensa', total: 1 }, gemas: 8 },
-  { id: 'd_botin', titulo: 'El diezmo ajeno', texto: 'Traed trescientos de botín de cualquier saqueo.', objetivo: { tipo: 'botin', total: 300 }, gemas: 7 }
+  { id: 'd_madera', titulo: 'Recoge 500 de madera', texto: 'Leña para el día.', ir: IR_TALLER, unidad: 'de madera', objetivo: { tipo: 'recolectar', que: 'madera', total: 500 }, gemas: 5 },
+  { id: 'd_piedra', titulo: 'Recoge 300 de piedra', texto: 'Los canteros protestarán; es su oficio.', ir: IR_TALLER, unidad: 'de piedra', objetivo: { tipo: 'recolectar', que: 'piedra', total: 300 }, gemas: 5 },
+  { id: 'd_comida', titulo: 'Recoge 400 de comida', texto: 'Para llenar la despensa.', ir: IR_TALLER, unidad: 'de comida', objetivo: { tipo: 'recolectar', que: 'comida', total: 400 }, gemas: 5 },
+  { id: 'd_oro', titulo: 'Recoge 100 de oro', texto: 'Contadlo dos veces, que hay manos largas.', ir: IR_TALLER, unidad: 'de oro', objetivo: { tipo: 'recolectar', que: 'oro', total: 100 }, gemas: 6 },
+  { id: 'd_asalto', titulo: 'Gana un asalto', texto: 'Y vuelve con algo bajo el brazo.', ir: IR_ATACAR, objetivo: { tipo: 'asalto', total: 1 }, gemas: 8 },
+  { id: 'd_expediciones', titulo: 'Manda 2 expediciones', texto: 'El mapa no se dibuja solo.', ir: IR_MAPA, unidad: 'expediciones', objetivo: { tipo: 'expedicion', total: 2 }, gemas: 6 },
+  { id: 'd_explorar', titulo: 'Descubre 10 casillas', texto: 'Diez palmos de tierra nueva.', ir: IR_MAPA, unidad: 'casillas', objetivo: { tipo: 'explorar', total: 10 }, gemas: 6 },
+  { id: 'd_tropas', titulo: 'Entrena 5 soldados', texto: 'Filas nuevas en el patio de armas.', ir: IR_ENTRENAR, unidad: 'soldados', objetivo: { tipo: 'entrenar', total: 5 }, gemas: 6 },
+  { id: 'd_obra', titulo: 'Termina una construcción', texto: 'La que sea. Hasta un pozo cuenta.', ir: IR_TALLER, objetivo: { tipo: 'obras', total: 1 }, gemas: 5 },
+  { id: 'd_mejora', titulo: 'Mejora un edificio', texto: 'Un peldaño más, el que quieras.', ir: IR_MEJORAS, objetivo: { tipo: 'mejoras', total: 1 }, gemas: 6 },
+  { id: 'd_aldeano', titulo: 'Consigue un aldeano nuevo', texto: 'Uno más a la mesa.', ir: IR_TALLER, objetivo: { tipo: 'nuevoAldeano', total: 1 }, gemas: 5 },
+  { id: 'd_ciencia', titulo: 'Termina una investigación', texto: 'Por pequeña que sea.', ir: IR_CIENCIA, objetivo: { tipo: 'investigar', total: 1 }, gemas: 8 },
+  { id: 'd_defensa', titulo: 'Rechaza un ataque', texto: 'Que no pase nadie.', ir: IR_DEFENSA, objetivo: { tipo: 'defensa', total: 1 }, gemas: 8 },
+  { id: 'd_botin', titulo: 'Trae 300 de botín', texto: 'De cualquier saqueo.', ir: IR_ATACAR, unidad: 'de botín', objetivo: { tipo: 'botin', total: 300 }, gemas: 7 }
 ]
 
 const DIARIA_POR_ID = new Map(DIARIAS.map(d => [d.id, d]))
@@ -520,7 +598,7 @@ function revisar () {
     if (a.hecho >= def.objetivo.total) {
       a.listo = true
       a.hecho = def.objetivo.total
-      events.emit(EV.UI_TOAST, { texto: `📜 Encargo cumplido: ${def.titulo}. Reclamad la recompensa.`, tipo: 'bien' })
+      events.emit(EV.UI_TOAST, { texto: `📜 Cumplido: ${def.titulo}`, tipo: 'bien' })
       events.emit(EV.SFX, { nombre: 'encargo_listo' })
     }
   }
@@ -530,15 +608,21 @@ function revisar () {
     if (d.hecho >= def.objetivo.total) {
       d.listo = true
       d.hecho = def.objetivo.total
-      events.emit(EV.UI_TOAST, { texto: `✅ Tarea del día lista: ${def.titulo}.`, tipo: 'bien' })
+      events.emit(EV.UI_TOAST, { texto: `✅ Tarea del día: ${def.titulo}`, tipo: 'bien' })
     }
   }
   cobrarLogros()
 }
 
-/** Los logros se pagan solos: son una palmada en la espalda, no un recado. */
+/**
+ * Los logros se pagan solos: son una palmada en la espalda, no un recado.
+ * Y avisan UNA vez por tanda: al empezar caen varios escalones de golpe y
+ * encadenar cinco toasts tapa la aldea entera.
+ */
 function cobrarLogros () {
   const q = qs()
+  const nuevos = []
+  let gemasTanda = 0
   for (const l of LOGROS) {
     const est = q.logros[l.id]
     while (est.escalon < l.escalones.length && est.valor >= l.escalones[est.escalon]) {
@@ -546,14 +630,22 @@ function cobrarLogros () {
       est.escalon++
       gemas(g, `logro ${l.nombre}`)
       darXp(g * 5)
+      gemasTanda += g
       const grado = est.escalon > 3 ? `${est.escalon}` : 'I'.repeat(est.escalon)
-      events.emit(EV.UI_TOAST, { texto: `🏅 ${l.nombre} ${grado} · +${g} ${ICONO.gemas}`, tipo: 'bien' })
+      nuevos.push(`${l.nombre} ${grado}`)
       events.emit(EV.QUEST_COMPLETED, {
         quest: { id: l.id, clase: 'logro', titulo: l.nombre, escalon: est.escalon },
         recompensa: { recursos: {}, gemas: g, xp: g * 5 }
       })
     }
   }
+  if (!nuevos.length) return
+  events.emit(EV.UI_TOAST, {
+    texto: nuevos.length === 1
+      ? `🏅 ${nuevos[0]} · +${gemasTanda} ${ICONO.gemas}`
+      : `🏅 ${nuevos.length} medallas nuevas · +${gemasTanda} ${ICONO.gemas}`,
+    tipo: 'bien'
+  })
 }
 
 /** La XP vive en jugador.xp; el nivel lo lleva la progresión, aquí solo se suma. */
@@ -576,7 +668,7 @@ function activar (id) {
     hecho: inicial === null ? 0 : Math.min(inicial, def.objetivo.total),
     listo: false
   })
-  events.emit(EV.UI_TOAST, { texto: `📜 Nuevo encargo: ${def.titulo}`, tipo: 'info' })
+  // sin toast de «nuevo encargo»: ya se ve en la tira del mayordomo y en el panel
   revisar()
 }
 
@@ -626,15 +718,18 @@ function comprobarDia () {
   q.ultimaVisita = hoy
   q.diarias = elegirDiarias(hoy)
 
+  // un solo aviso por día: el cofre de racha y el «día nuevo» van juntos
   const cofre = { 3: 10, 7: 25, 14: 40, 30: 100 }[q.racha.dias]
-  if (cofre) {
-    gemas(cofre, `racha de ${q.racha.dias} días`)
-    events.emit(EV.UI_TOAST, { texto: `🔥 ${q.racha.dias} días seguidos. Cofre del mayordomo: +${cofre} ${ICONO.gemas}`, tipo: 'bien' })
+  if (cofre) gemas(cofre, `racha de ${q.racha.dias} días`)
+  const primera = salto === null                    // partida recién empezada
+  if (!primera) {
+    events.emit(EV.UI_TOAST, {
+      texto: cofre
+        ? `🔥 ${q.racha.dias} días seguidos · cofre +${cofre} ${ICONO.gemas}`
+        : `🌅 Día nuevo: tres tareas frescas y ${q.racha.dias} día${q.racha.dias === 1 ? '' : 's'} de racha`,
+      tipo: 'bien'
+    })
   }
-  events.emit(EV.UI_TOAST, {
-    texto: `🌅 Día nuevo en el baluarte: tres encargos frescos y racha de ${q.racha.dias} día${q.racha.dias === 1 ? '' : 's'}.`,
-    tipo: 'info'
-  })
   refrescarEstado()
   return true
 }
@@ -662,6 +757,10 @@ export function activas () {
       titulo: def.titulo,
       texto: def.texto,
       consejo: def.consejo,
+      ir: def.ir || null,
+      unidad: def.unidad || '',
+      objetivo: { ...def.objetivo },
+      pasos: listaPasos(def),
       progreso: { hecho: Math.min(a.hecho, def.objetivo.total), total: def.objetivo.total },
       listo: !!a.listo,
       recompensa: def.recompensa
@@ -676,12 +775,50 @@ export function activas () {
       titulo: def.titulo,
       texto: def.texto,
       consejo: def.texto,
+      ir: def.ir || null,
+      unidad: def.unidad || '',
+      objetivo: { ...def.objetivo },
+      pasos: [],
       progreso: { hecho: Math.min(d.hecho, def.objetivo.total), total: def.objetivo.total },
       listo: !!d.listo,
       recompensa: premioDiaria(def)
     })
   }
   return lista
+}
+
+/**
+ * Lista de comprobación de un encargo que pide varias cosas a la vez. Se calcula
+ * al vuelo (no se guarda: el estado sigue siendo JSON puro y pequeño).
+ * @returns {Array<{texto:string,hecho:boolean}>} vacía si el encargo pide una sola cosa
+ */
+function listaPasos (def) {
+  if (!Array.isArray(def.pasos) || !def.pasos.length) return []
+  return def.pasos.map(p => {
+    const v = medir(p.objetivo)
+    return { texto: p.texto, hecho: v !== null && v >= p.objetivo.total }
+  })
+}
+
+/**
+ * Los encargos que vienen DESPUÉS del que está en curso, solo el título.
+ * Sirve para el «y luego…» discreto del panel: se ve que la cosa sigue,
+ * sin robarle la atención al encargo de ahora.
+ * @param {number} n cuántos
+ * @returns {Array<{id:string,titulo:string}>}
+ */
+export function proximos (n = 3) {
+  const q = qs()
+  const enCurso = q.activas.find(a => POR_ID.has(a.id))
+  let id = enCurso ? POR_ID.get(enCurso.id)?.siguiente : PRIMER_ENCARGO
+  const fuera = []
+  while (id && fuera.length < n) {
+    const def = POR_ID.get(id)
+    if (!def) break
+    if (!q.completadas.includes(id)) fuera.push({ id: def.id, titulo: def.titulo })
+    id = def.siguiente
+  }
+  return fuera
 }
 
 /** Los 26 logros con su escalón actual, para la pantalla de perfil. */
@@ -785,62 +922,96 @@ function pagar (recompensa, motivo = '') {
 }
 
 /**
- * Qué debería hacer el jugador AHORA MISMO, en una frase.
+ * Qué hay que hacer AHORA MISMO: la frase y a qué pantalla lleva.
  * Primero lo que ya se puede cobrar, luego el encargo en curso y, si todo está
  * al día, el agujero más gordo de la aldea (almacén, camas, brazos, defensa…).
- * @returns {string}
+ * Siempre devuelve algo: el jugador nunca se queda mirando la pantalla.
+ * @returns {{texto:string, ir:{texto:string,panel:string,datos?:object}|null}}
  */
-export function siguienteConsejo () {
+function diagnostico () {
   const s = game.state
   const enCurso = activas()
 
   const listo = enCurso.find(x => x.listo)
-  if (listo) return `Mi señor, ${listo.clase === 'diaria' ? 'la tarea' : 'el encargo'} «${listo.titulo}» está cumplido: reclamad la recompensa.`
+  if (listo) {
+    return {
+      texto: `Mi señor, ${listo.clase === 'diaria' ? 'la tarea' : 'el encargo'} «${listo.titulo}» está cumplido: reclamad la recompensa.`,
+      ir: { texto: '🎁 Cobrar recompensa', panel: 'encargos' }
+    }
+  }
 
   const encargo = enCurso.find(x => x.clase === 'encargo')
-  if (encargo && encargo.progreso.hecho === 0) return `Mi señor, ${encargo.consejo}`
+  if (encargo && encargo.progreso.hecho === 0) {
+    return { texto: `Mi señor, ${encargo.consejo}`, ir: encargo.ir }
+  }
 
   // --- diagnóstico de la aldea: lo más urgente primero ---
   const lleno = CONFIG.RECURSOS.find(r => (s.almacen?.[r] || 0) > 0 && s.recursos[r] >= s.almacen[r] * 0.92)
   if (lleno) {
     const donde = (lleno === 'madera' || lleno === 'piedra') ? 'el almacén' : 'el granero'
-    return `Se está desperdiciando ${ICONO[lleno]} ${lleno}: gastadla ya o ampliad ${donde}.`
+    return { texto: `Se está desperdiciando ${ICONO[lleno]} ${lleno}: gastadla ya o ampliad ${donde}.`, ir: IR_MEJORAS }
   }
 
   if ((s.villagers || []).length >= topePoblacion()) {
-    return 'No cabe un alma más en la aldea: levantad una casa o ampliad el Ayuntamiento.'
+    return { texto: 'No cabe un alma más en la aldea: levantad una casa o ampliad el Ayuntamiento.', ir: IR_TALLER }
   }
 
   const ociosos = (s.villagers || []).filter(v => !v.buildingId && (!v.job || v.job === 'ocioso' || v.job === 'libre')).length
-  if (ociosos > 0) return `Hay ${ociosos} aldeano${ociosos === 1 ? '' : 's'} de brazos cruzados: mandadlos a una serrería, cantera o granja.`
+  if (ociosos > 0) {
+    return { texto: `Hay ${ociosos} aldeano${ociosos === 1 ? '' : 's'} de brazos cruzados: mandadlos a una serrería, cantera o granja.`, ir: null }
+  }
 
   if (!(s.obras || []).length) {
-    if (terminados('casa').length < 3) return 'Ninguna obra en marcha: con otra casa entrará gente nueva.'
-    return 'Ninguna obra en marcha, mi señor. Mejorad lo que más rinde: la serrería o la cantera.'
+    if (terminados('casa').length < 3) return { texto: 'Ninguna obra en marcha: con otra casa entrará gente nueva.', ir: IR_TALLER }
+    return { texto: 'Ninguna obra en marcha, mi señor. Mejorad lo que más rinde: la serrería o la cantera.', ir: IR_MEJORAS }
   }
 
   const torres = terminados('torre_vigia').length + terminados('torre_ballesta').length
   if (torres < 2 && terminados('ayuntamiento').some(b => (b.nivel || 1) >= 2)) {
-    return 'La defensa está floja: alzad otra torre vigía antes de que os visiten.'
+    return { texto: 'La defensa está floja: alzad otra torre vigía antes de que os visiten.', ir: IR_TALLER }
   }
   if (terminados('muralla').length < 12 && (s.buildings || []).length > 8) {
-    return 'La aldea está abierta por los cuatro costados: cerradla con muralla.'
+    return { texto: 'La aldea está abierta por los cuatro costados: cerradla con muralla.', ir: IR_TALLER }
   }
 
   const tropas = Object.values(s.ejercito?.tropas || {}).reduce((a, n) => a + (n || 0), 0)
-  if (tropas >= 6 && !(s.expediciones || []).length) return `Tenéis ${tropas} soldados sin estrenar: mandad un asalto y volved con botín.`
-  if (tropas < 4 && terminados('cuartel').length) return 'El cuartel está vacío: entrenad unos lanceros, que son baratos.'
+  if (tropas >= 6 && !(s.expediciones || []).length) {
+    return { texto: `Tenéis ${tropas} soldados sin estrenar: mandad un asalto y volved con botín.`, ir: IR_ATACAR }
+  }
+  if (tropas < 4 && terminados('cuartel').length) {
+    return { texto: 'El cuartel está vacío: entrenad unos lanceros, que son baratos.', ir: IR_ENTRENAR }
+  }
 
   if (terminados('campamento_explorador').length && !(s.expediciones || []).length) {
-    return 'Los exploradores se aburren: mandad una expedición al mapa del mundo.'
+    return { texto: 'Los exploradores se aburren: mandad una expedición al mapa del mundo.', ir: IR_MAPA }
   }
 
   const pendiente = enCurso.find(x => !x.listo)
-  if (pendiente) return `Mi señor, ${pendiente.clase === 'encargo' ? pendiente.consejo : pendiente.texto}`
+  if (pendiente) {
+    return { texto: `Mi señor, ${pendiente.clase === 'encargo' ? pendiente.consejo : pendiente.texto}`, ir: pendiente.ir }
+  }
 
   const edad = ORDEN_EDADES.indexOf(s.age)
-  if (edad < ORDEN_EDADES.length - 1) return `Todo está en orden: juntad recursos y avanzad a la ${AGE_NOMBRE[ORDEN_EDADES[edad + 1]]}.`
-  return 'El baluarte va sobre ruedas, mi señor. Saquead a los vecinos y disfrutad del vino.'
+  if (edad < ORDEN_EDADES.length - 1) {
+    return { texto: `Todo está en orden: juntad recursos y avanzad a la ${AGE_NOMBRE[ORDEN_EDADES[edad + 1]]}.`, ir: IR_EDAD }
+  }
+  return { texto: 'El baluarte va sobre ruedas, mi señor. Saquead a los vecinos y disfrutad del vino.', ir: IR_ATACAR }
+}
+
+/**
+ * Qué debería hacer el jugador AHORA MISMO, en una frase. (La usa el HUD.)
+ * @returns {string}
+ */
+export function siguienteConsejo () {
+  return diagnostico().texto
+}
+
+/**
+ * Lo mismo, pero con el destino: el panel puede poner un botón que lleve allí.
+ * @returns {{texto:string, ir:{texto:string,panel:string,datos?:object}|null}}
+ */
+export function siguienteAccion () {
+  return diagnostico()
 }
 
 /** Tope de población que aguanta la aldea ahora mismo (casas + ayuntamiento). */

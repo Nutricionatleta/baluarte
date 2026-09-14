@@ -1,13 +1,15 @@
 /**
  * PANEL DE ENCARGOS — la pantalla del mayordomo.
  *
- * El botón 📜 Encargos del HUD emitía `UI_PANEL {panel:'encargos'}` y no lo
- * escuchaba nadie: no había dónde cobrar las recompensas. Esto es ese sitio.
+ * UNA COSA CADA VEZ. Al abrir, lo primero y más grande es el encargo en curso:
+ * qué hay que hacer, cuánto llevas, qué te dan y un botón que te lleva a hacerlo.
+ * Todo lo demás (los que vienen después, las diarias, los logros) va debajo o
+ * en su pestaña, y en pequeño. Si el jugador tiene que leer, cierra el juego.
  *
  * Tres pestañas, porque son tres cosas distintas y mezclarlas confunde:
- *   Encargos → la cadena de la campaña, uno detrás de otro, con su Cobrar.
- *   Diarias  → las tres tareas del día y la racha de días seguidos.
- *   Logros   → las medallas con sus escalones y el avance de partida.
+ *   Encargos → la cadena de la campaña, de uno en uno, con su Cobrar.
+ *   Diarias  → las tres tareas del día y la racha.
+ *   Logros   → las medallas y el avance de partida.
  *
  * Como el resto de la interfaz: no se toca `game.state`, todo se pide a
  * `sim/quests.js`. Si ese módulo no está, el panel lo dice y no se cae.
@@ -15,6 +17,8 @@
 import { events, EV } from '../core/events.js'
 import { ICONO } from '../core/config.js'
 import { game } from '../core/state.js'
+import { EDIFICIOS } from '../data/buildings.js'
+import { UNIDADES } from '../data/units.js'
 import {
   el, vaciar, hoja, toast, formatoNumero, barraProgreso, pestañas
 } from './styles.js'
@@ -31,38 +35,60 @@ function pedir (funcion, porDefecto, ...args) {
 /* ---------------------------------------------------------------- estilos --- */
 
 const CSS = `
-/* una tarjeta por encargo: título, frase del mayordomo, progreso y premio */
-.enc {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 12px;
+/* ---- el encargo de AHORA: lo único grande de la pantalla ---- */
+.eh {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px;
   background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
   border: 2px solid rgba(90, 58, 34, .55); border-radius: var(--r-m);
   box-shadow: var(--sombra-suave);
 }
-/* lo cumplido salta a la vista: borde de oro y un pelín más de luz */
-.enc.listo { border-color: var(--oro-oscuro); box-shadow: var(--sombra-suave), 0 0 0 3px rgba(212, 164, 55, .45); }
-.enc.hecho { opacity: .62; filter: grayscale(.35); }
-.enc-cab { display: flex; align-items: center; gap: 9px; }
-.enc-cab > i { flex: none; font-style: normal; font-size: 1.6em; line-height: 1; }
-.enc-cab .crece { display: flex; flex-direction: column; gap: 1px; }
-.enc-titulo { font-weight: 800; font-size: 1em; line-height: 1.2; }
-.enc-texto { font-size: .8em; line-height: 1.3; color: var(--tinta-suave); }
-.enc-marca { flex: none; font-size: .74em; font-weight: 800; color: var(--madera); font-variant-numeric: tabular-nums; }
-.enc-premio { display: flex; flex-wrap: wrap; gap: 5px; }
-/* el botón de cobrar manda en la tarjeta: ancho entero y 58 px de alto */
-.enc-cobrar { width: 100%; min-height: 58px; font-size: 1.05em; }
+/* cumplido: borde de oro, para que el ojo vaya solo al botón de cobrar */
+.eh.listo { border-color: var(--oro-oscuro); box-shadow: var(--sombra-suave), 0 0 0 3px rgba(212, 164, 55, .45); }
+.eh-cab { display: flex; align-items: center; gap: 11px; }
+.eh-cab > i { flex: none; font-style: normal; font-size: 2.1em; line-height: 1; }
+.eh-titulo { font-weight: 800; font-size: 1.28em; line-height: 1.15; letter-spacing: -.01em; }
+.eh-voz { margin-top: 3px; font-size: .78em; line-height: 1.3; color: var(--tinta-suave); font-style: italic; }
+.eh-marca { font-size: 1.05em; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--madera-oscura); }
+.eh-falta { font-size: .84em; font-weight: 700; color: var(--madera-oscura); }
+.eh-premio { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.eh-premio > small { font-size: .74em; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; color: var(--tinta-suave); }
+/* el botón manda en la tarjeta: ancho entero y 58 px de alto */
+.eh-btn { width: 100%; min-height: 58px; font-size: 1.05em; }
 /* llama la atención con luz, NO moviéndose: un botón que baila se falla al tocarlo */
-.enc-cobrar.pulsa { animation: brilla-cobrar 1.6s var(--curva) infinite; }
+.eh-btn.pulsa { animation: brilla-cobrar 1.6s var(--curva) infinite; }
 @keyframes brilla-cobrar {
   0%, 100% { box-shadow: var(--brillo), 0 4px 0 var(--oro-oscuro), 0 6px 12px rgba(26, 16, 8, .3); }
   50% { box-shadow: var(--brillo), 0 4px 0 var(--oro-oscuro), 0 0 0 5px rgba(242, 200, 92, .5); }
 }
-@media (prefers-reduced-motion: reduce) { .enc-cobrar.pulsa { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .eh-btn.pulsa { animation: none; } }
 
-/* cabecera de la racha: el número gordo y qué ganas si vuelves mañana */
-.racha-caja { display: flex; align-items: center; gap: 12px; }
-.racha-caja > i { font-style: normal; font-size: 2.4em; line-height: 1; }
-.racha-num { font-size: 1.5em; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+/* lista de comprobación, solo si el encargo pide varias cosas */
+.eh-pasos { display: flex; flex-direction: column; gap: 3px; }
+.eh-paso { font-size: .84em; font-weight: 700; color: var(--tinta-suave); }
+.eh-paso.ok { color: var(--verde-oscuro); }
+
+/* ---- filas discretas: lo que viene después y las tareas del día ---- */
+.eq { display: flex; align-items: center; gap: 10px; padding: 8px 10px; }
+.eq + .eq { border-top: 1px dashed rgba(90, 58, 34, .3); }
+.eq > i { flex: none; font-style: normal; font-size: 1.3em; line-height: 1; }
+.eq .crece { display: flex; flex-direction: column; gap: 4px; }
+.eq-nombre { font-weight: 800; font-size: .92em; line-height: 1.2; }
+.eq-num { font-size: .76em; font-weight: 800; color: var(--tinta-suave); font-variant-numeric: tabular-nums; }
+.eq .barra-progreso { height: 8px; }
+.eq-btn { flex: none; min-width: var(--toque); min-height: var(--toque); padding: 8px 12px; font-size: .88em; }
+.eq.hecha { opacity: .55; }
+.eq.hecha .eq-nombre { text-decoration: line-through; }
+
+/* la cola de la campaña: números grises, sin adornos */
+.eq-cola { display: flex; align-items: center; gap: 9px; padding: 6px 10px; font-size: .84em; color: var(--tinta-suave); }
+.eq-cola + .eq-cola { border-top: 1px dashed rgba(90, 58, 34, .25); }
+.eq-cola > b { flex: none; font-variant-numeric: tabular-nums; opacity: .7; }
+
+/* cabecera de la racha: una línea, no un bloque */
+.racha-caja { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+.racha-caja > i { font-style: normal; font-size: 1.8em; line-height: 1; }
+.racha-num { font-size: 1.05em; font-weight: 800; line-height: 1.15; }
 
 /* logros: dos por fila no caben en móvil, así que van en lista apretada */
 .logro { display: flex; align-items: center; gap: 9px; padding: 8px 10px; }
@@ -90,6 +116,23 @@ function inyectarEstilos () {
 
 /* ------------------------------------------------------------- utilidades --- */
 
+/** Iconos de las metas que no son un edificio ni una unidad. */
+const ICONO_META = {
+  aldeanos: '🧑‍🌾', explorar: '🗺️', expedicion: '🐎', asalto: '🗡️', defensa: '🛡️',
+  edad: '🏰', tecnologia: '📜', tecnologias: '📜', investigar: '📜',
+  obras: '🔨', mejoras: '⬆️', nuevoAldeano: '🧑‍🌾', entrenar: '⚔️', botin: '💰'
+}
+
+/** El icono del encargo es la COSA que se pide: se reconoce sin leer. */
+function iconoDe (q) {
+  if (q.listo) return '🎁'
+  const o = q.objetivo || {}
+  if (o.tipo === 'recolectar') return ICONO[o.que] || '🪵'
+  if (o.tipo === 'construir' || o.tipo === 'nivel') return EDIFICIOS[o.que]?.icono || '🔨'
+  if (o.tipo === 'tropas') return UNIDADES[o.que]?.icono || '⚔️'
+  return ICONO_META[o.tipo] || (q.clase === 'diaria' ? '🗓️' : '📜')
+}
+
 /** Las chapas de lo que da una recompensa: recursos, gemas y experiencia. */
 function premioChips (recompensa = {}) {
   const trozos = []
@@ -98,8 +141,17 @@ function premioChips (recompensa = {}) {
   }
   if (recompensa.gemas > 0) trozos.push(`${ICONO.gemas} ${recompensa.gemas}`)
   if (recompensa.xp > 0) trozos.push(`⭐ ${formatoNumero(recompensa.xp)} XP`)
-  if (!trozos.length) return null
-  return el('div', { clase: 'enc-premio' }, trozos.map(t => el('span', { clase: 'chip chip-oro', texto: t })))
+  return trozos
+}
+
+/** Qué falta EXACTAMENTE, en una línea. Nunca «faltan 1 para cobrarlo». */
+function loQueFalta (q) {
+  const p = q.progreso || { hecho: 0, total: 1 }
+  const o = q.objetivo || {}
+  const restan = Math.max(0, p.total - p.hecho)
+  if (o.tipo === 'nivel') return `Va por el nivel ${formatoNumero(p.hecho)}. Hay que llegar al ${formatoNumero(p.total)}.`
+  if (p.total <= 1) return 'Todavía sin hacer.'
+  return `Te ${restan === 1 ? 'falta' : 'faltan'} ${formatoNumero(restan)}${q.unidad ? ` ${q.unidad}` : ''}.`
 }
 
 /** Cuántas tareas del día hay y cuántas se han cobrado ya. Solo lectura. */
@@ -107,6 +159,13 @@ function diariasDelDia () {
   const lista = game.state?.quests?.diarias
   if (!Array.isArray(lista)) return { total: 0, cobradas: 0 }
   return { total: lista.length, cobradas: lista.filter(d => d && d.reclamada).length }
+}
+
+/** Cierra el panel y abre donde toque hacer la cosa. Sin esto, saber no sirve. */
+function irA (destino) {
+  if (!destino?.panel) { panel?.cerrar(); return }
+  panel?.cerrar()
+  events.emit(EV.UI_PANEL, { panel: destino.panel, datos: destino.datos || null })
 }
 
 /* ---------------------------------------------------------------- montaje --- */
@@ -172,7 +231,7 @@ function pintar () {
  */
 function cobrar (id, tarjeta) {
   if (!pedir('reclamar', false, id)) {
-    toast('Ese encargo todavía no está cumplido', 'mal')
+    toast('Eso todavía no está cumplido', 'mal')
     return
   }
   // destello en la tarjeta que se acaba de cobrar, antes de que se vaya
@@ -180,40 +239,84 @@ function cobrar (id, tarjeta) {
   void tarjeta?.offsetWidth
   tarjeta?.classList.add('destello')
   events.emit(EV.SFX, { nombre: 'monedas' })
-  // del «📜 Nuevo encargo: X» ya avisa sim/quests: dos avisos iguales tapan la aldea
+  // del aviso ya se encarga sim/quests: dos avisos iguales tapan la aldea
   setTimeout(pintar, 240)
 }
 
-/** Tarjeta de un encargo o de una tarea: sirve para las dos pestañas. */
-function tarjetaEncargo (q) {
+/**
+ * LA TARJETA GRANDE: icono, orden, progreso, premio y botón. Nada más.
+ * El detalle largo (la frase del mayordomo) va debajo del título y en pequeño.
+ */
+function heroe (q) {
   const p = q.progreso || { hecho: 0, total: 1 }
   const pct = p.total > 0 ? Math.min(100, (p.hecho / p.total) * 100) : 0
-  const caja = el('div', { clase: ['enc', q.listo && 'listo'] })
+  const caja = el('div', { clase: ['eh', q.listo && 'listo'] })
 
-  caja.appendChild(el('div', { clase: 'enc-cab' }, [
-    el('i', { texto: q.listo ? '🎁' : (q.clase === 'diaria' ? '🗓️' : '📜') }),
+  caja.appendChild(el('div', { clase: 'eh-cab' }, [
+    el('i', { texto: iconoDe(q) }),
     el('div', { clase: 'crece' }, [
-      el('div', { clase: 'enc-titulo', texto: q.titulo || 'Encargo' }),
-      q.texto ? el('div', { clase: 'enc-texto', texto: q.texto }) : null
-    ]),
-    el('span', { clase: 'enc-marca', texto: `${formatoNumero(p.hecho)}/${formatoNumero(p.total)}` })
+      el('div', { clase: 'eh-titulo', texto: q.titulo || 'Encargo' }),
+      q.texto ? el('div', { clase: 'eh-voz', texto: q.texto }) : null
+    ])
   ]))
 
-  caja.appendChild(barraProgreso(pct, { tono: q.listo ? 'bien' : '' }).nodo)
+  // lista de comprobación solo cuando el encargo pide varias cosas a la vez
+  if (Array.isArray(q.pasos) && q.pasos.length) {
+    caja.appendChild(el('div', { clase: 'eh-pasos' }, q.pasos.map(s => el('div', {
+      clase: ['eh-paso', s.hecho && 'ok'], texto: `${s.hecho ? '✅' : '⬜'} ${s.texto}`
+    }))))
+  }
 
-  const premio = premioChips(q.recompensa)
-  if (premio) caja.appendChild(premio)
+  if (p.total > 1) {
+    caja.appendChild(el('div', { clase: 'col', estilo: { gap: '5px' } }, [
+      el('div', { clase: 'fila fila-sep' }, [
+        el('span', { clase: 'eh-falta', texto: loQueFalta(q) }),
+        el('span', { clase: 'eh-marca', texto: `${formatoNumero(p.hecho)}/${formatoNumero(p.total)}` })
+      ]),
+      barraProgreso(pct, { gorda: true, tono: q.listo ? 'bien' : '' }).nodo
+    ]))
+  }
+
+  const chips = premioChips(q.recompensa)
+  if (chips.length) {
+    caja.appendChild(el('div', { clase: 'eh-premio' }, [
+      el('small', { texto: 'Te dan' }),
+      ...chips.map(t => el('span', { clase: 'chip chip-oro', texto: t }))
+    ]))
+  }
 
   if (q.listo) {
     caja.appendChild(el('button', {
-      clase: 'btn btn-oro enc-cobrar pulsa', type: 'button',
+      clase: 'btn btn-oro eh-btn pulsa', type: 'button',
       texto: '🎁 Cobrar recompensa',
       onclick: () => cobrar(q.id, caja)
     }))
-  } else {
-    caja.appendChild(el('div', {
-      clase: 'tenue pequeño', estilo: { textAlign: 'center' },
-      texto: `Faltan ${formatoNumero(Math.max(0, p.total - p.hecho))} para cobrarlo`
+  } else if (q.ir?.panel) {
+    caja.appendChild(el('button', {
+      clase: 'btn btn-piedra eh-btn', type: 'button',
+      texto: q.ir.texto || 'Ir a hacerlo',
+      onclick: () => irA(q.ir)
+    }))
+  }
+  return caja
+}
+
+/** Cuando no hay encargo que enseñar, manda el consejo del mayordomo. */
+function heroeConsejo () {
+  const c = pedir('siguienteAccion', null) || { texto: pedir('siguienteConsejo', ''), ir: null }
+  const caja = el('div', { clase: 'eh' })
+  caja.appendChild(el('div', { clase: 'eh-cab' }, [
+    el('i', { texto: '🎩' }),
+    el('div', { clase: 'crece' }, [
+      el('div', { clase: 'eh-titulo', texto: 'Qué hago ahora' }),
+      el('div', { clase: 'eh-voz', estilo: { fontSize: '.88em', fontStyle: 'normal' }, texto: c.texto || 'Seguid construyendo, mi señor.' })
+    ])
+  ]))
+  if (c.ir?.panel) {
+    caja.appendChild(el('button', {
+      clase: 'btn btn-oro eh-btn', type: 'button',
+      texto: c.ir.texto || 'Vamos allá',
+      onclick: () => irA(c.ir)
     }))
   }
   return caja
@@ -221,25 +324,35 @@ function tarjetaEncargo (q) {
 
 function vistaEncargos (zona) {
   const lista = pedir('activas', []).filter(q => q.clase === 'encargo')
+  // el cobrable primero: si hay premio esperando, es LO único que importa
+  const enCurso = lista.find(q => q.listo) || lista[0]
 
-  const porCobrar = lista.filter(q => q.listo).length
-  zona.appendChild(el('div', { clase: porCobrar ? 'aviso aviso-bien' : 'aviso aviso-info' }, [
-    el('i', { texto: porCobrar ? '🎁' : '🎩' }),
-    el('span', {
-      texto: porCobrar
-        ? `Tenéis ${porCobrar} recompensa${porCobrar === 1 ? '' : 's'} sin cobrar, mi señor.`
-        : 'Cumplid el encargo en curso y volved a por vuestra recompensa.'
-    })
-  ]))
+  zona.appendChild(enCurso ? heroe(enCurso) : heroeConsejo())
 
-  if (!lista.length) {
+  if (!enCurso) {
     zona.appendChild(el('div', { clase: 'panel col', estilo: { textAlign: 'center' } }, [
       el('span', { clase: 'icono-gr', texto: '👑' }),
       el('b', { texto: 'No queda nada por encargar' }),
-      el('div', { clase: 'tenue pequeño', texto: 'Habéis terminado la cadena del mayordomo. El valle es vuestro.' })
+      el('div', { clase: 'tenue pequeño', texto: 'Habéis terminado la cadena del mayordomo.' })
     ]))
   }
-  for (const q of lista) zona.appendChild(tarjetaEncargo(q))
+
+  // los demás encargos activos (raro, pero puede pasar): en fila y discretos
+  for (const q of lista) {
+    if (q === enCurso) continue
+    zona.appendChild(filaTarea(q))
+  }
+
+  // y luego… solo los títulos, en gris: se ve que la cosa sigue y no distrae
+  const cola = pedir('proximos', [], 3)
+  if (cola.length) {
+    zona.appendChild(el('div', { clase: 'tenue pequeño', estilo: { marginTop: '4px', fontWeight: '800' }, texto: 'Y después…' }))
+    zona.appendChild(el('div', { clase: 'panel col', estilo: { gap: '0', padding: '4px 0' } },
+      cola.map((c, i) => el('div', { clase: 'eq-cola' }, [
+        el('b', { texto: `${i + 1}.` }),
+        el('span', { clase: 'crece', texto: c.titulo })
+      ]))))
+  }
 
   const pct = pedir('progreso', 0)
   zona.appendChild(el('div', { clase: 'stats' }, [
@@ -253,55 +366,69 @@ function vistaEncargos (zona) {
 
 /* -------------------------------------------------------------- 2. DIARIAS --- */
 
+/** Fila compacta: icono, nombre, barra, y UN botón. Ni un párrafo. */
+function filaTarea (q) {
+  const p = q.progreso || { hecho: 0, total: 1 }
+  const pct = p.total > 0 ? Math.min(100, (p.hecho / p.total) * 100) : 0
+  const fila = el('div', { clase: 'eq' })
+
+  fila.append(
+    el('i', { texto: iconoDe(q) }),
+    el('div', { clase: 'crece' }, [
+      el('div', { clase: 'eq-nombre', texto: q.titulo }),
+      p.total > 1 ? barraProgreso(pct, { tono: q.listo ? 'bien' : '' }).nodo : null,
+      el('div', { clase: 'eq-num', texto: p.total > 1 ? `${formatoNumero(p.hecho)} de ${formatoNumero(p.total)}` : (q.listo ? 'Cumplida' : 'Sin empezar') })
+    ])
+  )
+
+  if (q.listo) {
+    fila.appendChild(el('button', {
+      clase: 'btn btn-oro eq-btn', type: 'button', texto: '🎁 Cobrar',
+      onclick: () => cobrar(q.id, fila)
+    }))
+  } else if (q.ir?.panel) {
+    fila.appendChild(el('button', {
+      clase: 'btn btn-fantasma eq-btn', type: 'button', 'aria-label': `Ir a: ${q.titulo}`, texto: '▶',
+      onclick: () => irA(q.ir)
+    }))
+  }
+  return fila
+}
+
 function vistaDiarias (zona) {
   const r = pedir('racha', { dias: 0, mejor: 0, multiplicador: 1 })
   const lista = pedir('activas', []).filter(q => q.clase === 'diaria')
   const cuenta = diariasDelDia()
-
-  // Lo que se gana MAÑANA si vuelve: es el único motivo de volver a abrir.
   const coma = (n) => String(Math.round(n * 100) / 100).replace('.', ',')
-  const mañana = 1 + Math.min(10, r.dias) * 0.1
+
+  // la racha, en UNA línea: el número y lo que vale hoy
   zona.appendChild(el('div', { clase: 'panel racha-caja' }, [
     el('i', { texto: '🔥' }),
     el('div', { clase: 'crece' }, [
       el('div', { clase: 'racha-num', texto: r.dias === 1 ? '1 día seguido' : `${r.dias} días seguidos` }),
-      el('div', { clase: 'tenue pequeño', texto: `Tu mejor racha: ${r.mejor} · gemas de hoy ×${coma(r.multiplicador)}` })
+      el('div', { clase: 'tenue pequeño', texto: `Gemas de hoy ×${coma(r.multiplicador)} · mejor racha ${r.mejor}` })
     ])
   ]))
 
-  zona.appendChild(el('div', { clase: 'aviso aviso-info' }, [
-    el('i', { texto: '🎁' }),
-    el('span', { texto: `Si vuelves mañana: día ${r.dias + 1} y las gemas de las tareas valdrán ×${coma(mañana)}.` })
-  ]))
+  zona.appendChild(el('div', { clase: 'titular', texto: `Hoy · ${cuenta.cobradas} de ${cuenta.total || 3} cobradas` }))
 
-  zona.appendChild(el('div', { clase: 'titular', texto: `Tareas de hoy · ${cuenta.cobradas} de ${cuenta.total || 3} cobradas` }))
+  const caja = el('div', { clase: 'panel col', estilo: { gap: '0', padding: '4px 0' } })
+  for (const q of lista) caja.appendChild(filaTarea(q))
+  // las ya cobradas siguen contando: se enseñan tachadas para que se vea el 3/3
+  for (let i = 0; i < cuenta.cobradas; i++) {
+    caja.appendChild(el('div', { clase: 'eq hecha' }, [
+      el('i', { texto: '✅' }),
+      el('div', { clase: 'crece' }, [el('div', { clase: 'eq-nombre', texto: 'Tarea cobrada' })])
+    ]))
+  }
+  if (caja.children.length) zona.appendChild(caja)
 
   if (!lista.length) {
-    zona.appendChild(el('div', { clase: 'panel col', estilo: { textAlign: 'center' } }, [
-      el('span', { clase: 'icono-gr', texto: '✅' }),
-      el('b', { texto: cuenta.total ? 'Las tres tareas, cumplidas' : 'Hoy no hay tareas' }),
-      el('div', { clase: 'tenue pequeño', texto: 'Vuelve mañana: la racha sube y las gemas también.' })
+    zona.appendChild(el('div', { clase: 'aviso aviso-bien' }, [
+      el('i', { texto: '✅' }),
+      el('span', { texto: 'Las tres del día, hechas. Vuelve mañana: la racha sube y las gemas también.' })
     ]))
   }
-  for (const q of lista) zona.appendChild(tarjetaEncargo(q))
-
-  // las ya cobradas siguen contando: se enseñan apagadas para que se vea el 3/3
-  for (let i = 0; i < cuenta.cobradas; i++) {
-    zona.appendChild(el('div', { clase: 'enc hecho' }, [
-      el('div', { clase: 'enc-cab' }, [
-        el('i', { texto: '✅' }),
-        el('div', { clase: 'crece' }, [
-          el('div', { clase: 'enc-titulo', texto: 'Tarea cumplida y cobrada' }),
-          el('div', { clase: 'enc-texto', texto: 'Una menos para el premio de las tres.' })
-        ])
-      ])
-    ]))
-  }
-
-  zona.appendChild(el('div', {
-    clase: 'tenue pequeño', estilo: { textAlign: 'center' },
-    texto: 'Cumplir las tres del día da gemas extra, y cuantos más días seguidos, más.'
-  }))
 }
 
 /* --------------------------------------------------------------- 3. LOGROS --- */
@@ -319,7 +446,7 @@ function vistaLogros (zona) {
       el('span', { clase: 'num', texto: `${pct} %` })
     ]),
     barra.nodo,
-    el('div', { clase: 'tenue pequeño', texto: `${conseguidos} de ${totales} escalones conseguidos. Se cobran solos: las gemas caen al llegar.` })
+    el('div', { clase: 'tenue pequeño', texto: `${conseguidos} de ${totales} escalones. Se cobran solos.` })
   ]))
 
   // los que están a punto primero: es lo que engancha
@@ -330,7 +457,7 @@ function vistaLogros (zona) {
     return pb - pa
   })
 
-  const caja = el('div', { clase: 'eco-lista' })
+  const caja = el('div', { clase: 'panel col', estilo: { gap: '0', padding: '4px 0' } })
   for (const l of orden) {
     const p = l.progreso || { hecho: 0, total: 1 }
     const pc = p.total > 0 ? Math.min(100, (p.hecho / p.total) * 100) : 100

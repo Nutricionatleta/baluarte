@@ -5,6 +5,7 @@ import { game } from '../core/state.js'
 import { makeRng } from '../core/rng.js'
 import { EDIFICIOS } from '../data/buildings.js'
 import { MUNDO, BIOMAS, TIPOS_NODO } from '../world/map.js'
+import { coloresDelMapa, plazas as plazasDelImperio, objetivosAlcanzables, COLOR_JUGADOR } from '../world/imperio.js'
 import { ctx, cuandoListo, onFrame } from './ctx.js'
 import { mat, M, G, pieza, grupo } from './mats.js'
 
@@ -36,6 +37,8 @@ const PUNTOS_CAMINO = 20
 const SEG_ANILLO = 128            // trozos del anillo de alcance (se usan los que hagan falta)
 const CORTE_NUBE = 11             // más cerca que esto de la cámara, la nube estorba
 const SEG_SINCRONIZAR = 0.7       // cada cuánto se repasa el estado (nodos, eventos, expediciones)
+const SEG_ROTULOS = 0.16          // cada cuánto se decide QUÉ cuatro rótulos se ven
+const VECINOS = [[1, 0], [-1, 0], [0, 1], [0, -1]]
 
 // ── estado del módulo ────────────────────────────────────────────────────
 let construido = false
@@ -61,9 +64,20 @@ let marcoSel = null, marcoHover = null, rotuloSel = null
 let seleccion = null
 let aldea = null, estandarte = null
 
+// ── el imperio: quién manda en cada comarca y hasta dónde llega tu brazo ──
+let capaDominio = null, bordeDominio = null, aroAlcance = null
+let mastilDominio = null, pendonDominio = null
+const marcasPlaza = new Map()     // 'x,y' -> grupo del torreón con tu bandera
+let coloresImperio = {}           // 'x,y' -> color de la bandera que ondea allí
+let plazasImperio = []            // tus plazas, tal cual las manda imperio.js
+let alcanzables = new Set()       // 'x,y' que puedes atacar AHORA MISMO
+let miColor = COLOR_JUGADOR
+let dominioSucio = true           // hay que repintar las banderas en el próximo repaso
+
 const animaciones = []            // tweens vivos: { t, dur, paso(k), fin() }
 const pendientesRevelar = new Set()// tiles descubiertos mientras mirabas la aldea
 let relojSincronizar = 0
+let relojRotulos = 0
 
 // temporales: ni un `new` dentro del bucle de render
 const _m4 = new THREE.Matrix4()
@@ -72,6 +86,7 @@ const _rot = new THREE.Quaternion()
 const _eul = new THREE.Euler()
 const _esc = new THREE.Vector3()
 const _col = new THREE.Color()
+const _col2 = new THREE.Color()
 const _ndc = new THREE.Vector2()
 const _rayo = new THREE.Raycaster()
 
@@ -90,6 +105,11 @@ const geoLoseta = () => geo('loseta', () => {
   const k = LADO_LOSETA * Math.SQRT2
   return new THREE.CylinderGeometry(0.5, 0.44, 1, 4)
     .rotateY(Math.PI / 4).scale(k, 1, k).translate(0, 0.5, 0)
+})
+/** Placa plana del tamaño justo de la loseta: la mancha de color del imperio. */
+const geoPlaca = () => geo('placa', () => {
+  const k = LADO_LOSETA * Math.SQRT2 * 0.99
+  return new THREE.CylinderGeometry(0.5, 0.5, 1, 4).rotateY(Math.PI / 4).scale(k, 1, k).translate(0, 0.5, 0)
 })
 const geoCono = (lados) => geo(`cono${lados}`, () => new THREE.ConeGeometry(0.5, 1, lados).translate(0, 0.5, 0))
 const geoCil = (lados) => geo(`cil${lados}`, () => new THREE.CylinderGeometry(0.5, 0.5, 1, lados).translate(0, 0.5, 0))
@@ -144,6 +164,15 @@ export function init () {
   })
   events.on(EV.WORLD_EVENT, () => { if (construido) sincronizar() })
 
+  // el imperio manda los colores ya masticados: aquí solo se pintan
+  events.on(EV.IMPERIO_CAMBIADO, (p = {}) => {
+    coloresImperio = p.colores || {}
+    plazasImperio = p.plazas || []
+    if (p.color) miColor = p.color
+    dominioSucio = true
+    if (construido) sincronizar()
+  })
+
   // otra partida = otro valle: se tira lo construido y se rehace al volver a entrar
   events.on(EV.STATE_LOADED, () => {
     if (!construido) return
@@ -160,6 +189,22 @@ export function init () {
   })
   onFrame(porFrame)
   onFrame(ajustarNieblaDistancia)     // este va SIEMPRE, también mirando la aldea
+
+  // enganche de consola y de pruebas, como baluarteCamara: SOLO LEE. Sirve para
+  // comprobar con números lo que aquí importa —que nunca hay más de cuatro
+  // rótulos y que ninguno se pisa con otro— sin tener que mirar una captura.
+  window.baluarteMapa = {
+    get rotulos () { return rotulos.size },
+    get visibles () { return puestos.length },
+    /** Las cajas en píxeles de los rótulos encendidos, en el orden en que se pusieron. */
+    cajas: () => puestos.map(c => [Math.round(c.x0), Math.round(c.y0), Math.round(c.x1), Math.round(c.y1)]),
+    /** Cuántas casillas lleva pintada cada capa del imperio. */
+    dominio: () => ({
+      comarcas: Object.keys(coloresImperio).length,
+      plazas: plazasImperio.length,
+      alcanzables: alcanzables.size
+    })
+  }
 }
 
 // ══ NIEBLA DE DISTANCIA ══════════════════════════════════════════════════
@@ -252,10 +297,19 @@ function construir () {
   raiz.scale.setScalar(ESCALA_MESA)
   ctx.raizMundo.add(raiz)
 
+  // el imperio ya existía antes que esta maqueta: se le pregunta el estado de
+  // salida en vez de esperar al próximo cambio de bandera
+  try {
+    coloresImperio = coloresDelMapa() || {}
+    plazasImperio = plazasDelImperio() || []
+  } catch { coloresImperio = {}; plazasImperio = [] }
+  dominioSucio = true
+
   const rng = makeRng(((game.state.seed >>> 0) ^ 0x9e3779b9) >>> 0)
   construirMar()
   construirTablero(w)
   construirLosetas(w)
+  construirDominio(w)
   construirPaisaje(w, rng)
   construirNiebla(w)
   construirAldea(w)
@@ -280,7 +334,11 @@ function derribar () {
   porTile.clear(); decoPorTile.clear(); nieblaPorTile.clear()
   marcadores.clear(); basesEnemigas.clear(); señales.clear(); expediciones.clear()
   animaciones.length = 0
-  carteleria.clear()
+  rotulos.clear()
+  marcasPlaza.clear()
+  alcanzables = new Set()
+  dominioSucio = true
+  capaDominio = bordeDominio = aroAlcance = mastilDominio = pendonDominio = null
   nubarrones = mar = marBase = nubes = sombrasNube = gaviotas = anillo = rotuloAlcance = null
   marcoSel = marcoHover = rotuloSel = aldea = estandarte = null
   seleccion = null
@@ -298,39 +356,66 @@ function alturaDe (t) {
 
 const local = (v) => v - 8      // el centro del mapa (8,8) cae en el (0,0) del mundo 3D
 
-function construirLosetas (w) {
-  const grupos = new Map()
-  for (const t of w.tiles) {
-    if (!grupos.has(t.bioma)) grupos.set(t.bioma, [])
-    grupos.get(t.bioma).push(t)
-  }
-  const rng = makeRng(((game.state.seed >>> 0) ^ 0x5bf03635) >>> 0)
-
-  for (const [bioma, lista] of grupos) {
-    const color = BIOMAS[bioma]?.color ?? PALETA.hierba
-    const malla = new THREE.InstancedMesh(geoLoseta(), mat(color), lista.length)
-    malla.castShadow = true
-    malla.receiveShadow = true
-    malla.userData.tiles = lista
-    lista.forEach((t, i) => {
-      const h = alturaDe(t)
-      ponerInstancia(malla, i, local(t.x), 0, local(t.y), 1, h, 1, 0)
-      // un poco de variación de tono: si todas las llanuras son idénticas, canta
-      const tinte = new THREE.Color().setScalar(1).multiplyScalar(rng.float(0.9, 1.1))
-      const visto = descubierto(t.x, t.y)
-      malla.setColorAt(i, visto ? tinte : penumbra(tinte, _col))
-      porTile.set(clave(t.x, t.y), { malla, i, h, tinte, visto, x: t.x, y: t.y, bioma: t.bioma, nombre: t.nombre })
-    })
-    malla.instanceMatrix.needsUpdate = true
-    if (malla.instanceColor) malla.instanceColor.needsUpdate = true
-    raiz.add(malla)
-    losetas.push(malla)
-  }
+/**
+ * TRES TONOS POR BIOMA. Un bosque pintado todo del mismo verde es una cuadrícula;
+ * con tres verdes que se alternan al azar parece un bosque pintado a mano. Los
+ * tonos salen todos de PALETA y están elegidos para que a un vistazo se diga
+ * "eso es sierra" y "eso es marisma" sin leer nada.
+ */
+const TONOS_BIOMA = {
+  llanura: [PALETA.hierba, PALETA.hierbaClara, PALETA.trigo],
+  bosque: [PALETA.copaPino, PALETA.copaRoble, PALETA.hierbaOscura],
+  colinas: [PALETA.hierbaOscura, PALETA.hierba, PALETA.maleza],
+  montaña: [PALETA.roca, PALETA.rocaOscura, PALETA.piedra],
+  pantano: [PALETA.maleza, PALETA.hierbaOscura, PALETA.cobre],
+  costa: [PALETA.arena, PALETA.paja, PALETA.trigo],
+  agua: [PALETA.agua, PALETA.aguaProfunda, PALETA.agua],
+  paramo: [PALETA.tierra, PALETA.barbecho, PALETA.camino]
 }
 
-/** Color de lo que aún no has pisado: el bioma se adivina, pero apagado y frío. */
+/** El color de UNA loseta: su bioma, con tono y luz variados por casilla. */
+function colorLoseta (t, rng, salida) {
+  const tonos = TONOS_BIOMA[t.bioma] || [BIOMAS[t.bioma]?.color ?? PALETA.hierba]
+  const i = rng.chance(0.58) ? 0 : rng.chance(0.62) ? 1 : 2
+  salida.set(tonos[Math.min(i, tonos.length - 1)])
+  // el relieve aclara la cumbre y oscurece la hondonada: sombreado de mapa de mesa
+  const a = Number.isFinite(t.altura) ? t.altura : (BIOMAS[t.bioma]?.altura ?? 0.2)
+  return salida.multiplyScalar(0.88 + a * 0.26 + rng.float(-0.05, 0.05))
+}
+
+/**
+ * Todas las losetas en UNA malla de material blanco: el color va por instancia,
+ * así cada casilla puede llevar el suyo propio (tres tonos por bioma más su
+ * variación) en vez de compartir un único verde por bioma.
+ */
+function construirLosetas (w) {
+  const rng = makeRng(((game.state.seed >>> 0) ^ 0x5bf03635) >>> 0)
+  const malla = new THREE.InstancedMesh(geoLoseta(), mat(0xffffff), w.tiles.length)
+  malla.castShadow = true
+  malla.receiveShadow = true
+  malla.userData.tiles = w.tiles
+
+  w.tiles.forEach((t, i) => {
+    const h = alturaDe(t)
+    ponerInstancia(malla, i, local(t.x), 0, local(t.y), 1, h, 1, 0)
+    const tinte = colorLoseta(t, rng, new THREE.Color())
+    const visto = descubierto(t.x, t.y)
+    malla.setColorAt(i, visto ? tinte : penumbra(tinte, _col))
+    porTile.set(clave(t.x, t.y), { malla, i, h, tinte, visto, x: t.x, y: t.y, bioma: t.bioma, nombre: t.nombre })
+  })
+  malla.instanceMatrix.needsUpdate = true
+  if (malla.instanceColor) malla.instanceColor.needsUpdate = true
+  raiz.add(malla)
+  losetas.push(malla)
+}
+
+/**
+ * Color de lo que aún no has pisado. Antes quedaba casi negro y el mapa entero
+ * parecía una plancha de pizarra: ahora se apaga y se enfría, pero el bioma
+ * SIGUE VIÉNDOSE. Lo que tapa de verdad son los nubarrones de encima.
+ */
 function penumbra (tinte, salida) {
-  return salida.setRGB(tinte.r * 0.20, tinte.g * 0.23, tinte.b * 0.32)
+  return salida.setRGB(tinte.r * 0.40, tinte.g * 0.44, tinte.b * 0.56)
 }
 
 const descubierto = (x, y) => !!(mundo()?.descubierto?.[clave(x, y)])
@@ -434,13 +519,18 @@ function colocarDeco (rec, k) {
   rec.malla.instanceMatrix.needsUpdate = true
 }
 
-/** Nubarrones bajos sobre lo desconocido: tres borregos por casilla sin pisar. */
+/**
+ * Nubarrones bajos sobre lo desconocido. Eran TRES borregos grises y apretados
+ * por casilla, y desde el móvil el valle entero parecía un empedrado repetido.
+ * Ahora son DOS por casilla, anchos, aplastados y casi blancos: se solapan con
+ * los de al lado y leen como un banco de nubes, no como piedras.
+ */
 function construirNiebla (w) {
   const ocultas = w.tiles.filter(t => !descubierto(t.x, t.y))
   if (!ocultas.length) return
   const rng = makeRng(((game.state.seed >>> 0) ^ 0x2545f491) >>> 0)
-  const total = ocultas.length * 3
-  nubarrones = new THREE.InstancedMesh(geoBorrego(), mat(PALETA.niebla, { transparente: 0.88 }), total)
+  const total = ocultas.length * 2
+  nubarrones = new THREE.InstancedMesh(geoBorrego(), mat(PALETA.niebla, { transparente: 0.7 }), total)
   nubarrones.castShadow = false
   nubarrones.receiveShadow = false
   nubarrones.userData.ignorarPicking = true
@@ -448,15 +538,15 @@ function construirNiebla (w) {
   let i = 0
   for (const t of ocultas) {
     const idx = []
-    for (let p = 0; p < 3; p++) {
-      const s = rng.float(0.5, 0.68)
+    for (let p = 0; p < 2; p++) {
+      const s = rng.float(0.78, 1.02)
       const rec = {
-        i, x: local(t.x) + rng.float(-0.2, 0.2), z: local(t.y) + rng.float(-0.2, 0.2),
-        y: alturaDe(t) + rng.float(0.04, 0.16), s, giro: rng.float(0, 3.1)
+        i, x: local(t.x) + rng.float(-0.26, 0.26), z: local(t.y) + rng.float(-0.26, 0.26),
+        y: alturaDe(t) + rng.float(0.05, 0.2), s, giro: rng.float(0, 3.1)
       }
-      ponerInstancia(nubarrones, i, rec.x, rec.y, rec.z, s, s * 0.38, s, rec.giro)
-      // gris de tormenta: la misma malla blanca, teñida por instancia
-      nubarrones.setColorAt(i, _col.setRGB(0.78, 0.83, 0.9).multiplyScalar(rng.float(0.88, 1.05)))
+      ponerInstancia(nubarrones, i, rec.x, rec.y, rec.z, s, s * 0.22, s * 0.86, rec.giro)
+      // vellón blanco con un toque azul, no gris de pizarra
+      nubarrones.setColorAt(i, _col.setRGB(0.95, 0.97, 1).multiplyScalar(rng.float(0.9, 1.03)))
       idx.push(rec)
       i++
     }
@@ -465,6 +555,144 @@ function construirNiebla (w) {
   nubarrones.instanceMatrix.needsUpdate = true
   if (nubarrones.instanceColor) nubarrones.instanceColor.needsUpdate = true
   raiz.add(nubarrones)
+}
+
+// ══ EL IMPERIO PINTADO ═══════════════════════════════════════════════════
+/**
+ * LO QUE HACE BONITO EL MAPA: el valle se conquista a manchas, y esas manchas
+ * se ven. Tres capas planas, todas instanciadas, todas repintadas de una pasada
+ * cuando el imperio cambia:
+ *
+ *   · la PLACA  — un velo del color de la bandera sobre cada comarca con dueño.
+ *   · el BORDE  — una tapia bajita del mismo color en el canto que da a un
+ *                 vecino de otro dueño. Es lo que convierte el velo en frontera.
+ *   · el ARO    — un marco dorado sobre lo que puedes atacar AHORA MISMO.
+ *
+ * Así se lee de un vistazo: rojo lo tuyo, cada señor su color, sin color lo
+ * neutral, y con marco dorado lo que está a tiro. Lo que no lleve nada, ni es
+ * de nadie ni lo alcanzas todavía.
+ */
+function construirDominio (w) {
+  const n = w.tiles.length
+  // el velo va bastante opaco a propósito: con los colores apagados de algunos
+  // señores (pizarra, cobre) un velo tímido sobre hierba verde no se ve
+  capaDominio = new THREE.InstancedMesh(geoPlaca(), mat(0xffffff, { transparente: 0.72 }), n)
+  bordeDominio = new THREE.InstancedMesh(geoCaja(), mat(0xffffff), n * 4)
+  aroAlcance = new THREE.InstancedMesh(geoMarco(), mat(PALETA.oro, { emisivo: 0x2e2000 }), n)
+  // un pendón clavado en cada comarca sin torre: es lo que hace que la mancha
+  // parezca un reino que se extiende y no una alfombra pintada
+  mastilDominio = new THREE.InstancedMesh(geoCaja(), mat(PALETA.maderaClara), n)
+  pendonDominio = new THREE.InstancedMesh(geoCaja(), mat(0xffffff), n)
+  capaDominio.renderOrder = 2
+  bordeDominio.renderOrder = 3
+  for (const m of [capaDominio, bordeDominio, aroAlcance, mastilDominio, pendonDominio]) {
+    m.castShadow = false
+    m.receiveShadow = false
+    m.userData.ignorarPicking = true
+    for (let i = 0; i < m.count; i++) ponerInstancia(m, i, 0, -99, 0, 0, 0, 0, 0)
+    m.instanceMatrix.needsUpdate = true
+    raiz.add(m)
+  }
+}
+
+/** Qué se puede atacar AHORA MISMO. Se le pregunta al imperio, que es quien manda. */
+function repasarAlcanzables () {
+  alcanzables = new Set()
+  try {
+    for (const o of (objetivosAlcanzables() || [])) {
+      if (o.alcanzable && o.descubierto) alcanzables.add(clave(o.x, o.y))
+    }
+  } catch { /* el imperio aún no está en pie */ }
+}
+
+/** Repinta las tres capas de golpe. Solo se llama cuando algo ha cambiado. */
+function pintarDominio () {
+  if (!capaDominio || !bordeDominio || !aroAlcance) return
+  const w = mundo()
+  if (!w) return
+
+  // donde ya hay torre (tu aldea, una plaza tuya, un castillo rival) no se
+  // clava pendón: bastante lleno está el tablero
+  const conTorre = new Set()
+  const c = casa()
+  conTorre.add(clave(c.x, c.y))
+  for (const p of plazasImperio) conTorre.add(clave(p.x, p.y))
+  for (const e of (w.enemigos || [])) conTorre.add(clave(e.x, e.y))
+
+  const largo = LADO_LOSETA * Math.SQRT2
+  let ip = 0, ib = 0, ia = 0, im = 0
+  for (const t of w.tiles) {
+    const k = clave(t.x, t.y)
+    const reg = porTile.get(k)
+    if (!(reg?.visto ?? descubierto(t.x, t.y))) continue      // bajo la niebla no hay banderas
+    const h = reg ? reg.h : 0.4
+    const dueño = coloresImperio[k]
+
+    if (dueño != null && ip < capaDominio.count) {
+      _col.set(dueño)
+      capaDominio.setColorAt(ip, _col)
+      ponerInstancia(capaDominio, ip, local(t.x), h + 0.012, local(t.y), 1, 0.02, 1, 0)
+      ip++
+      // la tapia de la frontera va MÁS VIVA que el velo: es la línea que hace
+      // que una mancha se lea como un reino y no como una pintada
+      _col2.copy(_col).multiplyScalar(1.3)
+      for (const [dx, dy] of VECINOS) {
+        if (coloresImperio[clave(t.x + dx, t.y + dy)] === dueño) continue
+        if (ib >= bordeDominio.count) break
+        bordeDominio.setColorAt(ib, _col2)
+        ponerInstancia(bordeDominio, ib, local(t.x) + dx * 0.46, h + 0.02, local(t.y) + dy * 0.46,
+          dx ? 0.13 : largo, 0.16, dy ? 0.13 : largo, 0)
+        ib++
+      }
+      if (!conTorre.has(k) && im < pendonDominio.count) {
+        ponerInstancia(mastilDominio, im, local(t.x) + 0.18, h, local(t.y) + 0.18, 0.03, 0.44, 0.03, 0)
+        pendonDominio.setColorAt(im, _col2)
+        ponerInstancia(pendonDominio, im, local(t.x) + 0.29, h + 0.3, local(t.y) + 0.18, 0.2, 0.13, 0.02, 0)
+        im++
+      }
+    }
+
+    if (dueño !== miColor && alcanzables.has(k) && ia < aroAlcance.count) {
+      ponerInstancia(aroAlcance, ia, local(t.x), h + 0.05, local(t.y), 1.02, 1, 1.02, 0)
+      ia++
+    }
+  }
+
+  // lo que sobra se manda debajo de la mesa, que es más barato que redimensionar
+  for (let i = ip; i < capaDominio.count; i++) ponerInstancia(capaDominio, i, 0, -99, 0, 0, 0, 0, 0)
+  for (let i = ib; i < bordeDominio.count; i++) ponerInstancia(bordeDominio, i, 0, -99, 0, 0, 0, 0, 0)
+  for (let i = ia; i < aroAlcance.count; i++) ponerInstancia(aroAlcance, i, 0, -99, 0, 0, 0, 0, 0)
+  for (let i = im; i < pendonDominio.count; i++) {
+    ponerInstancia(mastilDominio, i, 0, -99, 0, 0, 0, 0, 0)
+    ponerInstancia(pendonDominio, i, 0, -99, 0, 0, 0, 0, 0)
+  }
+
+  for (const m of [capaDominio, bordeDominio, aroAlcance, mastilDominio, pendonDominio]) {
+    m.instanceMatrix.needsUpdate = true
+    if (m.instanceColor) m.instanceColor.needsUpdate = true
+  }
+  dominioSucio = false
+}
+
+/**
+ * Torreón con TU bandera: una plaza conquistada tiene que verse en el tablero.
+ * Lleva el mismo aro de oro que tu aldea, que es la marca de "esto es tuyo": el
+ * color de tu casa y el de algún señor rival pueden parecerse, el aro no.
+ */
+function marcadorPlaza () {
+  const bandera = mat(miColor)
+  const g = grupo([
+    pieza(geoCaja(), M.piedraOscura, { sx: 0.5, sy: 0.06, sz: 0.5 }),
+    pieza(geoCaja(), M.piedra, { y: 0.06, sx: 0.4, sy: 0.16, sz: 0.4 }),
+    pieza(geoCil(6), M.piedra, { x: -0.06, z: -0.06, y: 0.22, sx: 0.22, sy: 0.24, sz: 0.22 }),
+    pieza(geoCono(6), bandera, { x: -0.06, z: -0.06, y: 0.46, sx: 0.3, sy: 0.18, sz: 0.3 }),
+    pieza(geoCaja(), M.maderaClara, { x: -0.06, z: -0.06, y: 0.64, sx: 0.02, sy: 0.24, sz: 0.02 }),
+    pieza(geoCaja(), bandera, { x: 0.02, z: -0.06, y: 0.79, sx: 0.15, sy: 0.1, sz: 0.014 })
+  ])
+  const aro = pieza(geoAro(), mat(PALETA.oro, { emisivo: 0x443300 }), { y: 0.03, sx: 1.25, sy: 1, sz: 1.25 })
+  aro.castShadow = false
+  g.add(aro)
+  return g
 }
 
 /** La mesa de madera sobre la que se apoyan las losetas: sin ella, por las juntas
@@ -566,9 +794,9 @@ function construirAldea (w) {
   // el cartel va una casilla POR DELANTE de la aldea (hacia la cámara): encima
   // se amontonaría con los de los vecinos, que siempre caen pegados al centro
   const rotulo = new THREE.Group()
-  rotulo.position.set(local(c.x), h, local(c.y) + 1.15)
+  rotulo.position.set(local(c.x), h, local(c.y) + 1.05)
   raiz.add(rotulo)
-  ponerCartel(rotulo, '🏰 Tu aldea', 'azul', 0.55, 2.0)
+  rotular('aldea', rotulo, '🏰 Tu aldea', 'azul', { y: 0.5, ancho: ANCHO.ancho, peso: PESO.aldea })
 }
 
 function casita (x, z, ry) {
@@ -623,6 +851,7 @@ function abrirNiebla (k, retraso = 0, instantaneo = false) {
   const tile = porTile.get(k)
   if (!tile || tile.visto) return
   tile.visto = true
+  dominioSucio = true        // bajo la niebla no hay banderas: ahora ya se pueden pintar
   const puffs = nieblaPorTile.get(k)
   const decos = decoPorTile.get(k) || []
 
@@ -743,11 +972,15 @@ function apagar (obj, apagado) {
   })
 }
 
-/** Castillito rival: torre, torretas y un cartel con nivel y calaveras. */
-function baseEnemiga (e) {
+/**
+ * Castillito rival. El TEJADO y el pendón llevan el color del señor que manda
+ * ahí: con cuatro señores sueltos por el valle, si todos los castillos son del
+ * mismo rojo no hay manera de saber de quién es cada mancha.
+ */
+function baseEnemiga (e, color) {
   const g = new THREE.Group()
   const muro = mat(PALETA.enemigo)
-  const teja = mat(PALETA.tejadoOscuro)
+  const teja = mat(color || PALETA.tejadoOscuro)
   // recinto cuadrado con almenas y torreón: de un vistazo es un castillo,
   // no un montón de conos rojos
   g.add(pieza(geoCaja(), M.piedraOscura, { sx: 0.6, sy: 0.05, sz: 0.6 }))
@@ -758,7 +991,7 @@ function baseEnemiga (e) {
   g.add(pieza(geoCaja(), muro, { x: -0.08, z: -0.08, y: 0.21, sx: 0.24, sy: 0.3, sz: 0.24 }))
   g.add(pieza(geoCono(4), teja, { x: -0.08, z: -0.08, y: 0.51, ry: Math.PI / 4, sx: 0.42, sy: 0.22, sz: 0.42 }))
   g.add(pieza(geoCaja(), M.maderaClara, { x: -0.08, z: -0.08, y: 0.73, sx: 0.02, sy: 0.16, sz: 0.02 }))
-  g.add(pieza(geoCaja(), mat(PALETA.tela), { x: -0.01, z: -0.08, y: 0.82, sx: 0.14, sy: 0.09, sz: 0.012 }))
+  g.add(pieza(geoCaja(), teja, { x: -0.01, z: -0.08, y: 0.82, sx: 0.14, sy: 0.09, sz: 0.012 }))
   return g
 }
 
@@ -819,8 +1052,8 @@ const TONO_CARTEL = {
   gris: { borde: '#a9b4bf', fondo: 'rgba(38,42,48,0.82)', tinta: '#dfe4e9' }
 }
 
-/** @param {string|Array<string>} lineas una o dos; la primera manda en tamaño. */
-function cartel (lineas, tono = 'oro', ancho = 1.15) {
+/** @param {string|Array<string>} lineas de una sola línea; dos solo por compatibilidad. */
+function cartel (lineas, tono = 'oro', ancho = 1.1) {
   const txt = (Array.isArray(lineas) ? lineas : [lineas]).filter(Boolean).map(String)
   if (!txt.length) return null
   const k = `${tono}|${txt.join('\n')}`
@@ -838,29 +1071,29 @@ function materialCartel (lineas, tono) {
   const dos = lineas.length > 1
   const lienzo = document.createElement('canvas')
   lienzo.width = 256
-  lienzo.height = dos ? 128 : 88
+  lienzo.height = dos ? 128 : 80
   const c = lienzo.getContext('2d')
   c.textAlign = 'center'
   c.textBaseline = 'middle'
 
   // el texto se encoge hasta caber: un nombre largo cortado no dice nada
   const cabe = (px, texto) => { c.font = `bold ${px}px system-ui, sans-serif`; return c.measureText(texto).width }
-  let px1 = dos ? 40 : 46
-  while (px1 > 22 && cabe(px1, lineas[0]) > 210) px1 -= 2
+  let px1 = dos ? 40 : 44
+  while (px1 > 24 && cabe(px1, lineas[0]) > 216) px1 -= 2
   let px2 = dos ? 32 : 0
-  while (dos && px2 > 18 && cabe(px2, lineas[1]) > 210) px2 -= 2
+  while (dos && px2 > 18 && cabe(px2, lineas[1]) > 216) px2 -= 2
 
-  const ancho = Math.min(250, Math.max(cabe(px1, lineas[0]), dos ? cabe(px2, lineas[1]) : 0) + 36)
-  const alto = dos ? 112 : 68
+  const ancho = Math.min(252, Math.max(cabe(px1, lineas[0]), dos ? cabe(px2, lineas[1]) : 0) + 30)
+  const alto = dos ? 112 : 60
   const x0 = (256 - ancho) / 2
   const y0 = (lienzo.height - alto) / 2
 
   c.fillStyle = t.fondo
   c.beginPath()
-  if (c.roundRect) c.roundRect(x0, y0, ancho, alto, 20)
+  if (c.roundRect) c.roundRect(x0, y0, ancho, alto, 16)
   else c.rect(x0, y0, ancho, alto)
   c.fill()
-  c.strokeStyle = t.borde; c.lineWidth = 5; c.stroke()
+  c.strokeStyle = t.borde; c.lineWidth = 4; c.stroke()
 
   c.fillStyle = t.tinta
   c.font = `bold ${px1}px system-ui, sans-serif`
@@ -880,43 +1113,159 @@ function materialCartel (lineas, tono) {
   return m
 }
 
+// ══ CUÁNTOS RÓTULOS Y CUÁLES ═════════════════════════════════════════════
 /**
- * Cuelga (o cambia) el cartel de un grupo del tablero. Solo redibuja si el texto
- * ha cambiado de verdad: un cartel nuevo son una textura y una subida a la GPU.
+ * EL PROBLEMA QUE ARREGLA ESTO: antes cada yacimiento, cada rival y cada
+ * explorador colgaba su cartel de dos renglones, todos a la vez. En un iPhone
+ * eso eran NUEVE carteles amontonados en mitad del valle, más grandes que las
+ * propias casillas y tapándose unos a otros. Ilegible.
+ *
+ * La regla ahora es de tablero de mesa, no de rótulo de neón:
+ *
+ *   1. CADA COSA SE DICE CON SU FICHA (el montón de troncos, el castillito, la
+ *      calavera). El icono es el que informa; el texto solo desempata.
+ *   2. NUNCA MÁS DE CUATRO rótulos en pantalla, y de una sola línea.
+ *   3. NINGUNO SE PISA: se proyectan a píxeles, se ordenan por importancia y el
+ *      que choca con uno ya puesto sencillamente no sale.
+ *   4. MANDA LO QUE IMPORTA: la casilla que has tocado, tu aldea, tu gente que
+ *      está fuera, y lo que puedes atacar ahora mismo. Lo demás, solo de cerca.
+ *
+ * El resto de los datos (cuánto queda, qué produce, quién manda) van a la ficha
+ * del panel de abajo, que es donde se leen bien.
  */
-function ponerCartel (g, lineas, tono = 'oro', y = 0.7, ancho = 1.4, secundario = false) {
-  const txt = (Array.isArray(lineas) ? lineas : [lineas]).filter(Boolean).join('\n')
-  const k = `${tono}|${txt}`
-  if (g.userData.cartelClave === k) {
-    if (g.userData.cartel) g.userData.cartel.position.y = y
-    return
-  }
-  g.userData.cartelClave = k
-  if (g.userData.cartel) { carteleria.delete(g.userData.cartel); g.remove(g.userData.cartel); g.userData.cartel = null }
-  const s = cartel(lineas, tono, ancho)
-  if (!s) return
-  s.position.y = y
-  // los fijos (tu aldea, la casilla elegida) se dibujan por encima de los demás
-  s.renderOrder = secundario ? 5 : 7
-  g.add(s)
-  g.userData.cartel = s
-  // "secundario" = se esconde al alejar la cámara; si no, el tablero es una sopa
-  // de letras. Tu aldea y la casilla elegida se quedan siempre.
-  if (secundario) { carteleria.add(s); s.visible = carteleriaVisible }
+const ROTULOS_MAX = 4
+const ZOOM_ROTULO_CERCA = 30      // más cerca que esto se rotula también lo secundario
+const ZOOM_ROTULO_NADA = 50       // más lejos que esto, solo lo que hayas tocado
+const HUECO_ROTULO = 10           // píxeles de aire obligatorio entre dos rótulos
+const ROTULO_MINIMO = 58          // menos ancho que esto en pantalla no se lee: no se enciende
+
+/**
+ * Cuánto pesa cada cosa a la hora de quedarse con uno de los cuatro sitios.
+ * El orden es el del jugador, no el del programador: primero lo que tiene bajo
+ * el dedo, después lo que puede atacar AHORA, después lo suyo, y al final el
+ * paisaje.
+ */
+const PESO = {
+  seleccion: 100,
+  // tu aldea va justo por delante: es el ancla del tablero. Si el jugador no
+  // encuentra su casa de un vistazo, lo demás da igual.
+  aldea: 74,
+  rivalAtacable: 72,
+  expedicion: 60,
+  plaza: 52,
+  nodoAtacable: 46,
+  rival: 34,
+  alcance: 26,
+  nodo: 22,
+  agotado: 10
 }
 
-/** Los carteles que estorban cuando se mira el valle entero desde arriba. */
-const carteleria = new Set()
-let carteleriaVisible = true
-const ZOOM_SIN_CARTELES = 44      // más lejos que esto, solo iconos
+/** Ancho de los rótulos en anchos de casilla: proporcionado al tablero. */
+const ANCHO = { normal: 1.75, ancho: 1.95, sel: 2.1 }
 
-function repasarCarteleria () {
-  const d = ctx.camara?.distancia
-  if (!Number.isFinite(d)) return
-  const debe = d < ZOOM_SIN_CARTELES
-  if (debe === carteleriaVisible) return
-  carteleriaVisible = debe
-  for (const s of carteleria) s.visible = debe
+const rotulos = new Map()         // id -> { grupo, sprite, clave, peso }
+
+/**
+ * Apunta (o cambia) el rótulo de una cosa del tablero. NO lo enciende: quien
+ * decide cuáles se ven es `repasarRotulos`. Solo redibuja si el texto ha
+ * cambiado de verdad: un cartel nuevo son una textura y una subida a la GPU.
+ */
+function rotular (id, g, texto, tono = 'oro', { y = 0.85, ancho = 1.15, peso = PESO.nodo } = {}) {
+  const txt = String(texto || '').trim()
+  if (!txt) { quitarRotulo(id); return }
+  let r = rotulos.get(id)
+  if (!r) { r = { grupo: g, sprite: null, clave: '', peso }; rotulos.set(id, r) }
+  r.grupo = g
+  r.peso = peso
+  const k = `${tono}|${txt}|${ancho}`
+  if (r.clave !== k) {
+    if (r.sprite) r.sprite.parent?.remove(r.sprite)
+    const s = cartel(txt, tono, ancho)
+    if (!s) { rotulos.delete(id); return }
+    s.renderOrder = 8
+    s.visible = false
+    r.sprite = s
+    r.clave = k
+    g.add(s)
+  } else if (r.sprite.parent !== g) {
+    r.sprite.parent?.remove(r.sprite)
+    g.add(r.sprite)
+  }
+  r.sprite.position.y = y
+}
+
+function quitarRotulo (id) {
+  const r = rotulos.get(id)
+  if (r?.sprite) r.sprite.parent?.remove(r.sprite)
+  rotulos.delete(id)
+}
+
+const _mundoRot = new THREE.Vector3()
+const candidatos = []
+const puestos = []
+
+/**
+ * Decide los cuatro. Se proyecta cada rótulo a píxeles de pantalla, se ordenan
+ * de más a menos importante y se van aceptando mientras no choquen con ninguno
+ * de los ya aceptados. Lo que choca, se apaga: preferimos ver cuatro cosas bien
+ * a nueve mal.
+ */
+function repasarRotulos () {
+  const lienzo = ctx.renderer?.domElement
+  if (!ctx.camera || !lienzo || !rotulos.size) return
+  const anchoPx = lienzo.clientWidth || 1
+  const altoPx = lienzo.clientHeight || 1
+  const d = ctx.camara?.distancia ?? ZOOM_MESA
+  const cerca = d < ZOOM_ROTULO_CERCA
+  const lejos = d > ZOOM_ROTULO_NADA
+  // píxeles por unidad de mundo a un metro de la cámara (perspectiva)
+  const k = altoPx / (2 * Math.tan((ctx.camera.fov * Math.PI / 180) / 2))
+
+  candidatos.length = 0
+  for (const r of rotulos.values()) {
+    const s = r.sprite
+    if (!s || !s.parent) continue
+    s.visible = false
+    if (lejos && r.peso < PESO.seleccion) continue
+    if (!cerca && r.peso < PESO.plaza) continue
+
+    s.getWorldPosition(_mundoRot)
+    const dist = _mundoRot.distanceTo(ctx.camera.position)
+    if (dist < 0.001) continue
+    _mundoRot.project(ctx.camera)
+    if (_mundoRot.z < -1 || _mundoRot.z > 1) continue
+    const px = (_mundoRot.x * 0.5 + 0.5) * anchoPx
+    const py = (-_mundoRot.y * 0.5 + 0.5) * altoPx
+    // el sprite se encoge con la distancia igual que todo lo demás
+    const escala = (k / dist) * ESCALA_MESA
+    const w = s.scale.x * escala
+    const h = s.scale.y * escala
+    // demasiado pequeño para leerse: fuera. La casilla que acabas de tocar es
+    // la excepción: si el dedo ha señalado algo, ese algo se nombra siempre.
+    if (w < ROTULO_MINIMO && r.peso < PESO.seleccion) continue
+    if (px + w / 2 < 0 || px - w / 2 > anchoPx) continue
+    if (py + h / 2 < 0 || py - h / 2 > altoPx) continue
+    candidatos.push({ s, peso: r.peso, x0: px - w / 2, x1: px + w / 2, y0: py - h / 2, y1: py + h / 2 })
+  }
+
+  // a igualdad de peso gana el que esté más cerca del centro de la pantalla
+  const cx = anchoPx / 2, cy = altoPx / 2
+  candidatos.sort((a, b) => (b.peso - a.peso) ||
+    (Math.hypot((a.x0 + a.x1) / 2 - cx, (a.y0 + a.y1) / 2 - cy) -
+     Math.hypot((b.x0 + b.x1) / 2 - cx, (b.y0 + b.y1) / 2 - cy)))
+
+  puestos.length = 0
+  for (const c of candidatos) {
+    if (puestos.length >= ROTULOS_MAX) break
+    let choca = false
+    for (const p of puestos) {
+      if (c.x0 < p.x1 + HUECO_ROTULO && c.x1 + HUECO_ROTULO > p.x0 &&
+          c.y0 < p.y1 + HUECO_ROTULO && c.y1 + HUECO_ROTULO > p.y0) { choca = true; break }
+    }
+    if (choca) continue
+    c.s.visible = true
+    puestos.push(c)
+  }
 }
 
 /**
@@ -937,25 +1286,15 @@ function nombreRival (s = '', tope = 14) {
   return nombreLugar(propio || p.slice(0, 2).join(' '), tope)
 }
 
-/** Cuánto queda en un yacimiento, dicho con palabras en vez de con una cifra. */
-function cuantoQueda (n) {
-  if (!n || n.agotado || n.restante <= 0) return 'agotado'
-  const base = Math.max(1, TIPOS_NODO[n.tipo]?.base || 1)
-  const f = n.restante / base
-  return f > 0.66 ? 'a mansalva' : f > 0.3 ? 'de sobra' : 'ya queda poco'
-}
+/**
+ * Cuánto queda, qué produce y a quién pertenece NO se dicen aquí: van a la
+ * ficha del panel de abajo (ui/world-panel.js), que es donde hay sitio para
+ * leerlos. En el tablero solo se ve el nombre, y solo cuando toca.
+ */
 
-const PALABRA_RECURSO = {
-  madera: '🪵 madera', piedra: '🪨 piedra', comida: '🌾 grano',
-  oro: '🪙 oro', gemas: '💎 reliquias', varios: '🎒 de todo'
-}
-
-/** A qué ha salido el muñequito que cruza el valle, dicho en dos palabras. */
-const ETIQUETA_MISION = {
-  explorar: '🧭 explorando',
-  recolectar: '🎒 a por carga',
-  espiar: '👁️ espiando',
-  saquear: '🗡️ de saqueo'
+/** A qué ha salido el muñequito que cruza el valle, en un solo icono. */
+const ICONO_MISION = {
+  explorar: '🧭', recolectar: '🎒', espiar: '👁️', saquear: '🗡️'
 }
 
 // ══ SINCRONIZACIÓN CON EL ESTADO ═════════════════════════════════════════
@@ -968,6 +1307,8 @@ function sincronizar () {
   if (!construido) return
   const w = mundo()
   if (!w) return
+  // primero, porque de esto depende quién se lleva uno de los cuatro rótulos
+  if (dominioSucio) repasarAlcanzables()
 
   // --- nodos de recursos ---
   const vivos = new Set()
@@ -991,19 +1332,19 @@ function sincronizar () {
       apagar(g, apagado)
       g.position.y = g.userData.base - (apagado ? 0.18 : 0)
     }
-    // el cartel dice DÓNDE estás y QUÉ hay: sin él, el tablero es un montón de fichas
+    // QUÉ hay lo dice la ficha (troncos, sillares, espigas…) y el detalle va a la
+    // ficha del panel. El rótulo solo pone nombre a la comarca, y solo si le toca
+    // uno de los cuatro sitios.
     const comarca = porTile.get(clave(n.x, n.y))?.nombre || n.nombre || 'Tierra sin nombre'
-    const queda = cuantoQueda(n)
-    const linea2 = !n.recurso ? '💀 nada que llevarse'
-      : apagado ? `${PALABRA_RECURSO[n.recurso] || n.recurso} agotada`
-        : `${PALABRA_RECURSO[n.recurso] || n.recurso} ${queda}`
-    // los carteles vecinos se pisarían: se alternan dos alturas en tablero de ajedrez
-    ponerCartel(g, [nombreLugar(comarca), linea2], apagado ? 'gris' : 'oro',
-      0.95 + (n.y % 3) * 0.62, 2.7, true)
+    rotular(`nodo:${n.id}`, g, nombreLugar(comarca, 18), apagado ? 'gris' : 'oro', {
+      y: 1.0,
+      ancho: ANCHO.normal,
+      peso: apagado ? PESO.agotado : alcanzables.has(clave(n.x, n.y)) ? PESO.nodoAtacable : PESO.nodo
+    })
   }
   for (const [id, g] of marcadores) {
     if (vivos.has(id)) continue
-    raiz.remove(g); marcadores.delete(id)
+    raiz.remove(g); marcadores.delete(id); quitarRotulo(`nodo:${id}`)
   }
 
   // --- bases enemigas ---
@@ -1013,30 +1354,41 @@ function sincronizar () {
     if (!(e.descubierto ?? descubierto(e.x, e.y))) continue
     enemigosVivos.add(e.id)
     let reg = basesEnemigas.get(e.id)
+    const colorSeñor = coloresImperio[clave(e.x, e.y)] ?? PALETA.tejadoOscuro
+    const t = porTile.get(clave(e.x, e.y))
+    const alto = t ? t.h : 0.4
     if (!reg) {
-      const g = baseEnemiga(e)
-      const t = porTile.get(clave(e.x, e.y))
-      g.position.set(local(e.x), t ? t.h : 0.4, local(e.y))
-      raiz.add(g)
       // el rótulo va aparte del castillo: cuando una base cae se aplasta, y el
       // cartel colgado de ella se aplastaría con ella
       const rotulo = new THREE.Group()
-      rotulo.position.copy(g.position)
+      rotulo.position.set(local(e.x), alto, local(e.y))
       raiz.add(rotulo)
-      reg = { grupo: g, rotulo }
+      reg = { grupo: null, rotulo, color: null }
       basesEnemigas.set(e.id, reg)
-      brotar(g)
+    }
+    if (reg.color !== colorSeñor) {                 // castillo nuevo, o le ha cambiado el amo
+      const primero = !reg.grupo
+      if (reg.grupo) raiz.remove(reg.grupo)
+      reg.grupo = baseEnemiga(e, colorSeñor)
+      reg.grupo.position.set(local(e.x), alto, local(e.y))
+      raiz.add(reg.grupo)
+      reg.color = colorSeñor
+      reg.caido = undefined                          // hay que volver a aplicar "en ruinas"
+      if (primero) brotar(reg.grupo)
     }
     const nivel = Math.max(1, Math.round(e.nivel || 1))
-    // e.amenaza es la etiqueta de texto del rival; las calaveras salen del nivel
-    const calaveras = Math.max(1, Math.min(4, Math.ceil(nivel / 3.5)))
     const caido = !!e.derrotado
-    // quién es y cómo de gordo: un rival sin nombre ni nivel no invita a nada
-    const estado = caido ? 'en ruinas · volverá'
-      : e.vasallo ? '🤝 vasallo tuyo'
-        : `Nv.${nivel} ${'💀'.repeat(calaveras)}`
-    ponerCartel(reg.rotulo, [nombreRival(e.nombre || 'Rival'), estado],
-      caido ? 'gris' : e.vasallo ? 'verde' : 'rojo', 1.35 + (e.y % 3) * 0.62, 2.7, true)
+    // una sola línea: quién es y cómo de gordo. El parte completo, en la ficha.
+    const puedo = alcanzables.has(clave(e.x, e.y))
+    const texto = caido ? `${nombreRival(e.nombre || 'Rival')} en ruinas`
+      : e.vasallo ? `🤝 ${nombreRival(e.nombre || 'Rival')}`
+        : `${puedo ? '⚔️ ' : ''}${nombreRival(e.nombre || 'Rival')} Nv.${nivel}`
+    rotular(`rival:${e.id}`, reg.rotulo, texto,
+      caido ? 'gris' : e.vasallo ? 'verde' : 'rojo', {
+        y: 1.3,
+        ancho: ANCHO.ancho,
+        peso: caido ? PESO.agotado : puedo ? PESO.rivalAtacable : PESO.rival
+      })
     if (reg.caido !== caido) {
       reg.caido = caido
       apagar(reg.grupo, caido)          // derrotada = piedra gris y desplomada
@@ -1046,10 +1398,13 @@ function sincronizar () {
   }
   for (const [id, reg] of basesEnemigas) {
     if (enemigosVivos.has(id)) continue
-    raiz.remove(reg.grupo)
+    if (reg.grupo) raiz.remove(reg.grupo)
     if (reg.rotulo) raiz.remove(reg.rotulo)
     basesEnemigas.delete(id)
+    quitarRotulo(`rival:${id}`)
   }
+
+  sincronizarPlazas()
 
   // --- sucesos del mundo ---
   const ahora = Date.now()
@@ -1079,6 +1434,36 @@ function sincronizar () {
 
   sincronizarExpediciones()
   sincronizarAlcance()
+  if (dominioSucio) pintarDominio()
+}
+
+/**
+ * Las plazas que has conquistado. Hasta ahora no salían en el tablero: ganabas
+ * una comarca y el mapa seguía igual. Ahora plantan tu torreón y tu bandera, que
+ * es lo que hace que la mancha de color se vea CRECER.
+ */
+function sincronizarPlazas () {
+  const vivas = new Set()
+  for (const p of plazasImperio) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue
+    const k = clave(p.x, p.y)
+    vivas.add(k)
+    let g = marcasPlaza.get(k)
+    if (!g) {
+      g = marcadorPlaza()
+      const t = porTile.get(k)
+      g.position.set(local(p.x), t ? t.h : 0.4, local(p.y))
+      raiz.add(g)
+      marcasPlaza.set(k, g)
+      brotar(g)
+    }
+    rotular(`plaza:${k}`, g, `🚩 ${nombreLugar(p.nombre || 'Plaza tuya', 16)}`, 'verde',
+      { y: 1.15, ancho: ANCHO.ancho, peso: PESO.plaza })
+  }
+  for (const [k, g] of marcasPlaza) {
+    if (vivas.has(k)) continue
+    raiz.remove(g); marcasPlaza.delete(k); quitarRotulo(`plaza:${k}`)
+  }
 }
 
 /** Aparecer con rebote: nada surge de la nada de golpe, todo brota. */
@@ -1113,8 +1498,9 @@ function sincronizarExpediciones () {
     // quién es y a qué va: el muñequito andando por el mapa deja de ser un misterio
     const rotulo = new THREE.Group()
     raiz.add(rotulo)
-    ponerCartel(rotulo, [nombreLugar(ex.aldeanoNombre || 'Explorador', 15),
-      `${ETIQUETA_MISION[ex.mision] || 'de expedición'}`], 'oro', 0.75, 2.5, true)
+    rotular(`exp:${ex.id}`, rotulo,
+      `${ICONO_MISION[ex.mision] || '🧭'} ${nombreLugar(ex.aldeanoNombre || 'Explorador', 14)}`,
+      'oro', { y: 0.8, ancho: ANCHO.normal, peso: PESO.expedicion })
     const reg = { figura, rotulo, ranura, x: d.x, y: d.y, sale: ex.sale, vuelve: ex.vuelve }
     expediciones.set(ex.id, reg)
     pintarCamino(reg)
@@ -1126,6 +1512,7 @@ function sincronizarExpediciones () {
     if (reg.rotulo) raiz.remove(reg.rotulo)
     borrarCamino(reg.ranura)
     expediciones.delete(id)
+    quitarRotulo(`exp:${id}`)
   }
 }
 
@@ -1208,8 +1595,9 @@ function sincronizarAlcance () {
   if (visible) {
     const t = porTile.get(clave(c.x, Math.round(c.y - r)))
     rotuloAlcance.position.set(local(c.x), (t ? t.h : SUELO_MAR + 0.1), local(c.y - r))
-    ponerCartel(rotuloAlcance, ['⛳ Hasta aquí llegan', 'tus exploradores'], 'verde', 1.1, 2.9, true)
-  }
+    rotular('alcance', rotuloAlcance, '⛳ Hasta aquí llegas', 'verde',
+      { y: 0.95, ancho: ANCHO.ancho, peso: PESO.alcance })
+  } else quitarRotulo('alcance')
 }
 
 // ══ ANIMACIÓN POR FRAME ══════════════════════════════════════════════════
@@ -1233,7 +1621,11 @@ function porFrame (dt, t) {
   // se recuerda el zoom con el que el jugador mira el valle, para devolvérselo
   const dz = ctx.camara?.distancia
   if (Number.isFinite(dz)) zoomMundo = Math.min(ZOOM_MESA_MAX, Math.max(ZOOM_MESA_MIN, dz))
-  repasarCarteleria()
+
+  // los cuatro rótulos se reparten varias veces por segundo, no en cada frame:
+  // proyectar y comparar cajas no sale gratis y el mapa no cambia tan deprisa
+  relojRotulos += dt
+  if (relojRotulos > SEG_ROTULOS) { relojRotulos = 0; repasarRotulos() }
 
   animarMar(t)
   animarCielo(dt, t)
@@ -1409,11 +1801,11 @@ function marcar (marco, t) {
   rotuloSel.visible = true
   rotuloSel.position.set(local(t.x), reg.h, local(t.y))
   const visto = reg.visto ?? descubierto(t.x, t.y)
-  const bioma = BIOMAS[reg.bioma]?.nombre || 'tierra rara'
-  ponerCartel(rotuloSel,
-    visto ? [nombreLugar(reg.nombre || 'Tierra sin nombre'), bioma.toLowerCase()]
-      : ['☁️ Sin explorar', 'manda a un explorador'],
-    visto ? 'azul' : 'gris', 2.3, 3.0)
+  // SOLO el nombre. El bioma, el dueño, lo que produce y qué se puede hacer
+  // allí van a la ficha del panel de abajo, que para eso está.
+  rotular('seleccion', rotuloSel,
+    visto ? nombreLugar(reg.nombre || 'Tierra sin nombre', 20) : '☁️ Sin explorar',
+    visto ? 'azul' : 'gris', { y: 1.9, ancho: ANCHO.sel, peso: PESO.seleccion })
 }
 
 // ══ utilidades ═══════════════════════════════════════════════════════════

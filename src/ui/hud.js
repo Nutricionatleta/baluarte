@@ -19,6 +19,7 @@ import { events, EV } from '../core/events.js'
 import { CONFIG, ICONO } from '../core/config.js'
 import { game } from '../core/state.js'
 import { def as defEdificio, AGE_NOMBRE } from '../data/buildings.js'
+import { defUnidad } from '../data/units.js'
 import { centroDe, dist } from '../core/grid.js'
 import * as guardado from '../core/save.js'
 import {
@@ -65,112 +66,147 @@ const NOMBRE_RECURSO = { madera: 'Madera', piedra: 'Piedra', comida: 'Comida', o
    =========================================================================== */
 
 const CSS = `
-#hud { --alto-top: 112px; }
+/* --alto-top = lo que ocupan las esquinas de arriba; lo miden y lo publican
+   aquí para que nada (avisos, tira del mundo) se coloque encima. */
+#hud { --alto-top: 58px; --alto-alarma: 0px; }
+#hud.alarmado { --alto-alarma: 54px; }
 
-/* ---------- barra de arriba ---------- */
-.hud-top {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 20;
-  display: flex; flex-direction: column; gap: 5px;
-  padding: calc(var(--seg-arriba) + 5px) calc(var(--seg-der) + 8px) 0 calc(var(--seg-izq) + 8px);
-  pointer-events: none;
-}
-.hud-top > * { pointer-events: auto; }
-
-/* Rejilla de recursos: cuatro columnas EXACTAMENTE iguales. Las cifras van a la
-   derecha y con cifras de ancho fijo, así nada baila cuando cambian los números. */
-.hud-res { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
-.res {
-  display: grid; gap: 3px; min-width: 0;
-  padding: 4px 7px 5px;
-  font-family: inherit; color: var(--tinta); text-align: left;
+/* ---------- UNA sola barra arriba ----------
+   Todo lo que hay que mirar cabe en una línea de 48 px: los cuatro recursos a
+   la izquierda y, a la derecha, gente, gemas, nivel y constructores. Es una
+   ÚNICA cápsula con separadores finos: cuatro marcos y cuatro paddings se
+   comían el ancho que hace falta para que las cifras quepan. El centro y los
+   lados quedan libres: ahí está la aldea, que es a lo que se juega. */
+.hud-barra {
+  position: fixed; z-index: 20;
+  top: calc(var(--seg-arriba) + var(--alto-alarma) + 5px);
+  left: calc(var(--seg-izq) + 6px); right: calc(var(--seg-der) + 6px);
+  display: flex; align-items: stretch; gap: 0;
+  min-height: 48px; padding: 0 2px;
   background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
-  border: 2px solid var(--madera); border-radius: var(--r-m);
+  border: 2px solid var(--madera); border-radius: var(--r-max);
   box-shadow: var(--sombra-suave), var(--brillo);
+  transition: top var(--medio) var(--curva);
+  overflow: hidden;
 }
-.res:active { transform: translateY(1px); box-shadow: var(--brillo); }
-.res-cab { display: flex; align-items: baseline; gap: 3px; min-width: 0; }
-.res-cab > i { flex: none; font-style: normal; font-size: 1.05em; line-height: 1; }
-.res-cab > b { flex: 1; min-width: 0; text-align: right; font-size: 1em; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-.res-cab > small { flex: none; font-size: .66em; font-weight: 800; color: var(--tinta-suave); font-variant-numeric: tabular-nums; }
-.res-ritmo { font-size: .7em; line-height: 1.1; text-align: right; }
-.res .barra-progreso { height: 6px; }
+/* separador fino entre grupos: una raya, no un marco */
+.hud-barra > * + * { border-left: 1px solid rgba(90, 58, 34, .25); }
+.hud-sep { flex: 1 1 0; min-width: 0; border: none !important; }
+
+/* Recursos: icono + cantidad, una barrita de llenado de 3 px y, debajo, la
+   producción por hora en pequeño. El TOPE en cifras no cabe en una línea de
+   390 px sin recortar algo peor, así que lo cuenta la barrita (roja al tope,
+   con «¡LLENO!» en su sitio) y el número exacto está a un toque, en el panel
+   de producción y en la etiqueta de accesibilidad. */
+.res {
+  flex: 1 1 0; min-width: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  padding: 3px 2px;
+  font-family: inherit; color: var(--tinta); text-align: center;
+  background: none; border: none;
+}
+.res:active { background: rgba(90, 58, 34, .12); }
+.res-cab { display: flex; align-items: baseline; justify-content: center; gap: 2px; min-width: 0; max-width: 100%; }
+.res-cab > i { flex: none; font-style: normal; font-size: .92em; line-height: 1; }
+.res-cab > b { flex: none; font-size: .76em; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.res-cab > small { display: none; }
+.res-ritmo { font-size: .54em; line-height: 1.1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.res .barra-progreso { width: 82%; height: 3px; border-width: 1px; }
 
 /* al tope no se produce: se está tirando comida a la basura y se dice en rojo */
-.res.lleno { border-color: var(--rojo); background-image: linear-gradient(180deg, #fde8e4, #f6cfc8); }
-.res.lleno .res-cab > b, .res.lleno .res-cab > small { color: var(--rojo-oscuro); }
-.res.casi { border-color: var(--oro-oscuro); }
-.res.abierto { box-shadow: 0 0 0 3px rgba(212, 164, 55, .55), var(--brillo); }
+.res.lleno { background: rgba(179, 51, 43, .16); }
+.res.lleno .res-cab > b { color: var(--rojo-oscuro); }
+.res.casi .res-cab > b { color: var(--oro-oscuro); }
+.res.abierto { background: rgba(212, 164, 55, .3); }
 
-/* ---------- fila de estado: gente, gemas, nivel y los dos botones ---------- */
-.hud-estado { display: flex; align-items: center; gap: 5px; min-width: 0; }
+/* ---------- pastillas de la barra: gente, gemas, nivel, constructores ----------
+   Sin marco propio (lo pone la barra) y «flex: none»: sin eso la fila encogía
+   las pastillas y las cifras de dos dígitos (13/22, 216 gemas) se salían. */
 .pastilla {
-  position: relative; overflow: hidden;
-  display: inline-flex; align-items: center; gap: 5px;
-  min-height: 48px; padding: 4px 11px;
-  font-family: inherit; font-size: .84em; font-weight: 800; line-height: 1.05;
-  color: var(--pergamino-claro);
-  background-image: linear-gradient(180deg, var(--madera-clara), var(--madera));
-  border: 2px solid var(--madera-oscura); border-radius: var(--r-max);
-  box-shadow: var(--sombra-suave);
+  position: relative; overflow: hidden; flex: none;
+  display: inline-flex; align-items: center; justify-content: center; gap: 3px;
+  min-height: 44px; padding: 2px 5px;
+  font-family: inherit; font-size: .7em; font-weight: 800; line-height: 1.05;
+  color: var(--tinta);
+  background: none; border: none;
   white-space: nowrap;
 }
-.pastilla > i { font-style: normal; font-size: 1.15em; }
-.pastilla > b { font-variant-numeric: tabular-nums; }
-button.pastilla:active { transform: translateY(2px); box-shadow: none; }
+.pastilla > i { flex: none; font-style: normal; font-size: 1.15em; }
+.pastilla > b { flex: none; font-variant-numeric: tabular-nums; text-align: right; }
+button.pastilla:active { background: rgba(90, 58, 34, .12); }
+/* anchos mínimos en «ch»: la pastilla ya nace con sitio para el valor más
+   largo que puede aparecer, así no se ensancha ni se estrecha al vuelo */
+.pastilla-gemas > b { min-width: 3.2ch; }
+.pastilla-nivel > b { min-width: 1.6ch; text-align: center; }
+/* los parados van EN LÍNEA, nunca como globo encima de la cifra */
 .parados {
-  font-style: normal; font-size: .9em; line-height: 1;
-  min-width: 20px; padding: 3px 5px; text-align: center;
+  flex: none; font-style: normal; font-size: .82em; line-height: 1;
+  min-width: 16px; padding: 2px 3px; text-align: center;
   color: #fff3ec; background-image: linear-gradient(180deg, var(--rojo-claro), var(--rojo));
   border: 1px solid var(--rojo-oscuro); border-radius: var(--r-max);
+  font-variant-numeric: tabular-nums;
 }
-.hud-mas.flojo { filter: grayscale(.7); opacity: .6; }
 /* el nivel enseña la experiencia como relleno del propio botón: cero píxeles extra */
 .pastilla-xp { position: absolute; inset: 0; width: 0; background: rgba(242, 200, 92, .42); transition: width var(--medio) var(--curva); }
 .pastilla > span, .pastilla > b, .pastilla > i { position: relative; }
-.hud-redondo { min-width: 48px; min-height: 48px; padding: 0; font-size: 1.2em; border-radius: var(--r-max); }
-.hud-mas { min-width: 48px; min-height: 48px; padding: 0; font-size: 1.3em; border-radius: var(--r-max); }
+.hud-redondo { position: relative; flex: none; width: 48px; min-width: 48px; height: 48px; min-height: 48px; padding: 0; font-size: 1.2em; border-radius: var(--r-max); }
 
-/* los avisos flotantes de styles.js nacen arriba del todo: ahí está la barra de
-   recursos, así que se bajan justo por debajo para que no la tapen. Con alarma
-   en pantalla bajan otro escalón: la tira roja manda sobre el resto. Y se
-   estrechan y se pegan a la izquierda: a la derecha vive el botón de
-   constructores y un aviso ancho se lo comía. */
+/* los avisos flotantes de styles.js nacen arriba del todo y a lo ancho, o sea
+   justo encima de la barra: se bajan por debajo de ella y se pegan a la
+   izquierda, estrechos, para no tapar ni las cifras ni los botones redondos de
+   la derecha. Breves y arriba, como pidió el dueño, pero sin comerse el dato. */
 #hud > .capa-toast {
-  top: calc(var(--seg-arriba) + var(--alto-top) + 6px);
-  left: calc(var(--seg-izq) + 8px); transform: none;
-  width: min(66vw, 300px);
+  top: calc(var(--alto-top) + 6px);     /* --alto-top ya lleva dentro la alarma */
+  left: calc(var(--seg-izq) + 6px); transform: none;
+  width: min(72vw, 282px);
   align-items: flex-start;
 }
-#hud.alarmado > .capa-toast { top: calc(var(--seg-arriba) + var(--alto-top) + 56px); }
 
 /* ---------- lo que está en marcha, en pastillas (derecha) ----------
    Antes aquí había una columna de tarjetas de obra, una por edificio, y se
    comía media pantalla. Ahora es un botón de constructores (con los libres a
    la vista) y, como mucho, dos pastillas más: tropa y ciencia. El detalle de
    quién hace qué se abre al tocar, que es donde de verdad se mira. */
-.hud-tareas {
+/* Constructores: una pastilla más de la barra (🔨 2/3). En verde cuando hay
+   alguno sin faena, que es cuando hay que hacerle caso. */
+.pastilla-obras.libre > b { color: var(--verde-oscuro); }
+.pastilla-obras.libre > i { filter: drop-shadow(0 0 3px rgba(111, 184, 92, .9)); }
+.pastilla-obras > small { display: none; }
+
+/* ---------- botones de lo que está en marcha ----------
+   Explorador, tropa y ciencia: botones REDONDOS pegados al borde derecho, justo
+   debajo de la barra. Antes el explorador era una tira entera encima del menú
+   (queja del dueño). Solo aparecen cuando hay algo que mirar. */
+.hud-minis {
   position: fixed; z-index: 15;
-  top: calc(var(--seg-arriba) + var(--alto-top) + 4px); right: calc(var(--seg-der) + 8px);
+  top: calc(var(--alto-top) + 6px);     /* --alto-top ya lleva dentro la alarma */
+  right: calc(var(--seg-der) + 6px);
   display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  pointer-events: none;
+  transition: top var(--medio) var(--curva);
 }
-/* con alarma en pantalla, las pastillas se apartan: nada debe tapar el aviso */
-#hud.alarmado .hud-tareas { top: calc(var(--seg-arriba) + var(--alto-top) + 56px); }
+.hud-minis > * { pointer-events: auto; }
 .mini {
-  display: inline-flex; align-items: center; gap: 6px;
-  min-height: 48px; padding: 0 12px;
-  font-family: inherit; font-size: .82em; font-weight: 800; line-height: 1.1;
+  position: relative; flex: none;
+  width: 48px; min-width: 48px; min-height: 48px; padding: 2px;
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 0;
+  font-family: inherit; font-size: .8em; font-weight: 800; line-height: 1.1;
   color: var(--tinta); white-space: nowrap;
   background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
   border: 3px solid var(--madera); border-radius: var(--r-max);
   box-shadow: 0 4px 0 var(--madera-oscura), var(--brillo);
 }
 .mini:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--madera-oscura); }
-.mini > i { flex: none; font-style: normal; font-size: 1.3em; }
-.mini > b { font-variant-numeric: tabular-nums; }
-.mini > small { font-size: .82em; font-weight: 800; color: var(--tinta-suave); font-variant-numeric: tabular-nums; }
-/* constructores libres = hay que darles faena: se pinta en verde y llama */
-.mini.libre { border-color: var(--verde-oscuro); background-image: linear-gradient(180deg, #eaf8e2, #cfeec2); box-shadow: 0 4px 0 var(--verde-oscuro), var(--brillo); }
-.mini.libre > b { color: var(--verde-oscuro); }
+.mini > i { flex: none; font-style: normal; font-size: 1.3em; line-height: 1; }
+.mini > b { flex: none; font-size: .62em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.mini > small { display: none; }
+.mini.sin-cuenta > i { font-size: 1.5em; }
+/* el de aldeanos es más ancho: «120/120» son siete caracteres y tienen que
+   caber enteros dentro del botón, sin recortes ni globos encima */
+.mini-ancho { width: 68px; min-width: 68px; padding: 2px 3px; border-radius: var(--r-g); }
+.mini-ancho > b { font-size: .6em; letter-spacing: -.02em; }
+/* los parados, globo rojo en la esquina del botón: nunca encima de la cifra */
+.mini .parados { position: absolute; top: -6px; right: -4px; }
 
 /* ---------- hoja de constructores ---------- */
 .constructor-libre {
@@ -195,12 +231,14 @@ button.pastilla:active { transform: translateY(2px); box-shadow: none; }
 
 
 /* ---------- alarma de ataque ----------
-   Una TIRA estrecha pegada bajo la barra de recursos, no un cartel. Cuenta
+   Una TIRA estrecha pegada al BORDE DE ARRIBA, nunca un cartel en medio de la
+   pantalla (queja del dueño: tapaba la aldea). Cuando sale, las dos esquinas
+   bajan un escalón (--alto-alarma) y no se solapa nada. Cuenta
    atrás en pequeño y, debajo, en una línea, qué se puede hacer: el jugador
    se quedaba mirando el aviso sin saber qué tocar. Toda la tira es botón. */
 .hud-alarma {
   position: fixed; z-index: 40;
-  top: calc(var(--seg-arriba) + var(--alto-top) + 4px); left: calc(var(--seg-izq) + 8px); right: calc(var(--seg-der) + 8px);
+  top: calc(var(--seg-arriba) + 4px); left: calc(var(--seg-izq) + 8px); right: calc(var(--seg-der) + 8px);
   display: flex; align-items: center; gap: 9px;
   min-height: 46px; padding: 5px 10px;
   font-family: inherit; text-align: left;
@@ -229,43 +267,46 @@ button.pastilla:active { transform: translateY(2px); box-shadow: none; }
 /* ---------- botonera y consejo de abajo ---------- */
 .hud-abajo {
   position: fixed; z-index: 20; left: 0; right: 0; bottom: 0;
-  display: flex; flex-direction: column; gap: 5px;
-  padding: 0 calc(var(--seg-der) + 8px) calc(var(--seg-abajo) + 7px) calc(var(--seg-izq) + 8px);
+  display: flex; flex-direction: column; gap: 4px;
+  /* pegada al borde de abajo, como pidió el dueño, respetando el hueco del
+     iPhone (env(safe-area-inset-bottom) llega aquí como --seg-abajo) */
+  padding: 0 calc(var(--seg-der) + 8px) calc(var(--seg-abajo) + 2px) calc(var(--seg-izq) + 8px);
   pointer-events: none;
 }
 .hud-abajo > * { pointer-events: auto; }
 
-/* El mayordomo no es una tira gris: es una tarjeta con su botón de "vamos". */
+/* El mayordomo: UNA línea y 52 px de alto. Antes eran dos líneas y una tarjeta
+   gorda encima del menú, y se comía la aldea (queja del dueño). */
 .hud-consejo {
-  display: flex; align-items: center; gap: 9px;
-  padding: 3px 3px 3px 11px;
+  display: flex; align-items: center; gap: 8px;
+  min-height: 52px; padding: 2px 2px 2px 10px;
   background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
-  border: 3px solid var(--madera); border-radius: var(--r-g);
+  border: 3px solid var(--madera); border-radius: var(--r-max);
   box-shadow: var(--sombra-panel);
 }
-.hud-consejo > i { flex: none; font-style: normal; font-size: 1.5em; line-height: 1; }
+.hud-consejo > i { flex: none; font-style: normal; font-size: 1.3em; line-height: 1; }
 .hud-consejo > span {
   flex: 1; min-width: 0;
-  font-size: .78em; font-weight: 700; line-height: 1.22;
-  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  font-size: .74em; font-weight: 700; line-height: 1.2;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
-.consejo-ir { min-height: 48px; padding: 0 12px; font-size: .82em; white-space: nowrap; }
+.consejo-ir { flex: none; min-height: 44px; padding: 0 12px; font-size: .8em; white-space: nowrap; }
 .hud-consejo.urgente { border-color: var(--rojo); box-shadow: var(--sombra-panel), 0 0 0 3px rgba(179, 51, 43, .35); }
 .hud-consejo.urgente > i { animation: latido 1.4s var(--curva) infinite; }
 
-.hud-botonera { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.hud-botonera { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
 .hud-boton {
   position: relative;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-  min-height: 54px; padding: 4px 2px;
+  min-height: 54px; padding: 4px 1px;
   font-family: inherit; font-weight: 800; color: var(--tinta);
   background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
   border: 3px solid var(--madera); border-radius: var(--r-m);
   box-shadow: 0 4px 0 var(--madera-oscura), var(--brillo);
 }
 .hud-boton:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--madera-oscura); }
-.hud-boton i { font-style: normal; font-size: 1.45em; line-height: 1; }
-.hud-boton small { font-size: .66em; letter-spacing: .01em; }
+.hud-boton i { font-style: normal; font-size: 1.35em; line-height: 1; }
+.hud-boton small { font-size: .6em; letter-spacing: -.01em; }
 
 /* ---------- panel de producción ---------- */
 /* los cuatro recursos tienen que verse a la vez: nada de barrer de lado */
@@ -278,9 +319,10 @@ button.pastilla:active { transform: translateY(2px); box-shadow: none; }
 .eco-cab small { font-size: .78em; font-weight: 700; color: var(--tinta-suave); font-variant-numeric: tabular-nums; }
 .eco-seccion { margin: 2px 0 -2px; font-size: .78em; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--tinta-suave); }
 .eco-lista { border: 2px solid rgba(90, 58, 34, .28); border-radius: var(--r-m); background: rgba(255, 255, 255, .45); overflow: hidden; }
-.eco-pie { display: flex; align-items: center; gap: 8px; }
-.eco-pie .crece { font-size: .82em; font-weight: 800; line-height: 1.15; }
-.eco-pie .btn { flex: none; }
+.eco-pie { display: flex; align-items: center; gap: 6px; }
+.eco-pie .crece { font-size: .74em; font-weight: 800; line-height: 1.2; }
+.eco-pie .btn { flex: none; padding: 0 10px; font-size: .9em; }
+.eco-pie .btn .pequeño { margin-left: 4px; font-weight: 800; }
 
 /* ---------- ficha de edificio ---------- */
 .ficha-cab { display: flex; align-items: center; gap: 12px; }
@@ -294,15 +336,35 @@ button.pastilla:active { transform: translateY(2px); box-shadow: none; }
 /* una mejora que aún no se puede pagar TIENE que dejar leer su coste */
 .ficha-acciones .btn[disabled] { filter: grayscale(.5); opacity: .7; }
 
+/* ---------- gestionar el edificio desde su propia ficha ---------- */
+.ficha-seccion { margin: 4px 0 -2px; font-size: .8em; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--tinta-suave); }
+.tropa-fila {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 9px;
+  background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
+  border: 2px solid var(--madera); border-radius: var(--r-m);
+}
+.tropa-fila > i { flex: none; font-style: normal; font-size: 1.7em; line-height: 1; width: 30px; text-align: center; }
+.tropa-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tropa-txt b { font-size: .92em; }
+.tropa-txt .coste { font-size: .78em; }
+.tropa-txt small { font-size: .74em; font-weight: 700; color: var(--tinta-suave); line-height: 1.2; }
+.tropa-botones { flex: none; display: flex; gap: 6px; }
+.tropa-botones .btn { min-width: 48px; min-height: 48px; padding: 0 8px; font-size: .86em; font-variant-numeric: tabular-nums; }
+.tropa-cola { display: flex; flex-wrap: wrap; gap: 6px; }
+.tropa-cola .chip { font-variant-numeric: tabular-nums; }
+.ficha-nota { font-size: .78em; font-weight: 700; color: var(--tinta-suave); line-height: 1.25; }
+
 /* pantallas estrechas: lo primero que sobra es el adorno, nunca el dato */
 @media (max-width: 365px) {
-  .pastilla { padding: 4px 8px; font-size: .78em; }
-  .res { padding: 4px 5px 5px; }
+  .pastilla { padding: 2px 4px; font-size: .68em; }
+  .res-cab > b { font-size: .72em; }
+  .hud-boton small { font-size: .56em; }
 }
 /* pantallas muy cortas: el HUD se aprieta antes de tapar el juego */
 @media (max-height: 680px) {
   .hud-boton { min-height: 52px; }
-  .hud-obras { max-height: 38vh; }
+  .hud-consejo { min-height: 48px; }
   .hud-consejo > span { -webkit-line-clamp: 1; }
 }
 `
@@ -323,15 +385,16 @@ function inyectarEstilos () {
 const animados = new Map()   // nodo -> { actual, objetivo }
 let animando = false
 
-function fijarNumero (nodo, objetivo, { instante = false } = {}) {
+function fijarNumero (nodo, objetivo, { instante = false, formato = formatoNumero } = {}) {
   if (!nodo) return
   let estado = animados.get(nodo)
-  if (!estado) { estado = { actual: objetivo, objetivo }; nodo.textContent = formatoNumero(objetivo) }
+  if (!estado) { estado = { actual: objetivo, objetivo, formato }; nodo.textContent = formato(objetivo) }
   estado.objetivo = objetivo
+  estado.formato = formato
   // saltos absurdos (cargar otra partida) no se animan: se plantan
   if (instante || Math.abs(estado.objetivo - estado.actual) > 100000) {
     estado.actual = objetivo
-    nodo.textContent = formatoNumero(objetivo)
+    nodo.textContent = formato(objetivo)
   }
   animados.set(nodo, estado)
   if (!animando) { animando = true; requestAnimationFrame(pasoAnimacion) }
@@ -341,17 +404,30 @@ function pasoAnimacion () {
   let quedan = false
   for (const [nodo, e] of animados) {
     if (!nodo.isConnected) { animados.delete(nodo); continue }
+    const fmt = e.formato || formatoNumero
     const dif = e.objetivo - e.actual
     if (Math.abs(dif) < 0.6) {
-      if (e.actual !== e.objetivo) { e.actual = e.objetivo; nodo.textContent = formatoNumero(e.objetivo) }
+      if (e.actual !== e.objetivo) { e.actual = e.objetivo; nodo.textContent = fmt(e.objetivo) }
       continue
     }
     e.actual += dif * 0.22
-    nodo.textContent = formatoNumero(Math.round(e.actual))
+    nodo.textContent = fmt(Math.round(e.actual))
     quedan = true
   }
   animando = quedan
   if (quedan) requestAnimationFrame(pasoAnimacion)
+}
+
+/**
+ * Cifra larga pero legible: hasta 99.999 se escribe entera con el punto de los
+ * miles (99.999 gemas caben de sobra en su pastilla); de ahí para arriba se
+ * abrevia (120,4K). Sin esto, `formatoNumero` convertía 99.999 en «100,0K»,
+ * que además de feo mentía.
+ */
+const MILES = new Intl.NumberFormat('es-ES')
+function numeroLargo (n, limite = 100000) {
+  const v = Math.floor(Number(n) || 0)
+  return Math.abs(v) < limite ? MILES.format(v) : formatoNumero(v)
 }
 
 /** Texto corto y siempre con signo: "+720/h", "−90/h", "0/h". */
@@ -513,38 +589,50 @@ function refrescoLigero () {
   vueltas++
   pintarObras()
   pintarAlarma()
-  if (vueltas % 4 === 0) { pintarRecursos(); pintarBadges() }        // 1 vez/s
+  if (vueltas % 4 === 0) { pintarRecursos(); pintarBadges(); medirTop() }   // 1 vez/s
   if (vueltas % 12 === 0) pintarConsejo()                            // 1 vez cada 3 s
   for (const f of refrescadores) { try { f() } catch (err) { console.warn('[hud] refresco', err) } }
 }
 
-/** La altura real de la barra de arriba manda sobre lo que cuelga debajo:
- *  así las obras y los avisos nunca se solapan con los recursos. */
+/** Lo que ocupan las dos esquinas de arriba manda sobre lo que cuelga debajo
+ *  (la tira del mundo, por ejemplo): así nada se solapa con el HUD. */
 function medirTop () {
-  const alto = Math.round(nodos.top?.getBoundingClientRect().height || 112)
+  const alto = Math.round(nodos.barra?.getBoundingClientRect().bottom || 58)
   raiz().style.setProperty('--alto-top', `${alto}px`)
 }
 
 /* ---------------------------------------------------------------- arriba --- */
 
+/**
+ * UNA sola barra arriba con todo lo que se mira de reojo: los cuatro recursos
+ * a la izquierda y, a la derecha, gente, gemas, nivel y constructores. Nada de
+ * dos filas ni de pastillas gordas (orden del dueño): una línea de 48 px.
+ *
+ * Lo que NO cabe con dignidad en 390 px se ha ido a su sitio natural:
+ *   - el botón ＋ de contratar aldeanos → dentro de la hoja de aldeanos, que se
+ *     abre tocando la pastilla de gente (ahí se ve además cuánto cuesta);
+ *   - los ajustes ⚙️ → a la botonera de abajo, con el mundo y los encargos,
+ *     que es donde el dueño pidió que vivieran.
+ */
 function montarArriba () {
-  const res = el('div', { clase: 'hud-res' })
   nodos.recursos = {}
+  const barra = el('div', { clase: 'hud-barra' })
+
   for (const tipo of CONFIG.RECURSOS) {
     const cifra = el('b', { clase: 'num', texto: '0' })
     const tope = el('small', { texto: '/0' })
-    const barra = barraProgreso(0, { clase: 'fina quieta' })
+    const barraLlenado = barraProgreso(0, { clase: 'fina quieta' })
     const ritmo = el('div', { clase: 'res-ritmo ritmo ritmo-cero', texto: '0/h' })
     const pastilla = el('button', {
       clase: 'res', type: 'button', 'aria-label': `${NOMBRE_RECURSO[tipo]}: ver producción`,
       onclick: () => abrirEconomia(tipo)
     }, [
       el('div', { clase: 'res-cab' }, [el('i', { texto: ICONO[tipo] }), cifra, tope]),
-      barra.nodo,
+      barraLlenado.nodo,
       ritmo
     ])
-    nodos.recursos[tipo] = { pastilla, cifra, tope, barra, ritmo }
-    res.appendChild(pastilla)
+    nodos.recursos[tipo] = { pastilla, cifra, tope, barra: barraLlenado, ritmo }
+    barra.appendChild(pastilla)
   }
 
   nodos.gemas = el('b', { texto: '0' })
@@ -554,36 +642,24 @@ function montarArriba () {
   // los parados van EN LÍNEA, no como globo encima: un globo taparía la cifra
   nodos.parados = el('em', { clase: 'parados', texto: '0', estilo: { display: 'none' } })
 
-  nodos.botonGente = el('button', {
-    clase: 'pastilla', type: 'button', 'aria-label': 'Aldeanos y producción',
-    onclick: () => abrirEconomia(null)
-  }, [el('i', { texto: ICONO.aldeano }), nodos.poblacion, nodos.parados])
+  nodos.constructores = el('button', {
+    clase: 'pastilla pastilla-obras', type: 'button', 'aria-label': 'Constructores',
+    onclick: abrirConstructores
+  }, [el('i', { texto: '🔨' }), el('b', { texto: '0/1' }), el('small')])
+  nodos.constructores._cifra = nodos.constructores.querySelector('b')
+  nodos.constructores._nota = nodos.constructores.querySelector('small')
 
-  nodos.botonContratar = el('button', {
-    clase: 'btn btn-oro hud-mas', type: 'button', texto: '＋', 'aria-label': 'Contratar aldeano',
-    onclick: contratarAldeano
-  })
-
-  nodos.botonVista = el('button', {
-    clase: 'btn btn-piedra hud-redondo', type: 'button', 'aria-label': 'Cambiar de vista',
-    texto: '🗺️', onclick: alternarVista
-  })
-
-  const estado = el('div', { clase: 'hud-estado' }, [
-    nodos.botonGente,
-    nodos.botonContratar,
-    el('span', { clase: 'pastilla' }, [el('i', { texto: ICONO.gemas }), nodos.gemas]),
-    el('span', { clase: 'pastilla', 'aria-label': 'Nivel' }, [nodos.xp, el('i', { texto: '⭐' }), nodos.nivel]),
-    el('span', { clase: 'crece' }),
-    nodos.botonVista,
+  barra.append(
     el('button', {
-      clase: 'btn btn-piedra hud-redondo', type: 'button', 'aria-label': 'Ajustes',
-      texto: '⚙️', onclick: abrirAjustes
-    })
-  ])
+      clase: 'pastilla pastilla-gemas', type: 'button', 'aria-label': 'Gemas: acelerar obras',
+      onclick: abrirConstructores
+    }, [el('i', { texto: ICONO.gemas }), nodos.gemas]),
+    el('span', { clase: 'pastilla pastilla-nivel', 'aria-label': 'Nivel' }, [nodos.xp, el('i', { texto: '⭐' }), nodos.nivel]),
+    nodos.constructores
+  )
 
-  nodos.top = el('div', { clase: 'hud-top' }, [res, estado])
-  raiz().appendChild(nodos.top)
+  nodos.barra = barra
+  raiz().appendChild(barra)
 }
 
 function contratarAldeano () {
@@ -618,10 +694,14 @@ function pintarRecursos (instante = false) {
     n.pastilla.classList.toggle('lleno', e.lleno)
     n.pastilla.classList.toggle('casi', !e.lleno && e.pct >= 90)
     n.barra.nodo.classList.toggle('mal', e.pct >= 90)
+    // el tope ya no se escribe en la barra (no cabe): va aquí, donde además lo
+    // lee el lector de pantalla, y en el panel que se abre al tocar
+    n.pastilla.setAttribute('aria-label',
+      `${NOMBRE_RECURSO[tipo]}: ${formatoNumero(e.cantidad)} de ${formatoNumero(e.tope)}, ${porHora(e.ritmo)}. Ver producción`)
   }
 
   const s = game.state
-  fijarNumero(nodos.gemas, Math.floor(s.jugador?.gemas || 0), { instante })
+  fijarNumero(nodos.gemas, Math.floor(s.jugador?.gemas || 0), { instante, formato: numeroLargo })
 
   const nv = pedir('ciencia', 'nivelJugador', null)
   const nivel = nv?.nivel ?? s.jugador?.nivel ?? 1
@@ -637,13 +717,7 @@ function pintarRecursos (instante = false) {
   if (nodos.poblacion.textContent !== txt) nodos.poblacion.textContent = txt
   pintarParados(g.parados)
   nodos.botonGente.setAttribute('aria-label',
-    `${g.actual} de ${g.maxima} aldeanos${g.parados ? `, ${g.parados} sin faena` : ''}. Ver producción`)
-  const sitio = g.maxima > 0 && g.actual < g.maxima
-  const paga = (s.recursos?.comida || 0) >= (g.coste || 0)
-  nodos.botonContratar.style.display = g.maxima > 0 ? '' : 'none'
-  // no se desactiva del todo a propósito: tocarlo explica por qué no se puede
-  nodos.botonContratar.classList.toggle('flojo', !(sitio && paga))
-  nodos.botonContratar.setAttribute('aria-label', `Contratar aldeano · ${ICONO.comida} ${formatoNumero(g.coste || 0)}`)
+    `${g.actual} de ${g.maxima} aldeanos${g.parados ? `, ${g.parados} sin faena` : ''}. Ver producción y contratar`)
 }
 
 /** Los aldeanos sin faena: en rojo y con su siesta, para que se entiendan solos. */
@@ -651,20 +725,52 @@ function pintarParados (n) {
   const nodo = nodos.parados
   if (!nodo) return
   if (!n) { nodo.style.display = 'none'; return }
-  const texto = n > 9 ? '9+' : String(n)   // sin emoji: 💤 se pinta enorme y rompe la cápsula
+  // hasta 99 va entero: un globo de dos cifras tiene que caber sin montarse
+  const texto = n > 99 ? '99+' : String(n)   // sin emoji: 💤 se pinta enorme y rompe la cápsula
   if (nodo.style.display === 'none') { nodo.style.display = ''; latir(nodo) }
   if (nodo.textContent !== texto) { nodo.textContent = texto; latir(nodo) }
 }
 
-function alternarVista () {
-  vistaActual = vistaActual === 'aldea' ? 'mundo' : 'aldea'
-  events.emit(EV.VISTA_CAMBIADA, { vista: vistaActual })
+/**
+ * Un único mando para el mundo: el botón 🗺️ de la botonera de abajo. Lleva la
+ * cámara al valle y abre su panel; el 🏰 de arriba a la derecha (que solo
+ * aparece estando fuera) trae de vuelta. Antes había dos botones de mundo.
+ */
+function irAlMundo (ir = true, abrirPanel = true) {
+  const vista = ir ? 'mundo' : 'aldea'
+  if (vista !== vistaActual) {
+    vistaActual = vista
+    events.emit(EV.VISTA_CAMBIADA, { vista })
+  }
+  pintarVista()
+  if (ir && abrirPanel) events.emit(EV.UI_PANEL, { panel: 'mundo' })
 }
 
 function pintarVista () {
-  if (!nodos.botonVista) return
-  nodos.botonVista.textContent = vistaActual === 'aldea' ? '🗺️' : '🏰'
-  nodos.botonVista.setAttribute('aria-label', vistaActual === 'aldea' ? 'Ver el mundo' : 'Volver a la aldea')
+  if (nodos.botonVolver) nodos.botonVolver.style.display = vistaActual === 'mundo' ? '' : 'none'
+}
+
+/** Los exploradores: cuántos hay fuera, cuánto falta y si alguno ya ha vuelto. */
+function exploracion () {
+  const s = game.state
+  const ahora = Date.now()
+  const camp = (s.buildings || []).find(b => b && b.tipo === 'campamento_explorador' && !b.enObra)
+  const fuera = (s.expediciones || []).filter(Boolean)
+  const vueltos = fuera.filter(e => e.vuelve <= ahora).length
+  const proxima = fuera.filter(e => e.vuelve > ahora).sort((a, b) => a.vuelve - b.vuelve)[0]
+  const def = camp ? defEdificio('campamento_explorador') : null
+  return {
+    hayCampamento: !!camp,
+    plazas: def?.exploradores ? def.exploradores(camp.nivel || 1) : 0,
+    fuera: fuera.length,
+    vueltos,
+    restante: proxima ? Math.max(0, (proxima.vuelve - ahora) / 1000) : 0
+  }
+}
+
+/** El botón del caballo abre el mundo, que es donde se mandan expediciones. */
+function abrirExplorador () {
+  irAlMundo(true)
 }
 
 /* ===========================================================================
@@ -697,12 +803,19 @@ function abrirEconomia (recurso = null) {
     (id) => { activo = id; firma = null; pintar() }
   )
 
-  // pie fijo: la gente y el botón de repartir se ven desde cualquier pestaña
+  // pie fijo: la gente, contratar y repartir, desde cualquier pestaña. El botón
+  // de contratar vive AQUÍ desde que la barra de arriba es una sola línea: aquí
+  // además se lee lo que cuesta el siguiente aldeano, que antes no se veía.
   const pieTexto = el('div', { clase: 'crece' })
+  const botonContratar = el('button', {
+    clase: 'btn btn-oro', type: 'button',
+    onclick: () => { contratarAldeano(); firma = null; pintar() }
+  })
   const pie = el('div', { clase: 'eco-pie' }, [
     pieTexto,
+    botonContratar,
     el('button', {
-      clase: 'btn btn-oro', type: 'button', texto: '🧭 Repartir solos',
+      clase: 'btn btn-piedra', type: 'button', texto: '🧭 Repartir',
       onclick: () => { pedir('aldeanos', 'asignarAutomatico', 0); firma = null; pintar(); pintarRecursos() }
     })
   ])
@@ -736,6 +849,9 @@ function abrirEconomia (recurso = null) {
     } else {
       detalle._tic?.(e)
     }
+    botonContratar.innerHTML = `＋ Aldeano <span class="pequeño">${ICONO.comida} ${formatoNumero(g.coste || 0)}</span>`
+    botonContratar.disabled = !(g.maxima > 0 && g.actual < g.maxima) ||
+      (game.state.recursos?.comida || 0) < (g.coste || 0)
     pieTexto.innerHTML = ''
     pieTexto.append(
       el('div', { texto: `${ICONO.aldeano} ${g.actual} de ${g.maxima} aldeanos` }),
@@ -934,26 +1050,53 @@ function constructores () {
   }
 }
 
-/** Pastilla compacta de la columna derecha. Devuelve el nodo con sus piezas. */
+/** Botón redondo del borde derecho. Devuelve el nodo con sus piezas. */
 function pastillaMini (icono, alTocar, etiqueta) {
   const cifra = el('b', { texto: '' })
   const nota = el('small', { texto: '' })
+  const globo = el('span', { clase: 'badge', texto: '0', estilo: { display: 'none' } })
   const nodo = el('button', {
     clase: 'mini', type: 'button', 'aria-label': etiqueta, onclick: alTocar
-  }, [el('i', { texto: icono }), cifra, nota])
+  }, [el('i', { texto: icono }), cifra, nota, globo])
   nodo._cifra = cifra
   nodo._nota = nota
+  nodo._globo = globo
   return nodo
 }
 
+/**
+ * Las pastillas de "qué está en marcha" viven en la MISMA esquina de arriba a
+ * la derecha, debajo de gemas y nivel: constructores, ajustes y, en redondo,
+ * el explorador, la tropa y la ciencia. Ninguna flota ya sobre la aldea.
+ */
 function montarObras () {
-  nodos.constructores = pastillaMini('🔨', abrirConstructores, 'Constructores')
+  // Los aldeanos: botón del borde derecho, debajo de la barra. No caben en la
+  // línea de arriba con las cifras largas (128K de piedra + 99.999 gemas se la
+  // comen entera), y aquí se ven siempre, con los parados en su globo rojo.
+  nodos.botonGente = el('button', {
+    clase: 'mini mini-ancho', type: 'button', 'aria-label': 'Aldeanos y producción',
+    onclick: () => abrirEconomia(null)
+  }, [el('i', { texto: ICONO.aldeano }), nodos.poblacion, nodos.parados])
+  nodos.botonGente._globo = nodos.parados
+
+  nodos.miniExplorador = pastillaMini('🐎', abrirExplorador, 'Exploradores')
   nodos.miniTropa = pastillaMini('⚔️', () => events.emit(EV.UI_PANEL, { panel: 'ejercito' }), 'Tropa en entrenamiento')
   nodos.miniCiencia = pastillaMini('📜', () => events.emit(EV.UI_PANEL, { panel: 'investigar' }), 'Investigación en curso')
+  nodos.miniExplorador.style.display = 'none'
   nodos.miniTropa.style.display = 'none'
   nodos.miniCiencia.style.display = 'none'
-  nodos.obras = el('div', { clase: 'hud-tareas' }, [nodos.constructores, nodos.miniTropa, nodos.miniCiencia])
-  raiz().appendChild(nodos.obras)
+
+  // el botón de volver a la aldea solo existe mientras se mira el mundo: en la
+  // aldea sobraba y era el «segundo botón de mundo» del que se quejó el dueño
+  nodos.botonVolver = el('button', {
+    clase: 'btn btn-oro hud-redondo', type: 'button', 'aria-label': 'Volver a la aldea',
+    texto: '🏰', estilo: { display: 'none' }, onclick: () => irAlMundo(false)
+  })
+
+  nodos.minis = el('div', { clase: 'hud-minis' }, [
+    nodos.botonGente, nodos.botonVolver, nodos.miniExplorador, nodos.miniTropa, nodos.miniCiencia
+  ])
+  raiz().appendChild(nodos.minis)
 }
 
 /** Lo que entrena el cuartel ahora mismo, o null. */
@@ -1029,32 +1172,49 @@ function sincronizarTareas (cont, tareas, extra = null) {
 }
 
 /** Refresca una pastilla mini sin reconstruirla (el dedo puede estar encima). */
-function fijarMini (nodo, visible, cifra, nota, etiqueta) {
+function fijarMini (nodo, visible, cifra, nota, etiqueta, globo = 0) {
   if (!nodo) return
   nodo.style.display = visible ? '' : 'none'
   if (!visible) return
   if (nodo._cifra.textContent !== cifra) nodo._cifra.textContent = cifra
   if (nodo._nota.textContent !== nota) nodo._nota.textContent = nota
   if (etiqueta) nodo.setAttribute('aria-label', etiqueta)
+  // sin cifra, el icono manda y se pinta más grande: el botón no queda cojo
+  nodo.classList.toggle('sin-cuenta', !cifra)
+  fijarBadgeNodo(nodo._globo, globo)
 }
 
 function pintarObras () {
-  if (!nodos.obras) return
+  if (!nodos.constructores) return
 
   const c = constructores()
   const proxima = c.obras[0]
   const enCola = c.espera.length ? ` · ${c.espera.length} en cola` : ''
+  // la cifra es siempre «ocupados/plazas»: es lo que pidió el dueño (🔨 2/3) y
+  // así el ancho no cambia cuando un constructor se queda libre
   fijarMini(
     nodos.constructores, true,
-    c.libres > 0 ? `${c.libres} libre${c.libres === 1 ? '' : 's'}` : `${c.ocupados}/${c.plazas}`,
-    c.libres > 0 ? `de ${c.plazas}` : (proxima ? formatoTiempo(proxima.restante) : ''),
-    `Constructores: ${c.ocupados} de ${c.plazas} trabajando${enCola}. Ver en qué anda cada uno`
+    `${c.ocupados}/${c.plazas}`,
+    proxima ? formatoTiempo(proxima.restante) : '',
+    `Constructores: ${c.ocupados} de ${c.plazas} trabajando${enCola}. Ver en qué anda cada uno`,
+    c.espera.length
   )
   nodos.constructores.classList.toggle('libre', c.libres > 0)
 
+  const ex = exploracion()
+  fijarMini(
+    nodos.miniExplorador, ex.hayCampamento,
+    ex.fuera && ex.restante > 0 ? formatoTiempo(ex.restante) : '',
+    '',
+    ex.vueltos
+      ? `${ex.vueltos} explorador${ex.vueltos === 1 ? '' : 'es'} de vuelta. Ver el mundo`
+      : (ex.fuera ? `${ex.fuera} explorando. Ver el mundo` : 'Mandar un explorador'),
+    ex.vueltos
+  )
+
   const t = tropaEnCola()
-  fijarMini(nodos.miniTropa, !!t, t ? `×${t.cuantos}` : '', t ? formatoTiempo(t.restante) : '',
-    t ? `${t.cuantos} en el patio de armas. Ver el ejército` : '')
+  fijarMini(nodos.miniTropa, !!t, t ? formatoTiempo(t.restante) : '', '',
+    t ? `${t.cuantos} en el patio de armas. Ver el ejército` : '', t ? t.cuantos : 0)
 
   const ci = cienciaEnCurso()
   fijarMini(nodos.miniCiencia, !!ci, ci ? formatoTiempo(ci.restante) : '', '',
@@ -1192,7 +1352,10 @@ const BOTONES = [
   { panel: 'construir', icono: '🔨', texto: 'Construir' },
   { panel: 'ejercito', icono: '⚔️', texto: 'Ejército' },
   { panel: 'mundo', icono: '🗺️', texto: 'Mundo' },
-  { panel: 'encargos', icono: '📜', texto: 'Encargos' }
+  { panel: 'encargos', icono: '📜', texto: 'Encargos' },
+  // los ajustes bajan aquí: el dueño los quiso junto al mundo y el mapa, y
+  // arriba no caben si todo tiene que ir en una sola línea
+  { panel: 'ajustes', icono: '⚙️', texto: 'Ajustes' }
 ]
 
 function montarAbajo () {
@@ -1208,7 +1371,13 @@ function montarAbajo () {
     nodos.badges[b.panel] = globo
     botonera.appendChild(el('button', {
       clase: 'hud-boton', type: 'button', 'aria-label': b.texto,
-      onclick: () => events.emit(EV.UI_PANEL, { panel: b.panel })
+      // «Mundo» es el ÚNICO botón de mundo que queda: lleva la cámara al valle
+      // y abre su panel de una vez (antes había otro redondo arriba)
+      onclick: () => {
+        if (b.panel === 'mundo') irAlMundo(true)
+        else if (b.panel === 'ajustes') abrirAjustes()
+        else events.emit(EV.UI_PANEL, { panel: b.panel })
+      }
     }, [
       el('i', { texto: b.icono }),
       el('small', { texto: b.texto }),
@@ -1335,7 +1504,7 @@ const fijarBadge = (panel, n) => fijarBadgeNodo(nodos.badges?.[panel], n)
 function fijarBadgeNodo (globo, n) {
   if (!globo) return
   if (!n) { globo.style.display = 'none'; return }
-  const texto = n > 9 ? '9+' : String(n)
+  const texto = n > 99 ? '99+' : String(n)
   if (globo.style.display === 'none') { globo.style.display = ''; latir(globo) }
   if (globo.textContent !== texto) { globo.textContent = texto; latir(globo) }
 }
@@ -1386,16 +1555,33 @@ function abrirFicha (id) {
   pintar()
   refrescadores.add(pintar)
   fichaAbierta = { id, panel }
-  events.emit(EV.CAMERA_FOCUS, { x: b.x, z: b.z })
+  // NO se mueve la cámara al abrir la ficha: el jugador acaba de tocar ese
+  // edificio, o sea que ya lo está mirando. Moverla daba la sensación de
+  // "entrar" en el edificio y rompía la fluidez (queja del dueño). Solo se
+  // enfoca cuando la ficha se abre desde una lista, y eso lo hace quien la abre.
 }
 
 /** Lo que obliga a repintar la ficha entera. El tiempo no está: ese va aparte. */
 function firmaDe (b) {
   const puede = pedir('edificios', 'puedeMejorar', { ok: false, motivo: '' }, b.id)
+  const d = defEdificio(b.tipo)
+  const s = game.state
+  // de lo que se gestiona aquí dentro solo entra lo que CAMBIA la ficha: si una
+  // tropa se puede pagar o no (un booleano, no el montón, que baila cada tick),
+  // cuántos hay en la cola y cuántos heridos. Así no se rehace sin parar.
+  const gestion = []
+  for (const tipo of d?.entrena || []) {
+    gestion.push(pedir('ejercito', 'puedeEntrenar', { ok: false }, tipo, 1).ok ? 1 : 0)
+  }
+  if (b.tipo === 'universidad') {
+    gestion.push(s.investigacion?.id || '-', (pedir('ciencia', 'disponibles', []) || []).filter(t => t.asequible).length)
+  }
+  if (b.tipo === 'monasterio') gestion.push(pedir('ejercito', 'tiempoRecuperacion', { heridos: 0 }).heridos)
+  if (b.tipo === 'campamento_explorador') gestion.push((s.expediciones || []).length)
   return [
     b.nivel, !!b.enObra, !!b.mejorando, !!b.arruinado, Math.round(b.hp || 0),
     (b.trabajadores || []).length, (game.state.villagers || []).filter(v => !v.buildingId).length,
-    puede.ok, puede.motivo
+    puede.ok, puede.motivo, (s.ejercito?.cola || []).length, gestion.join(',')
   ].join('|')
 }
 
@@ -1519,6 +1705,10 @@ function contenidoFicha (b, panel) {
     ]))
   }
 
+  // --- gestionar el edificio DESDE AQUÍ: entrenar, investigar, curar, cambiar,
+  //     explorar. Lo que hace cada edificio se hace en su ficha, sin dar vueltas.
+  if (!enObra) seccionesDeGestion(caja, b, d, nivel, panel)
+
   // --- acciones ---
   const acciones = el('div', { clase: 'ficha-acciones' })
   const puede = pedir('edificios', 'puedeMejorar', { ok: false, motivo: 'No se puede mejorar' }, b.id)
@@ -1568,6 +1758,265 @@ function contenidoFicha (b, panel) {
 
   caja.appendChild(acciones)
   return caja
+}
+
+/* ---------------------------------------------------------------------------
+   Gestionar el edificio desde su propia ficha
+   Un cuartel entrena, la universidad investiga, el monasterio cura, el mercado
+   cambia y el campamento manda gente al valle. Todo eso se hace AQUÍ, no en
+   otro panel: el jugador toca el edificio y hace lo suyo. Las APIs son las de
+   sim/, cargadas con el `import()` tolerante de siempre.
+   --------------------------------------------------------------------------- */
+
+/** Reúne los relojes de las secciones de gestión en el `_tic` de la ficha. */
+function añadirTic (caja, fn) {
+  const previo = caja._tic
+  caja._tic = () => { previo?.(); fn() }
+  fn()
+}
+
+function seccionesDeGestion (caja, b, d, nivel, panel) {
+  if (Array.isArray(d?.entrena) && d.entrena.length) seccionEntrenar(caja, b, d, nivel)
+  if (b.tipo === 'universidad') seccionInvestigar(caja, panel)
+  if (b.tipo === 'monasterio') seccionCurar(caja)
+  if (b.tipo === 'mercado') seccionMercado(caja)
+  if (b.tipo === 'campamento_explorador') seccionExplorar(caja, d, nivel)
+}
+
+/** Segundos reales por unidad en ESTE edificio (su nivel manda en la prisa). */
+function segundosTropa (u, d, nivel) {
+  const vel = typeof d?.velocidad === 'function' ? d.velocidad(nivel) : 1
+  return Math.max(1, Math.round(u.tiempo / Math.max(0.1, vel)))
+}
+
+const costeTropa = (u, n = 1) => {
+  const c = {}
+  for (const r of CONFIG.RECURSOS) if (u.coste?.[r]) c[r] = u.coste[r] * n
+  return c
+}
+
+/** Entrenar desde el cuartel, la arquería, el establo o el taller de asedio. */
+function seccionEntrenar (caja, b, d, nivel) {
+  caja.appendChild(el('div', { clase: 'ficha-seccion', texto: 'Entrenar aquí' }))
+
+  const oc = pedir('ejercito', 'ocupacion', { usado: 0, total: 0 })
+  caja.appendChild(el('div', {
+    clase: 'ficha-nota',
+    texto: `Hueste: ${formatoNumero(oc.usado)} de ${formatoNumero(oc.total)} huecos ocupados.`
+  }))
+
+  for (const tipo of d.entrena) {
+    const u = defUnidad(tipo)
+    if (!u) continue
+    const permiso = pedir('ejercito', 'puedeEntrenar', { ok: false, motivo: '' }, tipo, 1)
+    const segundos = segundosTropa(u, d, nivel)
+
+    const boton = (cuantos) => el('button', {
+      clase: ['btn', cuantos === 1 ? 'btn-oro' : 'btn-piedra'], type: 'button',
+      texto: `+${cuantos}`,
+      'aria-label': `Entrenar ${cuantos} ${u.nombre}`,
+      disabled: !pedir('ejercito', 'puedeEntrenar', { ok: false }, tipo, cuantos).ok,
+      onclick: () => {
+        pedir('ejercito', 'entrenar', null, tipo, cuantos)
+        pintarRecursos(); pintarObras(); pintarBadges()
+      }
+    })
+
+    caja.appendChild(el('div', { clase: 'tropa-fila' }, [
+      el('i', { texto: u.icono || '⚔️' }),
+      el('div', { clase: 'tropa-txt' }, [
+        el('b', { texto: u.nombre }),
+        el('div', { clase: 'coste-linea', html: costeHTML({ ...costeTropa(u), tiempo: segundos }) }),
+        permiso.ok ? null : el('small', { clase: 'ritmo-mal', texto: permiso.motivo })
+      ]),
+      el('div', { clase: 'tropa-botones' }, [boton(1), boton(5)])
+    ]))
+  }
+
+  // --- la cola: qué se está horneando y cuánto falta ---
+  const cola = game.state.ejercito?.cola || []
+  if (!cola.length) return
+  caja.appendChild(el('div', { clase: 'ficha-seccion', texto: 'En el patio de armas' }))
+  const cuenta = {}
+  for (const it of cola) cuenta[it.tipo] = (cuenta[it.tipo] || 0) + 1
+  caja.appendChild(el('div', { clase: 'tropa-cola' },
+    Object.entries(cuenta).map(([tipo, n]) =>
+      el('span', { clase: 'chip chip-madera' }, [
+        el('i', { texto: defUnidad(tipo)?.icono || '⚔️' }),
+        el('span', { texto: `×${n}` })
+      ]))))
+
+  const reloj = el('b', { clase: 'num' })
+  const acelera = el('button', {
+    clase: 'btn btn-oro', type: 'button', estilo: { width: '100%', marginTop: '8px' },
+    onclick: () => { pedir('ejercito', 'acelerarEntrenamiento', null); pintarRecursos(); pintarObras() }
+  })
+  const barra = barraProgreso(0)
+  const fin = cola[cola.length - 1].fin
+  const inicio = cola[0].inicio
+  añadirTic(caja, () => {
+    const restante = Math.max(0, (fin - Date.now()) / 1000)
+    const total = Math.max(1, (fin - inicio) / 1000)
+    reloj.textContent = formatoTiempo(restante)
+    barra.fijar(Math.min(100, (1 - restante / total) * 100))
+    acelera.textContent = `${ICONO.gemas} Terminar ya · ${Math.max(1, Math.ceil(restante / CONFIG.SEG_POR_GEMA))}`
+  })
+  caja.appendChild(el('div', { clase: 'panel', estilo: { padding: '10px' } }, [
+    el('div', { clase: 'fila fila-sep' }, [el('b', { texto: `${cola.length} en camino` }), reloj]),
+    barra.nodo,
+    acelera
+  ]))
+}
+
+/** La universidad investiga desde su ficha: lo que ya se puede pagar, arriba. */
+function seccionInvestigar (caja, panel) {
+  caja.appendChild(el('div', { clase: 'ficha-seccion', texto: 'Investigar' }))
+
+  const enCurso = pedir('ciencia', 'progresoInvestigacion', null)
+  if (enCurso) {
+    const reloj = el('b', { clase: 'num' })
+    const barra = barraProgreso(0)
+    añadirTic(caja, () => {
+      const ahora = pedir('ciencia', 'progresoInvestigacion', null) || enCurso
+      reloj.textContent = formatoTiempo(Math.max(0, ahora.restante || 0))
+      barra.fijar(Math.min(100, (ahora.pct || 0) * 100))
+    })
+    caja.appendChild(el('div', { clase: 'panel', estilo: { padding: '10px' } }, [
+      el('div', { clase: 'fila fila-sep' }, [el('b', { texto: enCurso.nombre || 'Investigando…' }), reloj]),
+      barra.nodo
+    ]))
+    return
+  }
+
+  const lista = (pedir('ciencia', 'disponibles', []) || []).slice(0, 3)
+  if (!lista.length) {
+    caja.appendChild(el('div', { clase: 'ficha-nota', texto: 'No queda nada por investigar en esta edad.' }))
+    return
+  }
+  for (const t of lista) {
+    caja.appendChild(el('div', { clase: 'tropa-fila' }, [
+      el('i', { texto: t.icono || '📜' }),
+      el('div', { clase: 'tropa-txt' }, [
+        el('b', { texto: t.nombre }),
+        el('div', { clase: 'coste-linea', html: costeHTML({ ...t.coste, tiempo: t.tiempoReal || t.tiempo }) })
+      ]),
+      el('div', { clase: 'tropa-botones' }, [
+        el('button', {
+          clase: 'btn btn-oro', type: 'button', texto: '📜', 'aria-label': `Investigar ${t.nombre}`,
+          disabled: !t.asequible,
+          onclick: () => {
+            const r = pedir('ciencia', 'investigar', { ok: false, motivo: '' }, t.id)
+            if (!r?.ok && r?.motivo) toast(r.motivo, 'mal')
+            pintarRecursos(); pintarObras()
+          }
+        })
+      ])
+    ]))
+  }
+  caja.appendChild(el('button', {
+    clase: 'btn btn-piedra btn-gordo', type: 'button', texto: '📚 Ver todas las tecnologías',
+    onclick: () => { panel.cerrar(); events.emit(EV.UI_PANEL, { panel: 'investigar' }) }
+  }))
+}
+
+/** El monasterio remienda: heridos, cuánto falta y cómo sacarlos ya. */
+function seccionCurar (caja) {
+  const info = pedir('ejercito', 'tiempoRecuperacion', { heridos: 0 })
+  caja.appendChild(el('div', { clase: 'ficha-seccion', texto: 'Enfermería' }))
+  if (!info.heridos) {
+    caja.appendChild(el('div', { clase: 'ficha-nota', texto: 'No hay nadie herido. Los catres están hechos.' }))
+    return
+  }
+  const reloj = el('b', { clase: 'num' })
+  añadirTic(caja, () => { reloj.textContent = formatoTiempo(pedir('ejercito', 'tiempoRecuperacion', { restante: 0 }).restante) })
+  caja.appendChild(el('div', { clase: 'panel', estilo: { padding: '10px' } }, [
+    el('div', { clase: 'fila fila-sep' }, [el('b', { texto: `🩹 ${info.heridos} convaleciente${info.heridos === 1 ? '' : 's'}` }), reloj]),
+    el('div', { clase: 'ficha-acciones', estilo: { marginTop: '8px' } }, [
+      el('button', {
+        clase: 'btn btn-piedra', type: 'button',
+        html: `🩺 Pagar<br>${costeHTML(info.coste || {})}`,
+        onclick: () => { pedir('ejercito', 'curarTodo', null, 'recursos'); pintarRecursos() }
+      }),
+      el('button', {
+        clase: 'btn btn-oro', type: 'button', texto: `${ICONO.gemas} ${info.gemas}`,
+        'aria-label': 'Curar a todos con gemas',
+        onclick: () => { pedir('ejercito', 'curarTodo', null, 'gemas'); pintarRecursos() }
+      })
+    ])
+  ]))
+}
+
+/** El mercado cambia lo que sobra por lo que falta, sin salir de la ficha. */
+function seccionMercado (caja) {
+  caja.appendChild(el('div', { clase: 'ficha-seccion', texto: 'Cambiar recursos' }))
+  let de = CONFIG.RECURSOS[0]
+  let a = CONFIG.RECURSOS[3] || CONFIG.RECURSOS[1]
+  let cantidad = 100
+
+  const filaDe = el('div', { clase: 'pestañas' })
+  const filaA = el('div', { clase: 'pestañas' })
+  const filaCantidad = el('div', { clase: 'pestañas' })
+  const resumen = el('div', { clase: 'ficha-nota' })
+  const hacer = el('button', { clase: 'btn btn-oro btn-gordo', type: 'button' })
+
+  const pintar = () => {
+    if (de === a) a = CONFIG.RECURSOS.find(r => r !== de)
+    for (const [fila, valor, fijar] of [[filaDe, de, (r) => { de = r }], [filaA, a, (r) => { a = r }]]) {
+      vaciar(fila)
+      for (const r of CONFIG.RECURSOS) {
+        fila.appendChild(el('button', {
+          clase: ['pestaña', r === valor && 'activa'], type: 'button',
+          texto: ICONO[r], 'aria-label': NOMBRE_RECURSO[r],
+          disabled: fila === filaA && r === de,
+          onclick: () => { fijar(r); pintar() }
+        }))
+      }
+    }
+    vaciar(filaCantidad)
+    for (const n of [100, 500, 1000]) {
+      filaCantidad.appendChild(el('button', {
+        clase: ['pestaña', n === cantidad && 'activa'], type: 'button', texto: formatoNumero(n),
+        onclick: () => { cantidad = n; pintar() }
+      }))
+    }
+    const tengo = Math.floor(game.state.recursos?.[de] || 0)
+    hacer.disabled = tengo < cantidad
+    hacer.innerHTML = `${ICONO[de]} ${formatoNumero(cantidad)} → ${ICONO[a]}`
+    resumen.textContent = tengo < cantidad
+      ? `No te llega: tienes ${formatoNumero(tengo)} de ${NOMBRE_RECURSO[de].toLowerCase()}.`
+      : `El tendero se queda su comisión; lo demás entra en el almacén.`
+  }
+
+  hacer.onclick = () => {
+    const r = pedir('recursos', 'cambiar', null, de, a, cantidad)
+    if (r?.ok) toast(`${ICONO[a]} +${formatoNumero(r.recibido)}`, 'bien')
+    pintarRecursos(); pintar()
+  }
+
+  pintar()
+  caja.append(
+    el('div', { clase: 'ficha-nota', texto: 'Entregas…' }), filaDe,
+    el('div', { clase: 'ficha-nota', texto: '…y recibes' }), filaA,
+    filaCantidad, hacer, resumen
+  )
+}
+
+/** El campamento manda gente al valle: cuántos hay fuera y el botón de salir. */
+function seccionExplorar (caja, d, nivel) {
+  const ex = exploracion()
+  const plazas = typeof d?.exploradores === 'function' ? d.exploradores(nivel) : ex.plazas
+  caja.appendChild(el('div', { clase: 'ficha-seccion', texto: 'Exploración' }))
+  caja.appendChild(el('div', {
+    clase: 'ficha-nota',
+    texto: ex.fuera
+      ? `${ex.fuera} de ${plazas} batidor${plazas === 1 ? '' : 'es'} fuera${ex.vueltos ? ` · ${ex.vueltos} ya de vuelta` : ''}.`
+      : `Tienes ${plazas} batidor${plazas === 1 ? '' : 'es'} esperando orden.`
+  }))
+  caja.appendChild(el('button', {
+    clase: 'btn btn-oro btn-gordo', type: 'button',
+    texto: ex.vueltos ? '🐎 Recibir al explorador' : '🧭 Mandar una expedición',
+    onclick: () => irAlMundo(true)
+  }))
 }
 
 /** Modo traslado: lo arrastra render/, y el toque en el tablero también vale. */
