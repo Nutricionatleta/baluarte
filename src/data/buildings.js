@@ -266,7 +266,27 @@ export const EDIFICIOS = {
     aura: {
       radio: 5,
       afecta: 'granja',
-      bonus: (n = 1) => Math.round((0.10 + 0.05 * n) * 100) / 100
+      bonus: (n = 1) => Math.round((0.10 + 0.05 * n) * 100) / 100,
+      /**
+       * TOPE DEL AURA, y es el número que cuadra la comida (sep-2026).
+       *
+       * `sim/resources.js` sumaba el aura de TODOS los molinos que alcanzaran a
+       * una granja, y los molinos son tres. Tres del 10 multiplicaban la cosecha
+       * por 2,8 —plantados los tres encima de las mismas granjas, que es lo que
+       * hace cualquiera—, y ahí es donde la comida se salía del juego:
+       *   5 granjas del 12 sin molino = 2.556/min · 4 serrerías del 12 = 2.761/min
+       *   ...las mismas 5 granjas con tres molinos del 10 = 7.157/min (×2,8)
+       * Medido en la partida de 30 días: la comida era lo ÚNICO que rebosaba
+       * (2,7 millones tirados frente a 2.952 de madera y 0 de piedra) y no frenó
+       * NI UNA obra en todo el mes.
+       *
+       * Con el tope, los tres molinos siguen valiendo —cada uno cubre un grupo de
+       * granjas distinto, que es para lo que están— pero amontonarlos deja de ser
+       * un truco: la comida se queda en ~1,6 veces la madera, que es justo lo que
+       * pide el catálogo (5 granjas contra 4 serrerías, porque el grano paga
+       * además a los aldeanos nuevos y la manutención de la tropa).
+       */
+      tope: 0.75
     }
   },
 

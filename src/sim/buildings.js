@@ -976,9 +976,21 @@ function cobrarMantenimiento () {
   const cobrar = Math.min(minutos, 8 * 60)
   t.ultimaSoldada += cobrar * 60000
 
+  // La soldada sube con el NIVEL del puesto, no es plana. Con tarifa fija eran
+  // el 77 % de tu oro en la Edad Oscura y el 0,2 % en la Imperial: al principio
+  // ahogaba y al final no significaba nada.
   const tarifa = AJUSTES_T.MANTENIMIENTO_MIN || { comida: 4, oro: 1 }
+  const costeDe = (b) => {
+    const c = {}
+    for (const r of RECURSOS) c[r] = Math.round((tarifa[r] || 0) * Math.max(1, b.nivel || 1) * cobrar)
+    return c
+  }
   const total = {}
-  for (const r of RECURSOS) total[r] = Math.round((tarifa[r] || 0) * puestos.length * cobrar)
+  for (const r of RECURSOS) total[r] = 0
+  for (const b of puestos) {
+    const c = costeDe(b)
+    for (const r of RECURSOS) total[r] += c[r]
+  }
   if (!RECURSOS.some(r => total[r] > 0)) return
 
   // puedePagar antes que pagar: `pagar` grita por el bus si no llega, y una
@@ -991,13 +1003,31 @@ function cobrarMantenimiento () {
     }
     return
   }
+  // No llega para todas: se paga LO QUE SE PUEDA, puesto a puesto, en vez de
+  // dejar las ocho sin soldada por un oro de menos. Primero las baratas, que es
+  // lo que haría cualquiera con la bolsa justa.
   let aviso = false
-  for (const b of puestos) {
+  let pagadas = 0
+  for (const b of [...puestos].sort((a, c) => (a.nivel || 1) - (c.nivel || 1))) {
+    const c = costeDe(b)
+    if (RECURSOS.some(r => c[r] > 0) && puedePagar(c) && pagar(c)) {
+      pagadas++
+      if (b.desabastecido) { b.desabastecido = false; toast('🏕️ La avanzadilla vuelve a estar abastecida', 'bien') }
+      continue
+    }
     if (!b.desabastecido) aviso = true
     b.desabastecido = true
-    b.hp = Math.max(1, Math.round((b.hp ?? b.hpMax) - (b.hpMax || 100) * 0.02 * cobrar))
+    // El desgaste iba en TANTO POR UNO POR MINUTO: tras 8 h fuera restaba el
+    // 960 % de la vida y dejaba el puesto a 1 de vida de un tirón. Ahora se
+    // tope a un tercio por cobro, pase el tiempo que pase.
+    const merma = Math.min(0.33, 0.02 * cobrar)
+    b.hp = Math.max(1, Math.round((b.hp ?? b.hpMax) - (b.hpMax || 100) * merma))
   }
-  if (aviso) toast('🏕️ Tus avanzadillas se han quedado sin soldada: la gente se desbanda', 'mal')
+  if (aviso) {
+    toast(pagadas
+      ? `🏕️ No llega para todas: ${puestos.length - pagadas} avanzadillas se quedan sin soldada`
+      : '🏕️ Tus avanzadillas se han quedado sin soldada: la gente se desbanda', 'mal')
+  }
 }
 
 // --- de dónde salen las parcelas ---------------------------------------------

@@ -1279,7 +1279,12 @@ function aplicarDaños (daños) {
     // Lo que cae, cae de verdad: un edificio arrasado deja de producir hasta que
     // lo reparas. Antes quedaba a 1 de vida y seguía trabajando al 100 %, así que
     // perder una defensa no dolía y no había ningún motivo para poner torres.
-    if (d.destruido) b.arruinado = true
+    // Y la gente SALE de los escombros. Sin esta línea los aldeanos se quedaban
+    // dentro de un edificio arrasado, sin producir y sin contar como parados
+    // (su oficio seguía siendo «granjero»), así que ni el reparto automático los
+    // recuperaba: tres de ocho aldeanos desaparecían de la economía tras un
+    // asalto. Es lo que dejó al dueño sin forma de levantar la aldea.
+    if (d.destruido) { b.arruinado = true; b.trabajadores = [] }
   }
 }
 

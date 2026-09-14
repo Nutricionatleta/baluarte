@@ -23,8 +23,24 @@ const RECURSOS = CONFIG.RECURSOS
  *  Es lo que hace que asignar aldeanos importe de verdad y no sea un idle. */
 const MINIMO_SIN_ALDEANOS = 0.25
 
-/** Lo que se saca de un edificio en ruinas: un cuarto de lo que rendía a nivel 1. */
+/**
+ * LO QUE SE REBUSCA ENTRE LOS ESCOMBROS. Dos suelos y se coge el mayor:
+ *   - un cuarto de lo que rinde un nivel 1 (el suelo de siempre, el que salva
+ *     la partida recién empezada: una granja del 1 arrasada sigue dando 2,7);
+ *   - el 10 % de lo que rendía el edificio de verdad.
+ *
+ * Por qué hacía falta el segundo (sep-2026): el suelo era SOLO el de nivel 1, o
+ * sea un número fijo, mientras que lo que come la aldea crece con ella (el hueco
+ * de ejército sube 6 por cada nivel de edificio militar). Con la aldea de la
+ * Feudal arrasada entraban 60 de comida por minuto y la hueste al completo se
+ * comía 180: la despensa se quedaba clavada en cero, los aldeanos al 75 % de
+ * ánimo y no había manera de juntar ni para reparar a mano. Es literalmente lo
+ * que le pasó al dueño jugando. Ahora el suelo sube con el nivel del edificio,
+ * así que una aldea grande arrasada se levanta sola aunque tenga la caja a cero.
+ * Sigue siendo un 90 % de pérdida: que te arrasen duele, pero no mata.
+ */
 const RENDIMIENTO_RUINAS = 0.25
+const RUINAS_SOBRE_SU_NIVEL = 0.10
 
 /** Bono de producción por edad: avanzar de edad se nota en la caja, no solo en el catálogo. */
 const BONUS_POR_EDAD = 0.10
@@ -273,16 +289,24 @@ function multiplicadoresTech () {
   return m
 }
 
-/** Bono acumulado del aura de los molinos sobre un edificio concreto. */
+/**
+ * Bono acumulado del aura de los molinos sobre un edificio concreto, CON TOPE.
+ * El tope lo pone el catálogo (`aura.tope` en data/buildings.js): sin él, los
+ * tres molinos amontonados sobre las mismas granjas multiplicaban la cosecha por
+ * 2,8 y la comida se salía de la economía. Ver el comentario del molino.
+ */
 function auraSobre (b, auras) {
   let bonus = 0
   if (!auras.length) return bonus
+  let tope = Infinity
   const c = centroDe(b)
   for (const a of auras) {
     if (a.afecta !== b.tipo) continue
-    if (dist(c.x, c.z, a.x, a.z) <= a.radio) bonus += a.bonus
+    if (dist(c.x, c.z, a.x, a.z) > a.radio) continue
+    bonus += a.bonus
+    if (a.tope > 0 && a.tope < tope) tope = a.tope
   }
-  return bonus
+  return Math.min(bonus, tope)
 }
 
 /**
@@ -298,11 +322,17 @@ function desglose () {
   // las auras se recogen una vez, no una por granja
   const auras = []
   for (const b of game.state.buildings) {
-    if (b.enObra) continue
+    // en obra no, y EN RUINAS tampoco: un molino derruido no muele nada. Antes
+    // seguía dando su bono entero, así que arrasar el molino no se notaba y las
+    // granjas en ruinas cobraban un aura fantasma.
+    if (b.enObra || b.arruinado) continue
     const d = def(b.tipo)
     if (!d || !d.aura) continue
     const c = centroDe(b)
-    auras.push({ x: c.x, z: c.z, radio: d.aura.radio, afecta: d.aura.afecta, bonus: d.aura.bonus(b.nivel || 1) })
+    auras.push({
+      x: c.x, z: c.z, radio: d.aura.radio, afecta: d.aura.afecta,
+      bonus: d.aura.bonus(b.nivel || 1), tope: d.aura.tope || 0
+    })
   }
 
   const filas = []
@@ -312,12 +342,12 @@ function desglose () {
     if (!d || !d.produce || typeof d.porMinuto !== 'function') continue
 
     const nivel = b.nivel || 1
-    // En ruinas se rebusca entre los escombros: el rendimiento de un nivel 1
-    // a un cuarto, y nada más. Es una pérdida del 95 % en los niveles altos, o
-    // sea que perder una defensa duele igual... pero NO mata la partida.
-    // Si las ruinas rindieran cero, una aldea arrasada con la caja vacía no
-    // podría pagar ni una reparación y quedaría muerta para siempre.
-    const base = b.arruinado ? d.porMinuto(1) * RENDIMIENTO_RUINAS : d.porMinuto(nivel)
+    // En ruinas se rebusca entre los escombros (ver RENDIMIENTO_RUINAS): el
+    // mayor de los dos suelos, para que una aldea grande arrasada con la caja
+    // vacía pueda volver a comer y no quede muerta para siempre.
+    const base = b.arruinado
+      ? Math.max(d.porMinuto(1) * RENDIMIENTO_RUINAS, d.porMinuto(nivel) * RUINAS_SOBRE_SU_NIVEL)
+      : d.porMinuto(nivel)
 
     // reparto por aldeanos: del 25 % (nadie) al 100 % (todas las plazas llenas)
     const plazas = typeof d.plazas === 'function' ? Math.max(0, d.plazas(nivel)) : 0

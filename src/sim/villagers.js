@@ -119,6 +119,8 @@ function sanear () {
     if (typeof v.animo !== 'number') v.animo = 1
   }
   sincronizarTrabajadores()
+  // Partidas guardadas a medio asalto: nadie se queda encerrado en un solar.
+  desalojarRuinas()
 }
 
 /** `buildings[].trabajadores` es del contrato; la verdad son los `buildingId`. */
@@ -432,6 +434,7 @@ export function edificiosSinAtender (soloVacios = false) {
     if (b.enObra) continue
     const d = def(b.tipo)
     if (!d || !d.produce || typeof d.plazas !== 'function') continue
+    if (b.arruinado) continue        // un edificio en ruinas no "trabaja solo": no trabaja
     const nivel = b.nivel || 1
     const plazas = Math.max(0, d.plazas(nivel))
     if (plazas <= 0) continue
@@ -440,7 +443,7 @@ export function edificiosSinAtender (soloVacios = false) {
     if (libres <= 0) continue
     if (soloVacios && ocupadas > 0) continue
     // la misma faena que aplica sim/resources.js: 25 % sin nadie, 100 % a tope
-    const base = b.arruinado ? 0 : d.porMinuto(nivel) * animo
+    const base = d.porMinuto(nivel) * animo
     const faena = MINIMO_SIN_ALDEANOS + (1 - MINIMO_SIN_ALDEANOS) * (ocupadas / plazas)
     const c = centroDe(b)
     fuera.push({
@@ -488,11 +491,63 @@ export function asignarAutomatico () {
 // ------------------------------------------------------- reparto automático
 function plazasDe (b) {
   if (b.enObra) return PLAZAS_OBRA
+  // En un montón de escombros no se trabaja: cero plazas hasta que se levante.
+  // Sin esto el reparto automático seguía mandando gente a las ruinas.
+  if (b.arruinado) return 0
   const d = def(b.tipo)
   if (!d) return 0
   if (d.plazas) return d.plazas(b.nivel || 1)
   if (d.exploradores) return d.exploradores(b.nivel || 1)   // el campamento cuenta sus batidores
   return 0
+}
+
+/**
+ * DESALOJAR LAS RUINAS — el arreglo que destrabó la partida (sep-2026).
+ *
+ * Cuando un asalto arrasa un edificio, `sim/combat.js` le pone `arruinado` pero
+ * NO vacía `trabajadores` (y el aviso EV.BUILDINGS_DAMAGED no lo escucha nadie,
+ * así que `sim/buildings.js:dañar()`, que sí los soltaría, no llega a entrar).
+ * Resultado medido con una aldea feudal normal: te tiran las tres granjas y
+ * TRES de tus OCHO aldeanos se quedan plantados en los escombros sin producir
+ * nada —y, como su oficio sigue siendo 'granjero' y no 'parado', el botón de
+ * "repartir solos" pasa de ellos—. El jugador se queda sin comida, sin gente y
+ * sin ninguna manera evidente de arreglarlo. Es exactamente lo que contó el
+ * dueño: «al destruirme los campos de cultivo no tengo cómo avanzar».
+ *
+ * Aquí se les echa del solar y se les busca sitio en el acto: a la serrería que
+ * está a medio gas, a la cantera, a donde haga falta. Cuando la cuadrilla
+ * levante la granja volverán solos por el camino de siempre.
+ */
+function desalojarRuinas () {
+  alDia()
+  const s = game.state
+  const echadas = []
+  for (const v of s.villagers) {
+    if (!v.buildingId) continue
+    const b = edificio(v.buildingId) || getBuilding(v.buildingId)
+    if (!b || !b.arruinado) continue
+    desasignar(v.id)
+    echadas.push(v)
+  }
+  const echados = echadas.length
+  if (!echados) return 0
+  // no se quedan mirando las nubes: se les recoloca en el sitio que más duele.
+  // Solo a los recién echados: a quien el jugador dejó parado a propósito no se
+  // le toca, que para eso está el botón de repartir.
+  let recolocados = 0
+  for (const v of echadas) {
+    const destino = obraNecesitada(v) || masVacioConHueco(v) || edificioMasNecesario(v)
+    if (destino && asignar(v.id, destino.id)) recolocados++
+  }
+  avisar(echados === 1
+    ? 'Un aldeano se queda sin tajo: su edificio está en ruinas'
+    : `${echados} aldeanos se quedan sin tajo: sus edificios están en ruinas`, 'mal')
+  if (recolocados) {
+    avisar(recolocados === echados
+      ? 'Los has recolocado a todos mientras la cuadrilla levanta lo caído'
+      : `${recolocados} vuelven al tajo en otro sitio; al resto no le queda puesto libre`, 'bien')
+  }
+  return echados
 }
 
 const jobDe = (b) => (b.enObra ? 'constructor' : (JOB_POR_TIPO[b.tipo] || 'parado'))
@@ -648,6 +703,9 @@ function alTick ({ dt }) {
   momento = (momento + dt / SEG_POR_DIA) % 1
   actualizarAnimo(dt)
   sembrarPrimeros()
+  // Dos veces por segundo basta para reaccionar a un asalto, y solo cuesta un
+  // recorrido de la lista de aldeanos cuando de verdad hay algo en ruinas.
+  if ((pulso & 1) === 0) desalojarRuinas()
   if ((pulso & 7) === 0) vigilarPoblacion()
   if (pulso % REVISION_SIN_ATENDER === 0) vigilarSinAtender()
 
