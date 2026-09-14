@@ -102,3 +102,7 @@ con misiones y asaltos. **Nunca habrá pagos reales.**
   dato sigue rota: lo limpio es que `reforzarPlaza()` pida la tropa a
   `sim/army.js` en vez de restarla del censo. No se ha hecho para no arriesgar
   un doble descuento con el arreglo que ya funciona y está probado.
+- El trazado de murallas (imán, capa SVG y desplazamiento del pulgar) está
+  DUPLICADO en `ui/build-panel.js` y `ui/editor-aldea.js`. Debería vivir en un
+  `ui/trazado.js` compartido; no se hizo para no cruzar ficheros entre dos
+  agentes que trabajaban a la vez.

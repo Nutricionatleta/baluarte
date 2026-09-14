@@ -196,7 +196,7 @@ function alineacion (x, z, ancho, alto) {
    una de las dos, hay que tocar la otra: son una sola forma de colocar.
    =========================================================================== */
 
-const PX_PULGAR = 92
+const PX_PULGAR = 78
 const IMANTAN = new Set(['muralla', 'puerta', 'foso'])
 let guias = null                 // { firma, x:[{v,que,tol}], z:[...] }
 
@@ -233,6 +233,20 @@ function guiasDeImantado () {
 }
 
 let imantadoA = ''
+
+/** Borrando, el imán tira del tramo que ya existe, no de la casilla de al lado. */
+function imantarABorrable (x, z) {
+  const hay = (cx, cz) => {
+    const b = edificioEn(cx, cz)
+    return b && BORRABLE.has(b.tipo) ? b : null
+  }
+  imantadoA = ''
+  if (hay(x, z)) return { x, z }
+  for (const [dx, dz] of [[0, -1], [1, 0], [0, 1], [-1, 0], [1, -1], [1, 1], [-1, 1], [-1, -1]]) {
+    if (hay(x + dx, z + dz)) { imantadoA = 'al tramo de al lado'; return { x: x + dx, z: z + dz } }
+  }
+  return { x, z }
+}
 
 function imantar (x, z) {
   const g = guiasDeImantado()
@@ -297,8 +311,8 @@ function crearCapa () {
     svg.appendChild(p)
     return p
   }
-  const verde = camino('rgba(96,190,104,.42)', 'rgba(32,96,40,.85)')
-  const rojo = camino('rgba(214,74,64,.42)', 'rgba(130,28,24,.9)')
+  const verde = camino('rgba(126,232,134,.55)', 'rgba(20,70,26,.95)')
+  const rojo = camino('rgba(230,86,74,.55)', 'rgba(110,20,16,.95)')
   const hilo = document.createElementNS(SVG_NS, 'line')
   hilo.setAttribute('stroke', 'rgba(255,255,255,.75)')
   hilo.setAttribute('stroke-width', '2')
@@ -435,7 +449,7 @@ function alTocarCasilla (p) {
   // que caer sobre el edificio que quieres coger.
   if (herramienta !== 'mover') {
     const p2 = conPulgar(x, z)
-    const q = imantar(p2.x, p2.z)
+    const q = herramienta === 'quitar' ? imantarABorrable(p2.x, p2.z) : imantar(p2.x, p2.z)
     x = q.x; z = q.z
     puntoUltimo = { x, z }
   }
@@ -457,6 +471,9 @@ function alTocarCasilla (p) {
   if (herramienta === 'quitar') {
     if (!quitando) quitando = { ids: new Set() }
     const b = edificioEn(x, z)
+    // el borrador también apunta por encima del dedo: sin una marca roja encima
+    // de la pieza no habría forma de saber a qué tramo estás apuntando
+    fantasma(b ? b.tipo : 'muralla', b ? b.x : x, b ? b.z : z, b?.ancho ?? 1, b?.alto ?? 1, b?.rot | 0, false)
     if (b && BORRABLE.has(b.tipo) && !marcadoQuitar.some(q => q.id === b.id)) {
       quitando.ids.add(b.id)
       marcadoQuitar.push({ id: b.id, x: b.x, z: b.z, tipo: b.tipo })
@@ -1094,6 +1111,9 @@ function asegurarCss () {
 #hud.editando > .capa-guia, #hud.editando > .hud-barra,
 #hud.editando > .hud-minis, #hud.editando > .hud-abajo { display: none !important; }
 .editor-barra button:disabled { opacity: .5; }
+/* los avisos flotantes son tocables y se apilan encima del mapa: mientras se
+   reorganiza dejan pasar el dedo, que si no se come el principio de un trazo */
+#hud.editando .capa-toast, #hud.editando .toast { pointer-events: none !important; }
 `
   document.head.appendChild(s)
 }
@@ -1483,7 +1503,9 @@ export function init () {
       },
       levantar: () => levantarMarcado(),
       deshacerTramo: () => deshacerTramo(),
-      previa: () => previaMarcado()
+      previa: () => previaMarcado(),
+      get punto () { return puntoUltimo },
+      get marcado () { return { poner: marcado.length, quitar: marcadoQuitar.length, desplazar } }
     }
   }
 }

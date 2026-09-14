@@ -1657,6 +1657,8 @@ function entrarEnColocacion (tipo) {
     imant: '', desplazar: null            // null: lo decide el primer dedo que toque
   }
   emitirModo(true)
+  asegurarCssColocar()
+  ;(document.getElementById('hud') || document.body).classList.add('colocando')
   crearBarra()
   if (puesta.pintando) { escucharTrazo(true); crearCapa() }
   toast(puesta.pintando
@@ -1671,6 +1673,7 @@ function salirDeColocacion (silencioso = false) {
   const marcados = celdasMarcadas().length
   escucharTrazo(false)
   quitarCapa()
+  ;(document.getElementById('hud') || document.body).classList.remove('colocando')
   puesta = null
   quitarBarra()
   emitirModo(false)
@@ -1816,7 +1819,7 @@ const TRAZOS = [
 /** Lo que el borrador del propio modo puede quitar: cercas, nunca tu granja. */
 const BORRABLE = new Set(['muralla', 'puerta', 'foso'])
 const IMANTAN = new Set(['muralla', 'puerta', 'foso'])
-const PX_PULGAR = 92          // cuánto sube el punto de colocación sobre el dedo
+const PX_PULGAR = 78          // cuánto sube el punto de colocación sobre el dedo
 const MARGEN_RODEAR = 2       // casillas de aire entre la aldea y su muralla
 
 const simHuecosEnCola = () => seguro(OBRA.huecosEnCola, 1)
@@ -1864,6 +1867,23 @@ function guiasDeImantado () {
 }
 
 const olvidarGuias = () => { guias = null }
+
+/**
+ * Borrando, el imán tira de otra cosa: del tramo que ya existe. Las guías de
+ * construir apartan el dedo a la casilla de al lado del muro, que es justo
+ * donde NO hay nada que quitar.
+ */
+function imantarABorrable (x, z) {
+  const hay = (cx, cz) => {
+    const b = simEdificioEn(cx, cz)
+    return b && BORRABLE.has(b.tipo) ? b : null
+  }
+  if (hay(x, z)) return { x, z, que: '' }
+  for (const [dx, dz] of [[0, -1], [1, 0], [0, 1], [-1, 0], [1, -1], [1, 1], [-1, 1], [-1, -1]]) {
+    if (hay(x + dx, z + dz)) return { x: x + dx, z: z + dz, que: 'al tramo de al lado' }
+  }
+  return { x, z, que: '' }
+}
 
 function imantar (x, z) {
   const g = guiasDeImantado()
@@ -1928,6 +1948,27 @@ function celdasDeTrazo (ancla, x, z, modo) {
   for (let i = x0; i <= x1; i++) { lista.push({ x: i, z: z0 }); if (z1 !== z0) lista.push({ x: i, z: z1 }) }
   for (let j = z0 + 1; j < z1; j++) { lista.push({ x: x0, z: j }); if (x1 !== x0) lista.push({ x: x1, z: j }) }
   return lista
+}
+
+/**
+ * ¿Cabe un tramo en esta casilla? Se pregunta por cada casilla marcada y en
+ * cada frame que se mueve la cámara: con ochenta tramos eso son miles de
+ * comprobaciones por segundo, así que se guarda la respuesta hasta que cambie
+ * algo construido.
+ */
+let cacheSitio = { firma: '', mapa: new Map() }
+
+function sitioBueno (x, z) {
+  const firma = `${puesta.tipo}:${estado().buildings.length}`
+  if (cacheSitio.firma !== firma) cacheSitio = { firma, mapa: new Map() }
+  const k = `${x},${z}`
+  let v = cacheSitio.mapa.get(k)
+  if (v === undefined) {
+    const r = sitioLibre(puesta.tipo, x, z)
+    v = { ok: r.ok, motivo: r.motivo }
+    cacheSitio.mapa.set(k, v)
+  }
+  return v
 }
 
 /** Lo marcado = lo que ya soltaste + el trazo que llevas en el dedo, sin repetir. */
@@ -2008,12 +2049,6 @@ function deshacerTramo () {
   refrescarBarra()
 }
 
-function borrarTrazado () {
-  if (!puesta) return
-  puesta.trazado = []; puesta.vivas = []; puesta.quitar = []; puesta.paso = 0
-  refrescarBarra()
-}
-
 function marcarParaQuitar (x, z) {
   const b = simEdificioEn(x, z)
   if (!b || !BORRABLE.has(b.tipo)) return
@@ -2032,8 +2067,9 @@ function previaTrazado () {
   const celdas = celdasMarcadas()
   let ok = 0; let malas = 0; let motivo = ''
   for (const c of celdas) {
-    if (sitioLibre(puesta.tipo, c.x, c.z).ok) ok++
-    else { malas++; if (!motivo) motivo = sitioLibre(puesta.tipo, c.x, c.z).motivo }
+    const v = sitioBueno(c.x, c.z)
+    if (v.ok) ok++
+    else { malas++; if (!motivo) motivo = v.motivo }
   }
   const c1 = d.coste(1)
   const coste = {}
@@ -2049,7 +2085,7 @@ function levantarTrazado () {
   if (!celdas.length) { toast('Marca primero el trazado con el dedo', 'info'); return }
   let pedidos = 0
   for (const c of celdas) {
-    if (!sitioLibre(puesta.tipo, c.x, c.z).ok) continue
+    if (!sitioBueno(c.x, c.z).ok) continue
     if (puesta.cola.some(q => q.x === c.x && q.z === c.z)) continue
     if (puesta.cola.length >= COLA_MAX) break
     puesta.cola.push({ x: c.x, z: c.z, rot: puesta.rot })
@@ -2154,7 +2190,7 @@ function alSubirTrazo (e) {
 function pasoDeTrazo (x, z) {
   if (!puesta) return
   const p = conPulgar(x, z)
-  const im = imantar(p.x, p.z)
+  const im = puesta.herramienta === 'quitar' ? imantarABorrable(p.x, p.z) : imantar(p.x, p.z)
   puesta.imant = im.que
   moverFantasma(im.x, im.z)
   if (!puesta.arrastrando) return
@@ -2184,8 +2220,8 @@ function crearCapa () {
     svg.appendChild(p)
     return p
   }
-  const verde = camino('rgba(96,190,104,.42)', 'rgba(32,96,40,.85)')
-  const rojo = camino('rgba(214,74,64,.42)', 'rgba(130,28,24,.9)')
+  const verde = camino('rgba(126,232,134,.55)', 'rgba(20,70,26,.95)')
+  const rojo = camino('rgba(230,86,74,.55)', 'rgba(110,20,16,.95)')
   const hilo = document.createElementNS(SVG_NS, 'line')
   hilo.setAttribute('stroke', 'rgba(255,255,255,.75)')
   hilo.setAttribute('stroke-width', '2')
@@ -2246,7 +2282,7 @@ function pintarCapa () {
       ]
       if (esq.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y) || Math.abs(p.x) > 6000 || Math.abs(p.y) > 6000)) continue
       const d = `M${esq.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join('L')}Z`
-      const bien = quitarTramos ? false : sitioLibre(puesta.tipo, c.x, c.z).ok
+      const bien = quitarTramos ? false : sitioBueno(c.x, c.z).ok
       if (bien) dBien += d; else dMal += d
       for (const p of esq) if (p.y < cima.y) cima = { x: p.x, y: p.y }
     }
@@ -2276,6 +2312,19 @@ function pintarCapa () {
 }
 
 /* --- la barra de abajo --------------------------------------------------- */
+
+/**
+ * Lo único que este módulo escribe en CSS. Los avisos flotantes son tocables
+ * (se cierran con el dedo) y se apilan justo donde uno empieza a trazar la
+ * muralla: mientras se coloca, dejan pasar el dedo al mapa.
+ */
+function asegurarCssColocar () {
+  if (document.getElementById('css-colocar')) return
+  const s = document.createElement('style')
+  s.id = 'css-colocar'
+  s.textContent = '#hud.colocando .capa-toast, #hud.colocando .toast { pointer-events: none !important; }'
+  document.head.appendChild(s)
+}
 
 function crearBarra () {
   quitarBarra()
@@ -2469,7 +2518,10 @@ function refrescarBarra () {
     ? (previa.total ? `🧹 ${previa.total} tramo${previa.total === 1 ? '' : 's'} marcados para quitar` : '👆 Barre los tramos que quieras quitar')
     : previa && previa.total
       ? `${puesta.arrastrando ? '✏️' : '📐'} ${previa.ok} tramo${previa.ok === 1 ? '' : 's'} marcados${previa.malas ? ` · ${previa.malas} no caben` : ''}`
-      : sinSitio
+      // la cola local solo corre mientras se está aquí: hay que decirlo claro
+      : puesta.cola.length
+        ? `🧱 ${puesta.puestos} encargados · ${puesta.cola.length} entrando solos: no salgas todavía`
+        : sinSitio
         ? (puesta.pintando ? '👆 Arrastra el dedo: se marca, no se encarga' : '👆 Toca la aldea para colocarlo')
         : !puesta.valido
             ? `${puesta.causa === 'territorio' ? '🔒' : '⛔'} ${puesta.motivo}`
@@ -3017,12 +3069,14 @@ export function init () {
         return despeje.previa
       },
       // para las pruebas: marcar el trazado sin dedo y confirmarlo aparte
+      // pasa por el mismo imantado que el dedo, para que la prueba valga
       marcarTrazo: (ax, az, bx, bz, modo) => {
         if (!puesta?.pintando) return null
         if (modo) puesta.trazo = modo
         puesta.arrastrando = true
-        empezarTrazo(ax, az)
-        estirarTrazo(bx, bz)
+        const a = imantar(ax, az); const b = imantar(bx, bz)
+        empezarTrazo(a.x, a.z)
+        estirarTrazo(b.x, b.z)
         soltarTrazo()
         return previaTrazado()
       },
