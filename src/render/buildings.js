@@ -74,7 +74,9 @@ const FAMILIA = {
   // el puesto de frontera es un poblado, no una fortaleza: madera, teja y
   // estandarte, para que cante sobre el verde apagado del barbecho
   puesto_avanzado: 'centro',
-  muralla: 'defensa', puerta: 'defensa'
+  muralla: 'defensa', puerta: 'defensa',
+  // el foso es defensa, pero de tierra y agua: su paleta la pone él mismo
+  foso: 'defensa'
 }
 
 /**
@@ -1246,6 +1248,14 @@ function mascaraEn (x, z) {
   return m
 }
 
+/** La misma máscara para el foso, que solo se traba consigo mismo: una zanja
+ *  sigue en la casilla de al lado si al lado hay otra zanja, y con nada más. */
+function mascaraFosoEn (x, z) {
+  let m = 0
+  for (const [dx, dz, bit] of DIRS) if (ocupadas.get(`${x + dx}|${z + dz}`) === 'foso') m |= bit
+  return m
+}
+
 function fMuralla ({ p, n, t, det, mask }) {
   const l = []
   const y = 0
@@ -1327,6 +1337,83 @@ function fPuerta ({ p, n, t, det }) {
   if (t >= 1) {
     l.push(bandera(p, p.acento, -0.62, y + 0.51 + h + 0.18, 0, 0.7, 0.3))
     l.push(bandera(p, p.acento, 0.62, y + 0.51 + h + 0.18, 0, 0.7, 0.3))
+  }
+  return l
+}
+
+/**
+ * FOSO: una ZANJA, y lo único del catálogo que tiene que leerse como un AGUJERO.
+ *
+ * El suelo del valle es una malla de una pieza: no se puede agujerear. Así que
+ * el hueco se finge SUBIENDO EL BORDE en vez de bajar el fondo —desde la cámara
+ * del juego el ojo lee lo mismo— con cuatro capas, de dentro afuera y de oscuro
+ * a claro, que es el orden en que se lee la profundidad:
+ *   FONDO casi negro que cubre la casilla entera: es lo que canta "aquí hay hueco"
+ *   AGUA y ESTACAS dentro, en cuanto la zanja es honda (tono >= 1)
+ *   ESCARPA de tierra mojada: el escalón intermedio de la pared
+ *   CABALLÓN de tierra excavada, levantado, con los cascotes que salieron al cavar
+ * Los lados por los que la zanja SIGUE van limpios —ni caballón ni escarpa— así
+ * que dos casillas seguidas salen como un foso corrido y no como dos cuadraditos
+ * sueltos, igual que hacen las murallas con su máscara de vecinos.
+ */
+function fFoso ({ p, n, t, det, mask }) {
+  const l = []
+  // N(-z) · E(+x) · S(+z) · O(-x): true = la zanja continúa por ese lado
+  const sigue = [!!(mask & 1), !!(mask & 2), !!(mask & 4), !!(mask & 8)]
+  const CAB = 0.2                        // ancho del caballón de tierra
+  const ESC = 0.1                        // ancho de la escarpa
+  const alto = 0.15 + 0.013 * n          // un foso del 8 es una zanja seria
+  const conAgua = t >= 1
+
+  // 1 · EL FONDO, en dos tonos. La tierra mojada cubre la casilla entera —así dos
+  //     fosos pegados comparten suelo y no se ve ni la juntura ni el verde— y
+  //     dentro va una vena casi negra: el corte en V es lo que se lee como hondo
+  //     desde arriba. Un solo tono plano se leería como una baldosa oscura.
+  l.push(caja(p.viga, 0, -0.05, 0, 1.0, 0.07, 1.0))
+
+  // 2 · el hueco que queda a la vista: se encoge solo por los lados cerrados
+  const borde = (k) => (sigue[k] ? 0.5 : 0.5 - CAB - ESC + 0.02)
+  const xO = -borde(3); const xE = borde(1); const zN = -borde(0); const zS = borde(2)
+  const cx = (xO + xE) / 2; const cz = (zN + zS) / 2
+  const ax = xE - xO; const az = zS - zN
+  const nucleo = (k) => (sigue[k] ? 0.5 : borde(k) - 0.09)
+  const nxO = -nucleo(3); const nxE = nucleo(1); const nzN = -nucleo(0); const nzS = nucleo(2)
+  l.push(caja(p.carbon, (nxO + nxE) / 2, -0.01, (nzN + nzS) / 2, nxE - nxO, 0.035, nzS - nzN))
+
+  if (conAgua) {
+    l.push(caja(M.agua, cx, -0.01, cz, ax, 0.045, az))
+    if (det) {
+      // dos brillos cruzados: es lo que hace que se lea agua y no baldosa azul
+      l.push(pieza(G.caja, p.telaCruda, { x: cx - 0.09, y: 0.045, z: cz + 0.06, sx: ax * 0.4, sy: 0.012, sz: 0.05, ry: 0.5 }))
+      l.push(pieza(G.caja, p.telaCruda, { x: cx + 0.13, y: 0.045, z: cz - 0.11, sx: ax * 0.2, sy: 0.012, sz: 0.04, ry: 0.5 }))
+    }
+  }
+
+  // 3 · las estacas del fondo: lo que dice que la zanja no es decorativa. Pocas y
+  //     flacas: puestas en fila casilla tras casilla, cualquier exceso se lee como
+  //     una valla y no como lo que hay DENTRO de un hoyo.
+  const estaca = (x, z, h, incl) => l.push(pieza(G.cono6, p.viga, { x, y: 0.02 + h / 2, z, sx: 0.07, sy: h, sz: 0.07, rz: incl }))
+  estaca(cx - Math.min(0.13, ax * 0.3), cz + Math.min(0.09, az * 0.25), 0.2, 0.26)
+  if (n >= 4) estaca(cx + Math.min(0.12, ax * 0.26), cz - Math.min(0.07, az * 0.2), 0.25, -0.2)
+  if (det && n >= 7) estaca(cx, cz + Math.min(0.18, az * 0.4), 0.17, 0.1)
+
+  // 4 · las paredes del lado cerrado: escalón y caballón
+  const LADOS = [[0, -1], [1, 0], [0, 1], [-1, 0]]
+  for (let k = 0; k < 4; k++) {
+    if (sigue[k]) continue
+    const [dx, dz] = LADOS[k]
+    const enX = dx !== 0
+    // escalón de tierra removida entre el caballón y el fondo: el peldaño de la
+    // escarpa. Bajo, a propósito: si sube tapa el hueco desde la cámara y la
+    // zanja se lee como un muro oscuro en vez de como un agujero.
+    const ex = dx * (0.5 - CAB - ESC / 2); const ez = dz * (0.5 - CAB - ESC / 2)
+    l.push(caja(p.tierra, ex, -0.02, ez, enX ? ESC : 1.0, 0.085, enX ? 1.0 : ESC))
+    // el caballón se pasa un pelo de la casilla para empalmar con el de al lado
+    const bx = dx * (0.5 - CAB / 2); const bz = dz * (0.5 - CAB / 2)
+    l.push(cajaR(p.tierra, bx, -0.02, bz, enX ? CAB : 1.02, alto, enX ? 1.02 : CAB, 0, 0.05))
+    // un cascote de la piedra que salió al cavar. Uno por lado y menudo: el
+    // caballón corre de casilla en casilla y dos ya se leen como un collar.
+    if (det) l.push(roca(p.piedraOscura, bx + (enX ? 0 : 0.24), alto - 0.05, bz + (enX ? 0.24 : 0), 0.12))
   }
   return l
 }
@@ -1534,6 +1621,7 @@ const CONSTRUCTORES = {
   torre_ballesta: fTorreBallesta,
   muralla: fMuralla,
   puerta: fPuerta,
+  foso: fFoso,
   castillo: fCastillo,
   pozo: fPozo,
   estandarte: fEstandarte,
@@ -1541,14 +1629,14 @@ const CONSTRUCTORES = {
 }
 
 /** Estos se apoyan directamente en la hierba: una plataforma les quedaría fatal. */
-const SIN_PLATAFORMA = new Set(['muralla', 'puerta', 'estandarte', 'pozo', 'cantera', 'mina_oro', 'granja', 'campamento_explorador'])
+const SIN_PLATAFORMA = new Set(['muralla', 'puerta', 'estandarte', 'pozo', 'cantera', 'mina_oro', 'granja', 'campamento_explorador', 'foso'])
 
 /**
  * Y estos tampoco lucen galones de nivel: los trozos de muralla son de una
  * casilla y se trenzan con sus vecinos (cualquier adorno rompe el encaje), y
  * el pozo y el estandarte no suben de nivel.
  */
-const SIN_GALONES = new Set(['muralla', 'puerta', 'estandarte', 'pozo'])
+const SIN_GALONES = new Set(['muralla', 'puerta', 'estandarte', 'pozo', 'foso'])
 
 // ── fábrica de modelos (una vez por tipo+nivel+escalón, el resto son clones) ──
 
@@ -1647,7 +1735,9 @@ export function crearEdificio (tipo, nivel = 1, o = {}) {
   const d = def(tipo) || {}
   const n = Math.max(1, Math.min(d.maxNivel || 8, Math.round(nivel) || 1))
   const estado = o.estado || 'ok'
-  const mask = tipo === 'muralla' ? (o.mask | 0) : 0
+  // muralla y foso se trenzan con sus vecinos, así que cada combinación de
+  // vecinos es un modelo distinto y la máscara entra en la clave del caché
+  const mask = (tipo === 'muralla' || tipo === 'foso') ? (o.mask | 0) : 0
   const clave = `${tipo}|${n}|${estado}|${mask}|${edadVisual}|${ctx.calidad}`
   let proto = cacheModelos.get(clave)
   if (!proto) {
@@ -1717,7 +1807,7 @@ const tweens = []                 // plop, mejora y derrumbe
 const estadoDe = (b) => b.arruinado ? 'ruina' : (b.enObra || b.mejorando) ? 'obra' : 'ok'
 
 function firmaDe (b) {
-  const m = b.tipo === 'muralla' ? mascaraEn(b.x, b.z) : 0
+  const m = b.tipo === 'muralla' ? mascaraEn(b.x, b.z) : b.tipo === 'foso' ? mascaraFosoEn(b.x, b.z) : 0
   return `${b.tipo}|${b.nivel}|${estadoDe(b)}|${m}|${b.x}|${b.z}|${b.rot | 0}`
 }
 
@@ -1728,7 +1818,7 @@ function desmontar (g) {
 
 function giroDe (b, ancho, alto) {
   const rot = (b.rot | 0) % 4
-  if (b.tipo === 'muralla') return 0              // la orienta la máscara de vecinos
+  if (b.tipo === 'muralla' || b.tipo === 'foso') return 0   // los orienta su máscara de vecinos
   if (ancho === alto || b.tipo === 'puerta') return -rot * PI / 2
   return rot % 2 ? 0 : -rot * PI / 2              // en rectángulos solo 0 y 180 cuadran con la rejilla
 }
@@ -1801,7 +1891,7 @@ function pintar (b, efecto = null) {
   const viejo = mallas.get(b.id)
   const g = crearEdificio(b.tipo, Math.max(1, b.nivel), {
     estado: estadoDe(b),
-    mask: b.tipo === 'muralla' ? mascaraEn(b.x, b.z) : 0
+    mask: b.tipo === 'muralla' ? mascaraEn(b.x, b.z) : b.tipo === 'foso' ? mascaraFosoEn(b.x, b.z) : 0
   })
   g.userData.buildingId = b.id     // scene.js sube por los padres hasta encontrarlo
   g.name = `${b.tipo}:${b.id}`
@@ -1857,12 +1947,19 @@ function sincronizar (conEfecto = false) {
   for (const id of [...mallas.keys()]) if (!vistos.has(id)) borrar(id)
 }
 
-/** Tras tocar una muralla hay que repasar a sus vecinas: el trozo cambia de forma. */
+/**
+ * Tras tocar una muralla —o un foso— hay que repasar a sus vecinos: el trozo
+ * cambia de forma. Cada familia mira solo a la suya (el foso se traba con fosos
+ * y la muralla con sus anclajes), así que una cosa nunca redibuja la otra.
+ */
 function refrescarVecinas (b) {
-  if (!b || !ANCLAJES.has(b.tipo)) return
+  if (!b) return
+  const esFoso = b.tipo === 'foso'
+  if (!esFoso && !ANCLAJES.has(b.tipo)) return
+  const vecino = esFoso ? 'foso' : 'muralla'
   const a = b.ancho ?? 1; const h = b.alto ?? 1
   for (const otro of game.state.buildings) {
-    if (otro.tipo !== 'muralla' || otro.id === b.id) continue
+    if (otro.tipo !== vecino || otro.id === b.id) continue
     if (otro.x >= b.x - 1 && otro.x <= b.x + a && otro.z >= b.z - 1 && otro.z <= b.z + h) {
       const m = mallas.get(otro.id)
       if (m && m.firma !== firmaDe(otro)) pintar(otro)

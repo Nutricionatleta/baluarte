@@ -418,6 +418,22 @@ export function impacto (x, y, z, color = PALETA.aceroClaro, fuerza = 1) {
   }
 }
 
+/** Chapoteo: el que cruza el foso con el agua por las rodillas. */
+export function salpicadura (x, z, y = 0.1, cantidad = 5) {
+  if (!humos) return
+  const n = cant(cantidad)
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2
+    const v = azar(0.3, 1.1)
+    humos.emitir(x, y, z, {
+      color: Math.random() < 0.35 ? PALETA.aguaProfunda : PALETA.agua,
+      vx: Math.cos(a) * v, vy: azar(0.9, 2.1), vz: Math.sin(a) * v,
+      vida: azar(0.3, 0.6), grav: -5, roce: 0.7,
+      tam0: azar(0.08, 0.16), tam1: 0.03, alfa: 0.9
+    })
+  }
+}
+
 /** El puñado de polvo del que se desploma: sin él, la figura se cae en el vacío. */
 export function caida (x, z, y = 0.1) {
   if (!humos) return
@@ -1220,7 +1236,7 @@ function escucharEventos () {
 const API = {
   polvo, humo, humoContinuo, fuego, chispas, destello, hojas, explosion,
   motaRecurso, marcarCasillas, anillo, aro, rayoDeLuz, marcarEdificio,
-  temblor, mundoDe, astillas, estela, impacto, caida, confeti, batalla,
+  temblor, mundoDe, astillas, estela, impacto, caida, confeti, batalla, salpicadura,
   get enBatalla () { return enBatalla },
   get momentoDelDia () { return momento },
   get esDeNoche () { return factorNoche > 0.5 },

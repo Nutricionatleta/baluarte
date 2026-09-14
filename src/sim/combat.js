@@ -69,6 +69,25 @@ const PRODUCTIVOS = new Set(['serreria', 'cantera', 'granja', 'mina_oro', 'almac
 const DEFENSIVOS = new Set(['torre_vigia', 'torre_ballesta', 'castillo'])
 const MUROS = new Set(['muralla', 'puerta'])
 
+/**
+ * EL FOSO. La muralla PARA, el foso RETRASA.
+ *
+ * No entra en MUROS a propósito: un muro cierra el recinto y el foso no —se
+ * cruza— así que meterlo ahí le daría al jugador un cerco que no tiene. De lo
+ * que vale de MUROS (no dar estrellas al arrasarlo) se encarga su propio
+ * `cuentaEnSaqueo:false`, que es el campo que el catálogo pactó para eso.
+ *
+ * Tope del coste de una casilla al buscar camino: manda en los cubos del BFS con
+ * pesos (Dial). El catálogo llega a 5 al nivel 8; 8 deja margen de sobra.
+ */
+const MAX_COSTE = 8
+/**
+ * Lo que avanza un jinete al que han metido en la zanja a empujones. Su campo de
+ * flujo rodea los fosos, así que no debería pasar nunca; si pasa, sale a rastras.
+ * NUNCA 0: un avance de cero lo congelaría en la casilla para siempre.
+ */
+const ATASCO_JINETE = 0.12
+
 // army.js y resources.js son la excepción pactada a la regla de no importarse.
 // Se cargan si existen; si no, el motor tira de sus propios cálculos y la batalla
 // sigue funcionando (así este módulo nunca tumba el arranque).
@@ -186,10 +205,15 @@ function prepararBase (base, estado) {
       cz: (b.z | 0) + ((d.alto || 1) - 1) / 2,
       bloquea: d.bloquea === true,
       esMuro: MUROS.has(b.tipo),
+      // La zanja: se marca UNA vez y de aquí tiran el mapa de estorbos, los dos
+      // campos de flujo y el avance de la tropa.
+      esFoso: d.foso === true,
       valor, vivo: true, golpeado: false,
       // Los muros NO cuentan en el porcentaje arrasado: si contaran, tirar cien
       // tramos de piedra daría estrellas sin haber tocado la aldea de verdad.
-      cuenta: !MUROS.has(b.tipo),
+      // El foso entra por la misma puerta con su `cuentaEnSaqueo:false`: cegar
+      // una zanja no es arrasar una aldea.
+      cuenta: !MUROS.has(b.tipo) && d.cuentaEnSaqueo !== false,
       // torreta: dano/radio salen del catálogo por nivel; cd es el reloj de recarga
       dano: typeof d.dano === 'function' ? d.dano(nivel) : 0,
       radio: typeof d.radio === 'function' ? d.radio(nivel) : 0,
@@ -204,6 +228,17 @@ function prepararBase (base, estado) {
       caballeria: PRODUCTIVOS.has(b.tipo) ? 0.5 : e.esMuro ? 2.6 : 1.2,
       distancia: DEFENSIVOS.has(b.tipo) ? 0.75 : e.esMuro ? 2.2 : 1,
       infanteria: e.esMuro ? 1.5 : 1                // lo que pilla, y el muro si estorba
+    }
+    if (e.esFoso) {
+      // Lo que avanza cada clase dentro de la zanja y lo que cuesta cruzarla al
+      // buscar camino, resueltos por nivel una sola vez (el catálogo los da como
+      // funciones). `frena.caballeria = 0` es lo que la echa a rodear.
+      e.freno = d.frena(nivel)
+      e.costePaso = clamp(Math.round(d.costePaso(nivel)), 1, MAX_COSTE)
+      // A un foso NO se le pega teniendo algo mejor que romper: es una zanja, no
+      // un edificio. Con pesos así de altos elegirObjetivo no lo mira salvo que
+      // sea lo único en pie; al jinete sin camino lo manda ahí estorboMasCerca.
+      e.pesos = { asedio: 14, caballeria: 9, distancia: 14, infanteria: 14 }
     }
     if (e.cuenta) valorTotal += valor
     edificios.push(e)
@@ -225,7 +260,8 @@ function prepararBase (base, estado) {
     caja, ancho: caja.x1 - caja.x0 + 1, alto: caja.z1 - caja.z0 + 1,
     torres: edificios.filter(e => e.dano > 0),
     vivos: edificios.slice(),          // lista cacheada; se rehace solo cuando cae algo
-    muros: edificios.filter(e => e.bloquea)
+    muros: edificios.filter(e => e.bloquea),
+    fosos: edificios.filter(e => e.esFoso)
   }
 }
 
@@ -245,8 +281,6 @@ function distAEdificio2 (x, z, e) {
   return dx * dx + dz * dz
 }
 
-const COLA_BFS = new Int32Array(G * G)
-
 /**
  * Mapa de estorbos: 1 = casilla ocupada por edificio vivo (no se atraviesa).
  * Va en coordenadas LOCALES de la caja: i = (z - z0) * ancho + (x - x0).
@@ -254,15 +288,29 @@ const COLA_BFS = new Int32Array(G * G)
 function mapaBloqueo (esc) {
   const c = esc.caja
   const W = esc.ancho
-  const m = esc.mapa || new Uint8Array(W * esc.alto)
+  const N = W * esc.alto
+  const m = esc.mapa || new Uint8Array(N)
   m.fill(0)
+  // Lo que cuesta PISAR cada casilla (1 = terreno llano) y qué foso hay en ella.
+  // Van juntos porque se rehacen a la vez: en cuanto cae algo, el mapa entero.
+  const coste = esc.coste || new Uint8Array(N)
+  coste.fill(1)
+  const enFoso = esc.fosoCelda || new Array(N)
+  enFoso.fill(null)
   for (const e of esc.vivos) {
     const z1 = Math.min(e.z + e.alto - 1, c.z1)
     const x1 = Math.min(e.x + e.ancho - 1, c.x1)
     for (let z = Math.max(e.z, c.z0); z <= z1; z++) {
-      for (let x = Math.max(e.x, c.x0); x <= x1; x++) m[(z - c.z0) * W + (x - c.x0)] = 1
+      for (let x = Math.max(e.x, c.x0); x <= x1; x++) {
+        const i = (z - c.z0) * W + (x - c.x0)
+        // El foso NO es un estorbo: se cruza. Solo cuesta más cruzarlo (camino)
+        // y se tarda más en hacerlo (avance). Por eso no toca `m`.
+        if (e.esFoso) { coste[i] = e.costePaso; enFoso[i] = e } else m[i] = 1
+      }
     }
   }
+  esc.coste = coste
+  esc.fosoCelda = enFoso
   return m
 }
 
@@ -271,9 +319,13 @@ function mapaBloqueo (esc) {
  * -1 = no se llega (hay muralla de por medio). Se cachea por objetivo y se tira a
  * la basura cuando cae algo que bloqueaba: así una muralla rota abre el paso de verdad.
  */
-function campoHacia (esc, objetivo) {
+function campoHacia (esc, objetivo, evitarFoso = false) {
   const cache = esc.campos
-  const guardado = cache.get(objetivo.id)
+  // Dos campos por objetivo: el de a pie (el foso se cruza, caro) y el de la
+  // caballería (el foso es muro). Con uno solo, o el jinete se metía en la
+  // zanja o el peón la rodeaba: son justo las dos conductas que se quieren.
+  const clave = evitarFoso ? `${objetivo.id}|jinete` : objetivo.id
+  const guardado = cache.get(clave)
   if (guardado && guardado.version === esc.versionMapa) return guardado.campo
   // Un campo caducado sigue valiendo: al caer un muro solo se ABREN caminos, así que
   // como mucho la tropa tarda un instante en enterarse de la brecha. Rehacerlo cada
@@ -283,28 +335,50 @@ function campoHacia (esc, objetivo) {
   const W = esc.ancho; const H = esc.alto
   const campo = guardado ? guardado.campo : new Int16Array(W * H)
   campo.fill(-1)
-  const cola = COLA_BFS
-  let cabeza = 0; let cola_ = 0
+  // Ya no es un BFS a secas: cada casilla cuesta lo suyo (1 el llano, `costePaso`
+  // el foso), así que esto es un Dijkstra de cubos —Dial—, que con pesos enteros
+  // y pequeños sale igual de barato que el BFS y no necesita montón ordenado.
+  // El resultado es lo que encauza al enemigo: con una zanja de por medio, dar
+  // el rodeo hacia la puerta sale más barato que meterse dentro.
+  const coste = esc.coste
+  const cubos = esc.cubos || (esc.cubos = Array.from({ length: MAX_COSTE + 1 }, () => []))
+  for (const b of cubos) b.length = 0
+  let pendientes = 0
+  const meter = (i, d) => { campo[i] = d; cubos[d % (MAX_COSTE + 1)].push(i); pendientes++ }
   for (let z = objetivo.z - 1; z <= objetivo.z + objetivo.alto; z++) {
     for (let x = objetivo.x - 1; x <= objetivo.x + objetivo.ancho; x++) {
       if (x < c.x0 || z < c.z0 || x > c.x1 || z > c.z1) continue
       const i = (z - c.z0) * W + (x - c.x0)
-      if (esc.mapa[i] && !(x >= objetivo.x && x < objetivo.x + objetivo.ancho && z >= objetivo.z && z < objetivo.z + objetivo.alto)) continue
+      const propio = x >= objetivo.x && x < objetivo.x + objetivo.ancho && z >= objetivo.z && z < objetivo.z + objetivo.alto
+      if (!propio && esc.mapa[i]) continue
+      if (!propio && evitarFoso && coste[i] > 1) continue
       if (campo[i] !== -1) continue
-      campo[i] = 0
-      cola[cola_++] = i
+      meter(i, 0)
     }
   }
-  while (cabeza < cola_) {
-    const i = cola[cabeza++]
-    const x = i % W; const z = (i / W) | 0
-    const d = campo[i] + 1
-    if (x > 0) { const j = i - 1; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
-    if (x < W - 1) { const j = i + 1; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
-    if (z > 0) { const j = i - W; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
-    if (z < H - 1) { const j = i + W; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
+  const relajar = (j, d) => {
+    if (esc.mapa[j]) return
+    const cp = coste[j]
+    if (evitarFoso && cp > 1) return          // para el jinete, la zanja es muro
+    const nd = d + cp
+    if (campo[j] !== -1 && campo[j] <= nd) return
+    meter(j, nd)
   }
-  cache.set(objetivo.id, { version: esc.versionMapa, t: esc.t, campo })
+  const TOPE = W * H * MAX_COSTE + MAX_COSTE + 2
+  for (let d = 0; pendientes > 0 && d < TOPE; d++) {
+    const cubo = cubos[d % (MAX_COSTE + 1)]
+    while (cubo.length) {
+      const i = cubo.pop()
+      pendientes--
+      if (campo[i] !== d) continue            // entrada vieja: el nodo ya mejoró
+      const x = i % W; const z = (i / W) | 0
+      if (x > 0) relajar(i - 1, d)
+      if (x < W - 1) relajar(i + 1, d)
+      if (z > 0) relajar(i - W, d)
+      if (z < H - 1) relajar(i + W, d)
+    }
+  }
+  cache.set(clave, { version: esc.versionMapa, t: esc.t, campo })
   return campo
 }
 
@@ -537,6 +611,24 @@ function muroMasCerca (u, esc) {
     // un muro ya empezado tira más que uno intacto: así la hueste concentra los
     // golpes en un punto y abre brecha, en vez de arañar veinte tramos a la vez
     const d = distAEdificio(u.x, u.z, e) - (e.golpeado ? 7 : 0)
+    if (d < mejorD) { mejorD = d; mejor = e }
+  }
+  return mejor
+}
+
+/**
+ * A qué se arrima el que se ha quedado SIN camino: al muro más cercano y, si no
+ * queda ninguno, al foso. Cegar la zanja a golpes también abre paso, y es lo
+ * único que le queda al jinete al que los fosos han dejado encerrado fuera
+ * (nunca se queda plantado mirando la zanja).
+ */
+function estorboMasCerca (u, esc) {
+  const muro = muroMasCerca(u, esc)
+  if (muro) return muro
+  let mejor = null; let mejorD = Infinity
+  for (const e of esc.fosos) {
+    if (!e.vivo) continue
+    const d = distAEdificio(u.x, u.z, e) - (e.golpeado ? 5 : 0)
     if (d < mejorD) { mejorD = d; mejor = e }
   }
   return mejor
@@ -776,20 +868,25 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
       }
 
       // --- moverse: por el campo de flujo, y si no hay camino, a golpes ---
-      const campo = campoHacia(esc, obj)
+      // La caballería va por SU campo, el que trata los fosos como muro: no se
+      // mete en la zanja, la rodea, y ese rodeo la lleva derecha a la puerta.
+      // En una base SIN fosos comparte campo con todos: así una aldea sin zanjas
+      // se juega exactamente igual que antes de que el foso existiera.
+      const campo = campoHacia(esc, obj, u.clase === 'caballeria' && esc.fosos.length > 0)
       const K = esc.caja; const W = esc.ancho
       const cx = clamp(Math.round(u.x), K.x0, K.x1)
       const cz = clamp(Math.round(u.z), K.z0, K.z1)
       const aqui = campo[(cz - K.z0) * W + (cx - K.x0)]
       if (aqui < 0) {
-        // Encerrado fuera: decide entre rodear (si el rodeo es corto) o romper el muro.
-        const muro = muroMasCerca(u, esc)
+        // Encerrado fuera: decide entre rodear (si el rodeo es corto) o romper el
+        // estorbo — muro, o la zanja si no hay muro que tirar.
+        const muro = estorboMasCerca(u, esc)
         if (muro && muro !== obj) { u.objetivo = muro; u.rompiendo = true; u.revisar = 3 }
         continue
       }
       if (!u.rompiendo && aqui > d * 2.4 + 8) {
         // Hay camino, pero es un rodeo absurdo: le sale más a cuenta abrir brecha.
-        const muro = muroMasCerca(u, esc)
+        const muro = estorboMasCerca(u, esc)
         if (muro && muro !== obj) { u.objetivo = muro; u.rompiendo = true; u.revisar = 3; continue }
       }
       let mejorI = -1; let mejorV = aqui
@@ -802,7 +899,17 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
       const destZ = mejorI < 0 ? obj.cz : ((mejorI / W) | 0) + K.z0
       const vx = destX - u.x; const vz = destZ - u.z
       const largo = Math.hypot(vx, vz) || 1
-      const avance = u.vel * PASO
+      let avance = u.vel * PASO
+      // EL FOSO FRENA. El que está DENTRO de la zanja avanza lo que le deja su
+      // clase (a nivel 1: la mitad el peón y el arquero, un tercio el asedio),
+      // y mientras chapotea sigue quieto delante de las torres, que es toda la
+      // gracia. El jinete no debería llegar aquí —su campo rodea los fosos—;
+      // si lo empujan dentro sale a rastras, nunca clavado.
+      const zanja = esc.fosoCelda[i]
+      if (zanja && zanja.vivo) {
+        const f = zanja.freno[u.clase] ?? 1
+        avance *= f > 0 ? f : ATASCO_JINETE
+      }
       u.x += (vx / largo) * avance
       u.z += (vz / largo) * avance
     }
@@ -1373,11 +1480,14 @@ function parteDefensa ({ r, defendida, perdidas, daños, atacante, tropasEnemiga
 export function calcularDefensa (estado = game.state) {
   // 'aldea': el recuento del recinto se hace dentro de TU linde, no del valle.
   const esc = prepararBase({ id: 'aldea', buildings: estado.buildings || [] }, estado)
-  const vale = esc.edificios.filter(e => !e.esMuro && e.tipo !== 'pozo' && e.tipo !== 'estandarte')
+  // Ni los muros ni los fosos son "aldea que proteger": son la protección. Que
+  // un foso saliera en la lista de desprotegidos sería el consejo más tonto del
+  // juego ("tu foso está fuera de la muralla").
+  const vale = esc.edificios.filter(e => !e.esMuro && !e.esFoso && e.tipo !== 'pozo' && e.tipo !== 'estandarte')
   const resultado = {
     puntuacion: 0, nota: 'Indefensa', cobertura: 0, recinto: 0, resumen: '',
     cerrada: false, brechas: 0, desprotegidos: [], consejos: [], dps: 0, murosVivos: 0,
-    torres: 0, dpsEsperado: 0
+    torres: 0, dpsEsperado: 0, fosos: 0, fososCubiertos: 0, bonoFoso: 0
   }
   if (!vale.length) {
     resultado.resumen = 'Todavía no hay nada que defender.'
@@ -1400,6 +1510,22 @@ export function calcularDefensa (estado = game.state) {
   }
   resultado.cobertura = Math.round((cubierto / total) * 100)
   resultado.dps = Math.round(dps)
+
+  // 1 bis) EL FOSO: defensa PASIVA. No cierra el recinto —se cruza— así que no
+  // entra en el recuento de muralla; lo que aporta es TIEMPO, y el tiempo solo
+  // vale si hay quien dispare mientras. Por eso aquí solo suma la zanja que cae
+  // bajo el radio de una torre: un foso sin torres no es una defensa, es un
+  // charco. Con tope, que alfombrar la aldea de zanjas tampoco es un plan.
+  const fosos = esc.edificios.filter(e => e.esFoso)
+  let fososCubiertos = 0
+  for (const f of fosos) {
+    for (const t of esc.torres) {
+      if (distAEdificio(f.cx, f.cz, t) <= t.radio) { fososCubiertos++; break }
+    }
+  }
+  resultado.fosos = fosos.length
+  resultado.fososCubiertos = fososCubiertos
+  resultado.bonoFoso = Math.min(10, Math.round(fososCubiertos * 1.2))
 
   // 2) Recinto: se inunda el tablero desde el borde; lo que la inundación NO toca
   //    está de verdad dentro de la muralla. Es la prueba de fuego del cerco.
@@ -1486,6 +1612,7 @@ export function calcularDefensa (estado = game.state) {
   const pegada = clamp(dps / esperado, 0, 1.2)
   let p = resultado.cobertura * 0.45 + resultado.recinto * 0.35 + pegada * 100 * 0.20
   if (brechas > 0) p -= Math.min(15, brechas * 3)     // un boquete se paga
+  p += resultado.bonoFoso                             // y la zanja cubierta se cobra
   resultado.puntuacion = clamp(Math.round(p), 0, 100)
   resultado.nota = resultado.puntuacion >= 80 ? 'Inexpugnable'
     : resultado.puntuacion >= 60 ? 'Bien defendida'
@@ -1498,6 +1625,11 @@ export function calcularDefensa (estado = game.state) {
   else if (resultado.cobertura < 60) resultado.consejos.push(`Tus torres solo cubren el ${resultado.cobertura} % de la aldea. Muévelas hacia el centro, o pon otra.`)
   if (dps < esperado * 0.6 && esc.torres.length) {
     resultado.consejos.push(`Tus torres hacen ${Math.round(dps)} de daño por segundo y para tu ayuntamiento nivel ${nivel} harían falta unos ${Math.round(esperado)}: súbelas de nivel.`)
+  }
+  if (fosos.length && !fososCubiertos) {
+    resultado.consejos.push(`Tus ${plural(fosos.length, 'foso', 'fosos')} no los cubre ninguna torre: una zanja sola no mata a nadie. Cava delante de una torre, no lejos de ella.`)
+  } else if (!fosos.length && esc.torres.length) {
+    resultado.consejos.push('Cava una línea de foso por delante de tus torres: el que la cruza tarda el doble y se come el doble de flechas, y la caballería ni entra.')
   }
   if (!muros.length) resultado.consejos.push('Sin muralla no hay aldea que aguante: cierra al menos el ayuntamiento.')
   else if (!resultado.cerrada) resultado.consejos.push(brechas ? `La muralla tiene ${plural(brechas, 'boquete', 'boquetes')}: se cuelan sin dar un golpe. Cierra el hueco con muralla o con una puerta.` : 'La muralla no cierra nada: no encierra ningún edificio.')

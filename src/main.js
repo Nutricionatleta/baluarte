@@ -106,7 +106,7 @@ async function arrancar () {
     ['Escribiendo encargos…',  () => usar('sim/quests',       m.quests)],
     ['Colgando estandartes…',  () => usar('ui/hud',           m.hud)],
     ['Abriendo el taller…',    () => usar('ui/build-panel',   m.buildPanel)],
-    ['Desplegando el plano…',  () => usar('ui/editor-aldea',  m.editorAldea)],
+    ['Cuadrando la aldea…',    () => usar('ui/editor-aldea',  m.editorAldea)],
     ['Formando la tropa…',     () => usar('ui/army-panel',    m.armyPanel)],
     ['Desplegando el mapa…',   () => usar('ui/world-panel',   m.worldPanel)],
     ['Sellando encargos…',     () => usar('ui/quest-panel',   m.questPanel)],
