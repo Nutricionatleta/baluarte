@@ -27,6 +27,7 @@ import {
 // Excepción pactada: la interfaz PIDE a la simulación, nunca toca game.state.
 import * as OBRA from '../sim/buildings.js'
 import * as CIENCIA from '../sim/research.js'
+import * as DESPEJE from '../sim/despeje.js'
 
 /* ===========================================================================
    Defensas: si un módulo de sim aún no está escrito, el panel no se cae
@@ -531,8 +532,40 @@ function botonReorganizar () {
   return caja
 }
 
+/**
+ * 🪓 DESPEJAR. El valle está lleno de árboles, rocas y matorrales que antes eran
+ * puro decorado. Desde aquí se pinta con el dedo lo que hay que limpiar: una
+ * cuadrilla va, tala, y la madera y la piedra entran en la caja. Va pegado a
+ * Reorganizar porque las dos cosas son lo mismo: hacer sitio.
+ */
+function botonDespejar () {
+  const r = simDespejeResumen()
+  const enMarcha = r ? r.enMarcha.length + r.esperando : 0
+  return el('button', {
+    clase: 'btn btn-piedra', type: 'button',
+    estilo: {
+      minHeight: '58px', width: '100%', display: 'flex', alignItems: 'center',
+      gap: '10px', justifyContent: 'flex-start', padding: '0 14px', textAlign: 'left',
+      marginTop: '8px'
+    },
+    onclick: () => { salirDeColocacion(true); cerrar(); entrarEnDespeje() }
+  }, [
+    el('span', { estilo: { fontSize: '1.6em', lineHeight: '1' }, texto: '🪓' }),
+    el('span', { estilo: { display: 'grid', lineHeight: '1.15' } }, [
+      el('span', { estilo: { fontWeight: '900' }, texto: 'Despejar el terreno' }),
+      el('span', {
+        estilo: { fontSize: '.72em', fontWeight: '700', opacity: '.85' },
+        texto: enMarcha
+          ? `${enMarcha} casilla${enMarcha > 1 ? 's' : ''} en faena · talar da madera y piedra`
+          : 'Tala árboles y pica rocas: madera, piedra y sitio para construir'
+      })
+    ])
+  ])
+}
+
 function pintarCatalogo (destino) {
   destino.appendChild(botonReorganizar())
+  destino.appendChild(botonDespejar())
 
   // aviso de constructores: afecta a TODO, mejor arriba que repetido en 20 fichas
   const obras = estado().obras?.length || 0
@@ -1882,6 +1915,163 @@ function refrescarBarra () {
 }
 
 /* ===========================================================================
+   6. MODO DESPEJAR — pintar con el dedo lo que hay que talar
+   =========================================================================== */
+
+const simDespejeResumen = () => seguro(DESPEJE.resumen, null)
+const simDespejeQueHay = (x, z) => seguro(DESPEJE.resumenDe, null, x, z)
+const simDespejeEncargar = (x, z) => seguro(DESPEJE.encargar, { ok: false, motivo: 'Ahora no' }, x, z)
+const simDespejeCancelarEspera = () => seguro(DESPEJE.cancelarEspera, 0)
+
+let despeje = null       // { pedidas, ultimoMotivo, ultimoTexto }
+let barraDespeje = null
+
+/**
+ * Se entra igual que a colocar un muro: barra fina abajo y el dedo arrastrando.
+ * Se reutiliza EV.BUILD_MODE con `tipo: null` (el mismo apaño que usa el editor
+ * de aldea): enciende la rejilla y las marcas de vegetación del terreno, congela
+ * la cámara y hace que scene.js vaya soltando GRID_TAP casilla a casilla, que es
+ * exactamente lo que hace falta para pintar.
+ */
+function entrarEnDespeje () {
+  salirDeDespeje(true)
+  despeje = { pedidas: 0, ultimoTexto: '', ultimoMotivo: '' }
+  emitiendo = true
+  events.emit(EV.BUILD_MODE, { activo: true, tipo: null, despejando: true, ancho: 1, alto: 1 })
+  emitiendo = false
+  crearBarraDespeje()
+  toast('Arrastra el dedo por lo que quieras limpiar', 'info', 2200)
+}
+
+function salirDeDespeje (silencioso = false) {
+  if (!despeje) return
+  const pedidas = despeje.pedidas
+  despeje = null
+  barraDespeje?.caja?.remove()
+  barraDespeje = null
+  emitiendo = true
+  events.emit(EV.BUILD_MODE, { activo: false, tipo: null })
+  emitiendo = false
+  if (silencioso) return
+  if (pedidas) toast(`🪓 ${pedidas} casilla${pedidas > 1 ? 's' : ''} encargada${pedidas > 1 ? 's' : ''} a la cuadrilla`, 'bien')
+}
+
+/** Cada casilla que roza el dedo se encarga; lo que no vale, se dice y no molesta más. */
+function pintarDespeje (x, z) {
+  if (!despeje) return
+  const hay = simDespejeQueHay(x, z)
+  despeje.ultimoTexto = hay ? `${hay.texto} · ${Math.round(hay.segundos)} s` : ''
+  const r = simDespejeEncargar(x, z)
+  if (r && r.ok) {
+    despeje.pedidas++
+    despeje.ultimoMotivo = ''
+    navigator.vibrate?.(8)
+  } else if (r && r.causa !== 'repetida' && r.causa !== 'vacia') {
+    despeje.ultimoMotivo = r.motivo || ''
+  } else if (r && r.causa === 'vacia') {
+    despeje.ultimoMotivo = ''
+  }
+  refrescarBarraDespeje()
+}
+
+function crearBarraDespeje () {
+  const raiz = document.getElementById('hud') || document.body
+  const caja = el('div', {
+    clase: 'panel',
+    estilo: {
+      position: 'fixed', left: '0', right: '0', bottom: '0', zIndex: '55',
+      borderRadius: 'var(--r-g) var(--r-g) 0 0', borderBottom: 'none',
+      padding: '10px 12px',
+      paddingBottom: 'calc(10px + var(--seg-abajo))',
+      paddingLeft: 'calc(12px + var(--seg-izq))', paddingRight: 'calc(12px + var(--seg-der))',
+      boxShadow: 'var(--sombra-flotante)'
+    }
+  })
+
+  const estadoTxt = el('div', { clase: 'pequeño', estilo: { fontWeight: '800', lineHeight: '1.25' } })
+  const detalleTxt = el('div', { clase: 'pequeño tenue' })
+  const botinTxt = el('div', { estilo: { fontWeight: '800', whiteSpace: 'nowrap' } })
+
+  caja.appendChild(el('div', { clase: 'fila', estilo: { gap: '10px', marginBottom: '8px' } }, [
+    el('span', { estilo: { fontSize: '1.9em', lineHeight: '1' }, texto: '🪓' }),
+    el('div', { clase: 'crece' }, [
+      el('div', { estilo: { fontWeight: '800' }, texto: 'Despejar el terreno' }),
+      estadoTxt, detalleTxt
+    ]),
+    botinTxt
+  ]))
+
+  const fila = el('div', { estilo: { display: 'grid', gridTemplateColumns: 'auto auto 1fr', gap: '8px' } })
+  fila.appendChild(el('button', {
+    clase: 'btn btn-piedra', type: 'button', texto: '✕', 'aria-label': 'Salir de despejar',
+    estilo: { minWidth: '56px', minHeight: '56px', fontSize: '1.2em' },
+    onclick: () => salirDeDespeje()
+  }))
+  fila.appendChild(el('button', {
+    clase: 'btn btn-piedra', type: 'button', texto: '🧹', 'aria-label': 'Vaciar los encargos que esperan',
+    estilo: { minWidth: '56px', minHeight: '56px', fontSize: '1.2em' },
+    onclick: () => {
+      const n = simDespejeCancelarEspera()
+      toast(n ? `${n} encargo${n > 1 ? 's' : ''} retirado${n > 1 ? 's' : ''}` : 'No hay nada esperando', n ? 'bien' : 'info')
+      refrescarBarraDespeje()
+    }
+  }))
+  fila.appendChild(el('button', {
+    clase: 'btn btn-oro', type: 'button', texto: 'Listo',
+    estilo: { minHeight: '56px', width: '100%', fontSize: '1.02em' },
+    onclick: () => salirDeDespeje()
+  }))
+  caja.appendChild(fila)
+
+  const pista = el('div', {
+    clase: 'pequeño tenue',
+    estilo: { marginTop: '8px' },
+    texto: 'Lo talado da madera y piedra. Construir encima también lo quita, pero entonces no cobras nada.'
+  })
+  caja.appendChild(pista)
+
+  raiz.appendChild(caja)
+  barraDespeje = { caja, estadoTxt, detalleTxt, botinTxt }
+  refrescarBarraDespeje()
+}
+
+function refrescarBarraDespeje () {
+  if (!barraDespeje || !despeje) return
+  const r = simDespejeResumen()
+  const enMarcha = r ? r.enMarcha.length : 0
+  const esperando = r ? r.esperando : 0
+
+  const texto = !r || !r.hayInventario
+    ? 'El valle todavía se está dibujando…'
+    : despeje.ultimoMotivo
+      ? `⛔ ${despeje.ultimoMotivo}`
+      : enMarcha
+        ? `🪓 ${enMarcha} cuadrilla${enMarcha > 1 ? 's' : ''} talando${esperando ? ` · ${esperando} en cola` : ''}`
+        : esperando
+          ? `⏳ ${esperando} encargo${esperando > 1 ? 's' : ''} esperando constructor`
+          : '👆 Arrastra el dedo por los árboles y las rocas'
+  if (barraDespeje.estadoTxt.textContent !== texto) barraDespeje.estadoTxt.textContent = texto
+  barraDespeje.estadoTxt.style.color = despeje.ultimoMotivo ? 'var(--rojo)' : enMarcha ? 'var(--verde-oscuro)' : ''
+
+  const restan = enMarcha ? Math.max(0, Math.min(...r.enMarcha.map(f => f.restan))) : 0
+  const detalle = despeje.ultimoTexto
+    ? `Aquí hay ${despeje.ultimoTexto}`
+    : enMarcha
+      ? `La primera cae en ${formatoTiempo(restan)} · ${r.plazas} constructor${r.plazas > 1 ? 'es' : ''} en la aldea`
+      : r && r.despejadas
+        ? `${r.despejadas} casillas ya limpias`
+        : ''
+  if (barraDespeje.detalleTxt.textContent !== detalle) barraDespeje.detalleTxt.textContent = detalle
+
+  const p = r ? r.pendiente : { madera: 0, piedra: 0 }
+  const trozos = []
+  if (p.madera) trozos.push(`${ICONO.madera} ${p.madera}`)
+  if (p.piedra) trozos.push(`${ICONO.piedra} ${p.piedra}`)
+  const botin = trozos.join(' ')
+  if (barraDespeje.botinTxt.textContent !== botin) barraDespeje.botinTxt.textContent = botin
+}
+
+/* ===========================================================================
    Enganches
    =========================================================================== */
 
@@ -1897,18 +2087,23 @@ export function init () {
   })
 
   events.on(EV.GRID_TAP, (p) => {
-    if (!puesta || !p) return
+    if (!p) return
+    if (despeje) { pintarDespeje(p.x | 0, p.z | 0); return }
+    if (!puesta) return
     moverFantasma(p.x | 0, p.z | 0)
   })
 
   // si otro módulo apaga el modo construcción, aquí se recoge la mesa
   events.on(EV.BUILD_MODE, (p) => {
-    if (emitiendo || !puesta) return
+    if (emitiendo) return
+    if (despeje && p && (p.activo === false || p.despejando !== true)) salirDeDespeje(true)
+    if (!puesta) return
     if (p && p.activo === false) salirDeColocacion(true)
   })
 
   events.on(EV.TICK, () => {
     if (puesta?.cola.length) vaciarCola()
+    if (barraDespeje) refrescarBarraDespeje()
     if (laHoja || barra) refrescarLigero()
   })
 
@@ -1923,9 +2118,17 @@ export function init () {
   }
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && puesta) { e.preventDefault(); salirDeColocacion() }
+    if (e.key !== 'Escape') return
+    if (despeje) { e.preventDefault(); salirDeDespeje(); return }
+    if (puesta) { e.preventDefault(); salirDeColocacion() }
   })
 
   // atajo de pruebas en el navegador: baluarte.taller.abrir('mejorar')
-  if (typeof window !== 'undefined') window.taller = { abrir, cerrar, colocar: entrarEnColocacion, get modo () { return puesta } }
+  if (typeof window !== 'undefined') {
+    window.taller = {
+      abrir, cerrar, colocar: entrarEnColocacion, despejar: entrarEnDespeje,
+      get modo () { return puesta },
+      get despeje () { return despeje }
+    }
+  }
 }

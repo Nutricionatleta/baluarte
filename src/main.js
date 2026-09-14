@@ -82,6 +82,7 @@ async function arrancar () {
     ['Contando el grano…',     () => usar('sim/resources',    m.resources)],
     ['Repartiendo faena…',     () => usar('sim/buildings',    m.buildings)],
     ['Llamando a la gente…',   () => usar('sim/villagers',    m.villagers)],
+    ['Afilando hachas…',       () => usar('sim/despeje',      () => import('./sim/despeje.js'))],
     ['Levantando ruinas…',     () => usar('sim/reparacion',   m.reparacion)],
     ['Afilando espadas…',      () => usar('sim/army',         m.army)],
     ['Estudiando el arte…',    () => usar('sim/research',     m.research)],

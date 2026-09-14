@@ -63,9 +63,18 @@ let opacidadObjetivo = 0
 let mar = null
 /** Reloj del oleaje: se comparte con el sombreador del mar (un solo número por frame). */
 const relojMar = { value: 0 }
-/** decoración por casilla del tablero: 'x|z' -> [{ malla, i }] para poder talar */
+/** decoración por casilla del tablero: 'x|z' -> [{ malla, i, tipo }] para poder talar */
 const porCasilla = new Map()
+/** solo lo que VALE: 'x|z' -> ['roble','roca']. Es lo que se publica a la simulación. */
+const tiposPorCasilla = new Map()
 const casillasDespejadas = new Set()
+/** árboles cayéndose ahora mismo: { malla, i, m0, px, py, pz, t, dur, modo } */
+const caidas = []
+/** cuadrillas de despeje plantadas en su casilla: id de faena -> grupo 3D */
+const cuadrillas = new Map()
+let marcaVegetacion = null
+let vegetacionSucia = true
+let enModoObra = false
 
 // ── Territorio: lo que hace falta para aclarar una parcela en caliente ───
 /** color real de cada cara del valle, sin apagar: Float32Array(caras*3) */
@@ -416,8 +425,20 @@ const PIEZAS = {
   hierba: [
     { geo: () => G.cono, matl: () => mat(PALETA.hierbaOscura), y: 0.2, s: [0.5, 0.4, 0.5] }
   ],
+  /**
+   * FLOR CON TALLO. Antes era una bolita: un icosaedro de 20 caras a escala 0,16
+   * con `flatShading`. Desde el móvil, a 19 píxeles, eso no se lee como una flor
+   * sino como un cristalito cuadrado flotando sobre la hierba (el dueño lo cazó
+   * en una captura, y tenía razón). Ahora son dos piezas: un tallo verde fino
+   * que NACE DEL SUELO (el cilindro va de y=0 a y=0.26, no flota) y una cabeza
+   * plana y ancha encima, que es la silueta que el ojo reconoce como flor.
+   * El tallo lleva `sinTinte` para que el color de la flor no le llegue.
+   */
   flor: [
-    { geo: () => G.esfera, matl: () => mat(PALETA.florBlanca), y: 0.16, s: [0.16, 0.16, 0.16] }
+    { geo: () => G.cilindro6, matl: () => mat(PALETA.hierbaOscura), y: 0.13, s: [0.035, 0.26, 0.035], sinTinte: true },
+    // esfera1 (80 caras) y no la de 20: achatada sobre el tallo se lee redonda
+    // desde cualquier lado. La de 20 caras era justo la que parecía un cristal.
+    { geo: () => G.esfera1, matl: () => mat(PALETA.florBlanca), y: 0.265, s: [0.16, 0.1, 0.16] }
   ],
   // --- lo que cubre la tierra que aún no es tuya ---
   zarza: [
@@ -430,8 +451,14 @@ const PIEZAS = {
   ]
 }
 
-/** Los que se talan al construir encima. La hierba y las flores no estorban. */
+/**
+ * Lo que VALE: se tala o se pica, estorba de verdad y da madera o piedra.
+ * sim/despeje.js recibe esta lista por casilla (EV.DECO_INVENTARIO) y pone el
+ * precio; aquí solo se dice qué hay dónde.
+ */
 const TALABLE = new Set(['pino', 'roble', 'roca', 'penasco', 'arbusto', 'zarza', 'ruina'])
+/** Hierba y flores: se retiran con la casilla, pero no valen nada ni se cobran. */
+const ESTORBA = new Set(['hierba', 'flor'])
 /** Lo que se retira SOLO al conquistar la parcela: es la señal de "esto está en barbecho". */
 const MALEZA = new Set(['zarza', 'ruina'])
 
@@ -449,7 +476,7 @@ function sembrar (rng) {
     return alturaMundo(wx, wz)
   }
 
-  const soltar = (tipo, wx, wz, y, sBase, giroLibre = false) => {
+  const soltar = (tipo, wx, wz, y, sBase, giroLibre = false, colorFijo = null) => {
     plantas.push({
       tipo,
       x: wx,
@@ -461,7 +488,7 @@ function sembrar (rng) {
       rx: giroLibre ? rng.float(-0.5, 0.5) : 0,
       ry: rng.float(0, Math.PI * 2),
       rz: giroLibre ? rng.float(-0.5, 0.5) : 0,
-      color: tipo === 'flor' ? rng.pick(COLORES_FLOR) : null
+      color: colorFijo !== null ? colorFijo : (tipo === 'flor' ? rng.pick(COLORES_FLOR) : null)
     })
   }
 
@@ -520,7 +547,43 @@ function sembrar (rng) {
   porLaIsla('roca', cuantos(70), () => rng.float(0.35, 0.85), true)
   porLaIsla('arbusto', cuantos(180), () => rng.float(0.4, 0.85), true)
   porLaIsla('hierba', cuantos(420), () => rng.float(0.5, 1.0))
-  porLaIsla('flor', cuantos(260), () => rng.float(0.7, 1.3))
+
+  // --- 3b. Flores: MATAS, no confeti ---
+  // Antes eran 260 puntos de color sueltos por toda la isla, y desde el móvil
+  // eso es ruido visual: cuatro docenas de motas amarillas flotando. Las flores
+  // crecen en grupo y en sitios con sentido, así que ahora salen en matas de
+  // 3-6 del MISMO color (una mata es una planta) y solo en dos sitios: el borde
+  // de los caminos, que es donde de verdad prenden, y los claros del prado.
+  const mata = (cx, cz, camino) => {
+    const color = rng.pick(COLORES_FLOR)
+    const cuantas = rng.int(3, 6)
+    for (let k = 0; k < cuantas; k++) {
+      const a = rng.float(0, Math.PI * 2)
+      const r = Math.sqrt(rng.next()) * 0.4
+      const wx = cx + Math.cos(a) * r; const wz = cz + Math.sin(a) * r
+      const y = libre(wx, wz, CENTRO_LIBRE, camino)
+      if (y === null) continue
+      soltar('flor', wx, wz, y, rng.float(0.82, 1.25), false, color)
+    }
+  }
+  const matas = (n, elige) => {
+    let puestas = 0; let intentos = 0
+    while (puestas < n && intentos++ < n * 30) {
+      const wx = rng.float(-R_ISLA, R_ISLA); const wz = rng.float(-R_ISLA, R_ISLA)
+      const camino = elige(wx, wz)
+      if (camino === null) continue
+      mata(wx, wz, camino)
+      puestas++
+    }
+  }
+  // a un paso del camino, ni encima de él ni perdidas en el prado
+  matas(cuantos(16), (wx, wz) => {
+    if (libre(wx, wz, CENTRO_LIBRE, 1.0) === null) return null
+    const dc = distACamino(wx, wz)
+    return (dc >= 1.05 && dc <= 2.5) ? 1.0 : null
+  })
+  // y algún claro suelto, lejos del camino, para que el prado no quede pelado
+  matas(cuantos(9), (wx, wz) => (libre(wx, wz, CENTRO_LIBRE, 3.2) === null ? null : 3.2))
 
   // --- 4. Barbecho: lo que cubre las parcelas que todavía no son tuyas ---
   // Zarzas, matojos y cuatro piedras de algo que hubo. Es la mitad del mensaje:
@@ -588,19 +651,26 @@ function montarInstancias (plantas) {
         mLocal.setPosition(d.x || 0, d.y || 0, d.z || 0)
         mFinal.multiplyMatrices(mBase, mLocal)
         mallas[k].setMatrixAt(i, mFinal)
-        if (p.color !== null && mallas[k].instanceColor !== undefined) {
+        // el tallo de la flor no se tiñe: si no, saldría un tallo rojo o azul
+        if (p.color !== null && !d.sinTinte && mallas[k].instanceColor !== undefined) {
           mallas[k].setColorAt(i, colorFlor.set(p.color))
         }
       }
 
-      // índice por casilla del tablero, para poder talar al construir
-      if (TALABLE.has(tipo)) {
+      // índice por casilla del tablero, para poder talar al construir o a propósito
+      if (TALABLE.has(tipo) || ESTORBA.has(tipo)) {
         const gx = Math.round(p.x / CONFIG.CELDA + off)
         const gz = Math.round(p.z / CONFIG.CELDA + off)
         const clave = `${gx}|${gz}`
         let lote = porCasilla.get(clave)
         if (!lote) porCasilla.set(clave, lote = [])
-        for (const m of mallas) lote.push({ malla: m, i })
+        for (const m of mallas) lote.push({ malla: m, i, tipo })
+        // lo que VALE se apunta aparte: es lo que la simulación puede cobrar
+        if (TALABLE.has(tipo)) {
+          let tipos = tiposPorCasilla.get(clave)
+          if (!tipos) tiposPorCasilla.set(clave, tipos = [])
+          tipos.push(tipo)
+        }
         // la maleza además se indexa por parcela: al conquistarla se retira sola
         if (MALEZA.has(tipo)) {
           const par = parcelaDe(gx, gz)
@@ -864,11 +934,208 @@ function pasoConquistas (dt) {
 }
 
 function rehacerRejilla () {
+  // la marca de vegetación solo cubre lo tuyo, así que al ganar parcela cambia
+  vegetacionSucia = true
+  if (enModoObra) rehacerMarcaVegetacion()
   if (!rejilla) return
   rejilla.geometry.dispose()
   const g = new THREE.BufferGeometry()
   g.setAttribute('position', new THREE.Float32BufferAttribute(puntosRejilla(), 3))
   rejilla.geometry = g
+}
+
+// =============================================================================
+//  DESPEJAR: el valle deja de ser decorado
+// =============================================================================
+/**
+ * Lo que hay plantado ya no es solo adorno: sim/despeje.js manda cuadrillas a
+ * talarlo y lo cobra en madera y piedra. Este módulo pone las tres cosas que
+ * hacen falta desde el lado de lo que se ve:
+ *   1. DECIR qué hay en cada casilla (la vegetación sale de la semilla, así que
+ *      la simulación no puede saberlo sin copiar la receta de `sembrar`).
+ *   2. TIRARLO con gracia: el árbol gira sobre su tocón y se va con sus hojas
+ *      y su polvo; la piedra se hunde. Nada de desaparecer de golpe.
+ *   3. ENSEÑAR la faena: mientras dura, una cuadrilla con su hacha en la casilla.
+ */
+
+// --- el árbol que cae ---
+const _m0Caida = new THREE.Matrix4()
+const _mPiv = new THREE.Matrix4()
+const _mRot = new THREE.Matrix4()
+const _mNeg = new THREE.Matrix4()
+const _mOut = new THREE.Matrix4()
+const _qC = new THREE.Quaternion()
+const _eC = new THREE.Euler()
+const _vC = new THREE.Vector3()
+
+/** Hacia dónde cae: fijo para cada casilla, que un árbol no elige al azar dos veces. */
+function direccionDeCaida (x, z) {
+  const h = ((x * 73856093) ^ (z * 19349663)) >>> 0
+  return (h % 628) / 100
+}
+
+const DURO = new Set(['roca', 'penasco', 'ruina'])
+
+function empujarCaida (malla, i, tipo, dir) {
+  malla.getMatrixAt(i, _m0Caida)
+  if (_m0Caida.elements[0] === 0 && _m0Caida.elements[5] === 0) return   // ya estaba retirado
+  const px = _m0Caida.elements[12]; const pz = _m0Caida.elements[14]
+  const duro = DURO.has(tipo)
+  caidas.push({
+    malla,
+    i,
+    m0: _m0Caida.clone(),           // una copia por pieza talada; en el frame no se crea nada
+    px,
+    py: alturaMundo(px, pz),
+    pz,
+    t: 0,
+    dur: duro ? 0.5 : 0.9,
+    ejeX: Math.cos(dir),
+    ejeZ: Math.sin(dir),
+    duro
+  })
+}
+
+function pasoCaidas (dt) {
+  if (!caidas.length) return
+  _tocadas.clear()
+  for (let k = caidas.length - 1; k >= 0; k--) {
+    const c = caidas[k]
+    c.t += dt
+    const p = c.t / c.dur
+    if (p >= 1) {
+      c.malla.setMatrixAt(c.i, _nada)
+      _tocadas.add(c.malla)
+      caidas.splice(k, 1)
+      continue
+    }
+    if (c.duro) {
+      const s = 1 - suavizar(p)                 // la piedra se deshace y se hunde
+      _mOut.copy(c.m0).scale(_vC.set(s, s, s))
+      _mOut.elements[13] -= (1 - s) * 0.3
+    } else {
+      // gira sobre el tocón y acelera al final: así se lee "ha caído", no "se ha ido"
+      const ang = Math.pow(p, 1.8) * 1.55
+      _eC.set(c.ejeZ * ang, 0, -c.ejeX * ang)
+      _qC.setFromEuler(_eC)
+      _mPiv.makeTranslation(c.px, c.py, c.pz)
+      _mRot.makeRotationFromQuaternion(_qC)
+      _mNeg.makeTranslation(-c.px, -c.py, -c.pz)
+      _mOut.multiplyMatrices(_mPiv, _mRot)
+      _mOut.multiply(_mNeg)
+      _mOut.multiply(c.m0)
+    }
+    c.malla.setMatrixAt(c.i, _mOut)
+    _tocadas.add(c.malla)
+  }
+  for (const m of _tocadas) m.instanceMatrix.needsUpdate = true
+}
+
+// --- la cuadrilla que está en ello ---
+/**
+ * Un constructor con su hacha, plantado en la casilla mientras dura la faena.
+ * Se monta aquí y no en render/units.js porque no es un aldeano del estado: es
+ * la cara visible de una faena de sim/despeje.js, y se va con ella.
+ */
+function montarCuadrilla () {
+  const g = new THREE.Group()
+  const calzas = new THREE.Mesh(G.caja, mat(PALETA.calzas))
+  calzas.position.y = 0.16; calzas.scale.set(0.26, 0.32, 0.2)
+  const cuerpo = new THREE.Mesh(G.cono6, mat(PALETA.oficioObra))
+  cuerpo.position.y = 0.52; cuerpo.scale.set(0.46, 0.56, 0.42)
+  const cabeza = new THREE.Mesh(G.esfera, mat(PALETA.pielMedia))
+  cabeza.position.y = 0.86; cabeza.scale.set(0.26, 0.28, 0.26)
+  const gorro = new THREE.Mesh(G.cono6, mat(PALETA.cuero))
+  gorro.position.y = 1.0; gorro.scale.set(0.3, 0.2, 0.3)
+
+  // el hacha cuelga de un brazo que gira: es el gesto que se ve desde lejos
+  const brazo = new THREE.Group()
+  brazo.position.set(0.2, 0.7, 0.06)
+  const mango = new THREE.Mesh(G.cilindro6, mat(PALETA.madera))
+  mango.position.set(0, -0.3, 0); mango.scale.set(0.055, 0.66, 0.055)
+  const hoja = new THREE.Mesh(G.caja, mat(PALETA.acero))
+  hoja.position.set(0.02, -0.6, 0); hoja.scale.set(0.2, 0.16, 0.07)
+  brazo.add(mango, hoja)
+
+  g.add(calzas, cuerpo, cabeza, gorro, brazo)
+  g.userData.brazo = brazo
+  g.userData.ignorarPicking = true
+  return g
+}
+
+function plantarCuadrilla (id, x, z) {
+  if (cuadrillas.has(id)) return
+  const g = montarCuadrilla()
+  const w = gridAMundo(x, z)
+  g.position.set(w.x + 0.28, alturaMundo(w.x, w.z), w.z + 0.28)
+  g.rotation.y = Math.atan2(-0.28, -0.28)
+  g.userData.fase = ((x * 7 + z * 13) % 10) / 10
+  aEscena(g)
+  cuadrillas.set(id, g)
+}
+
+function retirarCuadrilla (id) {
+  const g = cuadrillas.get(id)
+  if (!g) return
+  g.parent?.remove(g)   // geometrías y materiales son compartidos (mats.js): no se liberan
+  cuadrillas.delete(id)
+}
+
+function pasoCuadrillas (t) {
+  if (!cuadrillas.size) return
+  for (const g of cuadrillas.values()) {
+    const f = (t * 3.4 + g.userData.fase * 6.3)
+    const golpe = Math.sin(f)
+    // hachazo: sube despacio y baja de golpe (el seno elevado hace justo eso)
+    g.userData.brazo.rotation.x = -1.15 + (golpe > 0 ? golpe * golpe : 0) * 1.9
+    g.position.y = alturaMundo(g.position.x, g.position.z) + Math.max(0, golpe) * 0.02
+  }
+}
+
+// --- "aquí hay bosque": lo que estorba al colocar ---
+/**
+ * Mientras se coloca algo, las casillas con árboles o piedras se marcan en el
+ * suelo. Construir encima las sigue talando gratis (eso no se toca), pero ahora
+ * se VE lo que te vas a llevar por delante, que es la mitad de decidir dónde va
+ * el edificio.
+ */
+function construirMarcaVegetacion () {
+  // paja y no marrón oscuro: sobre la hierba en sombra, un marrón apagado no se
+  // veía; el tono claro y cálido canta lo justo sin ensuciar el prado
+  const material = mat(PALETA.paja, { transparente: 0.5 }).clone()
+  material.depthWrite = false
+  const malla = new THREE.Mesh(new THREE.BufferGeometry(), material)
+  malla.name = 'vegetacion'
+  malla.visible = false
+  malla.renderOrder = 2
+  malla.castShadow = false
+  malla.receiveShadow = false
+  malla.userData.ignorarPicking = true
+  return malla
+}
+
+function rehacerMarcaVegetacion () {
+  if (!marcaVegetacion) return
+  vegetacionSucia = false
+  const pos = []
+  const lado = CONFIG.CELDA * 0.38
+  for (const clave of tiposPorCasilla.keys()) {
+    const p = clave.split('|')
+    const x = +p[0]; const z = +p[1]
+    const par = parcelaDe(x, z)
+    if (!par || !parcelaEsMia(game.state, par.id)) continue   // en barbecho no se construye: no hay nada que avisar
+    const c = gridAMundo(x, z)
+    const y = alturaMundo(c.x, c.z) + 0.07
+    const x0 = c.x - lado; const x1 = c.x + lado
+    const z0 = c.z - lado; const z1 = c.z + lado
+    pos.push(x0, y, z0, x0, y, z1, x1, y, z0)
+    pos.push(x1, y, z0, x0, y, z1, x1, y, z1)
+  }
+  marcaVegetacion.geometry.dispose()
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.computeVertexNormals()
+  marcaVegetacion.geometry = g
 }
 
 // ── API pública ──────────────────────────────────────────────────────────
@@ -903,6 +1170,7 @@ export function despejarZona (x, z, ancho = 1, alto = 1) {
       const clave = `${x + i}|${z + j}`
       if (casillasDespejadas.has(clave)) continue
       casillasDespejadas.add(clave)
+      if (tiposPorCasilla.delete(clave)) vegetacionSucia = true
       const lote = porCasilla.get(clave)
       if (!lote) continue
       for (const { malla, i: idx } of lote) {
@@ -913,6 +1181,48 @@ export function despejarZona (x, z, ancho = 1, alto = 1) {
   }
   for (const m of tocadas) m.instanceMatrix.needsUpdate = true
   return tocadas.size > 0
+}
+
+/**
+ * Qué hay plantado en una casilla, de lo que VALE: ['roble','roca'].
+ * Es la pregunta que la simulación no puede contestar sola (la vegetación sale
+ * de la semilla, aquí), y por eso se publica entera con EV.DECO_INVENTARIO.
+ */
+export function queHayEn (x, z) {
+  const lote = tiposPorCasilla.get(`${x}|${z}`)
+  return lote ? lote.slice() : []
+}
+
+/**
+ * Tala una casilla A PROPÓSITO: los árboles caen, las piedras se hunden, y
+ * quedan las hojas y el polvo. A diferencia de `despejarZona` (que es el corte
+ * seco de construir encima), esto se ve.
+ * @returns {string[]} lo que había, para quien quiera cobrarlo
+ */
+export function retirarDeco (x, z, animado = true) {
+  const clave = `${x}|${z}`
+  const habia = queHayEn(x, z)
+  if (casillasDespejadas.has(clave)) return habia
+  casillasDespejadas.add(clave)
+  if (tiposPorCasilla.delete(clave)) vegetacionSucia = true
+  const lote = porCasilla.get(clave)
+  if (!lote) return habia
+  if (!animado) {
+    _tocadas.clear()
+    for (const { malla, i } of lote) { malla.setMatrixAt(i, _cero); _tocadas.add(malla) }
+    for (const m of _tocadas) m.instanceMatrix.needsUpdate = true
+    return habia
+  }
+  const dir = direccionDeCaida(x, z)
+  for (const { malla, i, tipo } of lote) empujarCaida(malla, i, tipo, dir)
+  return habia
+}
+
+/** Lo que el valle tiene plantado, casilla a casilla, tal cual para la simulación. */
+function publicarInventario () {
+  const casillas = {}
+  for (const [k, lista] of tiposPorCasilla) casillas[k] = lista.slice()
+  events.emit(EV.DECO_INVENTARIO, { casillas })
 }
 
 /**
@@ -952,6 +1262,9 @@ export function init () {
   rejilla = construirRejilla()
   raiz.add(rejilla)
 
+  marcaVegetacion = construirMarcaVegetacion()
+  raiz.add(marcaVegetacion)
+
   linde = construirLinde()
   banderas = new THREE.Group()
   banderas.name = 'banderas'
@@ -965,8 +1278,40 @@ export function init () {
   for (const b of game.state?.buildings ?? []) {
     despejarZona(b.x, b.z, b.ancho ?? 2, b.alto ?? 2)
   }
+  // …y lo que se taló a propósito en partidas anteriores. La vegetación se
+  // genera con la semilla, así que sin esta lista los árboles talados volverían
+  // a salir cada vez que se recarga la página.
+  for (const k of game.state?.despeje?.hechas ?? []) {
+    const p = String(k).split('|')
+    if (p.length === 2) despejarZona(+p[0], +p[1], 1, 1)
+  }
+  // ya está el valle sembrado y limpio de lo que no toca: la simulación puede
+  // saber qué queda en pie y ponerle precio
+  publicarInventario()
 
-  events.on(EV.BUILD_MODE, ({ activo } = {}) => { opacidadObjetivo = activo ? 0.5 : 0 })
+  events.on(EV.BUILD_MODE, ({ activo } = {}) => {
+    opacidadObjetivo = activo ? 0.5 : 0
+    enModoObra = !!activo
+    if (enModoObra && vegetacionSucia) rehacerMarcaVegetacion()
+    if (marcaVegetacion) marcaVegetacion.visible = enModoObra
+  })
+
+  // --- despeje: la faena que manda sim/despeje.js ---
+  events.on(EV.DESPEJE_EMPEZADO, ({ id, x, z } = {}) => { if (id != null) plantarCuadrilla(id, x, z) })
+  events.on(EV.DESPEJE_CANCELADO, ({ id } = {}) => { if (id != null) retirarCuadrilla(id) })
+  events.on(EV.DESPEJE_TERMINADO, ({ id, x, z, piezas } = {}) => {
+    retirarCuadrilla(id)
+    const habia = retirarDeco(x, z, true)
+    if (enModoObra) rehacerMarcaVegetacion()   // esa casilla ya no tiene nada que avisar
+    const lista = (piezas && piezas.length) ? piezas : habia
+    const w = gridAMundo(x, z)
+    const fx = ctx.fx
+    if (!fx) return
+    // hojas de la copa que se viene abajo y el polvo del tocón: los dos ya existen
+    if (lista.some(t => t === 'roble' || t === 'arbusto' || t === 'zarza')) fx.hojas(w.x, w.z, PALETA.copaRoble)
+    if (lista.some(t => t === 'pino')) fx.hojas(w.x, w.z, PALETA.copaPino)
+    fx.polvo(w.x, w.z, lista.some(t => DURO.has(t)) ? 14 : 9)
+  })
   events.on(EV.BUILD_PLACED, ({ building } = {}) => {
     if (building) despejarZona(building.x, building.z, building.ancho ?? 2, building.alto ?? 2)
   })
@@ -987,6 +1332,8 @@ export function init () {
   onFrame((dt, t) => {
     relojMar.value = t
     pasoConquistas(dt)
+    pasoCaidas(dt)
+    pasoCuadrillas(t)
     // la tela de las banderas ondea: cuatro senos y ni un `new` por frame
     if (banderaDe.size) {
       for (const g of banderaDe.values()) {

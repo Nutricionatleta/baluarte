@@ -95,6 +95,13 @@ export const EV = {
   TERRITORIO_DISPONIBLE: 'territorio:disponible',     // { parcela, motivo, origen, coste, rect, centro } hay una parcela esperando a que plantes la bandera
   TERRITORIO_RECLAMAR: 'territorio:reclamar',         // { parcela } la interfaz pide quedarse con una parcela disponible
 
+  // --- despeje del valle (talar y picar lo que estorba, y cobrarlo) ---
+  DECO_INVENTARIO: 'deco:inventario',     // { casillas: { 'x|z': ['roble','roca'] } } lo plantado en cada casilla del tablero; lo publica render/terrain al sembrar el valle
+  DESPEJE_ENCARGADO: 'despeje:encargado', // { id, x, z, piezas, segundos, recompensa } el jugador manda limpiar esa casilla: entra en la lista de faenas
+  DESPEJE_EMPEZADO: 'despeje:empezado',   // { id, x, z, piezas, segundos, fin } hay constructor libre: la cuadrilla se planta allí y el render la enseña
+  DESPEJE_TERMINADO: 'despeje:terminado', // { id, x, z, piezas, recompensa:{madera,piedra}, hallazgo } cae el árbol: el render lo tumba y suelta hojas y polvo
+  DESPEJE_CANCELADO: 'despeje:cancelado', // { id, x, z, motivo } se retira la faena (la cancela el jugador o ya no quedaba nada que talar)
+
   // --- progresión ---
   AGE_ADVANCED: 'age:advanced',          // { age, anterior }
   EDAD_VISUAL: 'age:visual',             // { age, anterior, nivelVisual:0..3, multiplicadorHp } la aldea prospera: paja -> teja -> pizarra

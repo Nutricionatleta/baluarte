@@ -7,7 +7,7 @@
  *
  * Sube VERSION cuando cambie la app: al activarse borra las cachés viejas.
  */
-const VERSION = 'v202609141519'   // súbela en cada publicación: obliga a tirar la caché vieja
+const VERSION = 'v202609141601'   // súbela en cada publicación: obliga a tirar la caché vieja
 const CACHE = `baluarte-${VERSION}`
 
 /** Lo mínimo imprescindible para arrancar sin red. */

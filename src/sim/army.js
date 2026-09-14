@@ -258,7 +258,7 @@ function duracion (tipo) {
  * detrás de otra, con `fin` en hora real para que avance con la app cerrada.
  * @returns {{ok:boolean, motivo:string}}
  */
-export function entrenar (tipo, cantidad = 1) {
+export function entrenar (tipo, cantidad = 1, opciones = {}) {
   const n = Math.floor(cantidad)
   const permiso = puedeEntrenar(tipo, n)
   if (!permiso.ok) {
@@ -282,7 +282,9 @@ export function entrenar (tipo, cantidad = 1) {
     e.cola.push({ tipo, inicio, fin: reloj })
   }
   events.emit(EV.SFX, { nombre: 'entrenar' })
-  events.emit(EV.UI_TOAST, { texto: `${u.icono} ${n} × ${u.nombre} en camino`, tipo: 'info' })
+  // El relleno de plantillas encarga varios tipos de golpe: ahí el aviso lo da
+  // `entrenarLoQueFalta()` en una sola línea, no cuatro toasts seguidos.
+  if (opciones.aviso !== false) events.emit(EV.UI_TOAST, { texto: `${u.icono} ${n} × ${u.nombre} en camino`, tipo: 'info' })
   return { ok: true, motivo: '' }
 }
 
@@ -344,6 +346,9 @@ function procesarCola () {
   if (salidas && !e.cola.length) {
     events.emit(EV.UI_TOAST, { texto: '⚔️ Tropa lista: no queda nada en la cola', tipo: 'bien' })
   }
+  // Lo que acaba de salir del cuartel va derecho a su escuadrón: el jugador no
+  // tiene que repartir a mano cada vez que renueva la hueste.
+  if (salidas) cuadrarYRepartir('entrenada')
 }
 
 // ------------------------------------------------------------------ comida
@@ -499,6 +504,8 @@ export function perderTropas (bajas = {}, opciones = {}) {
     events.emit(EV.UI_TOAST, { texto: `⛪ El monasterio ha salvado a ${n} de los tuyos`, tipo: 'bien' })
   }
   const aCamilla = apuntarHeridos(enfermeria)
+  // Han hecho un hueco en los escuadrones: si queda reserva, se tapa solo.
+  cuadrarYRepartir('bajas')
   return {
     perdidas,
     curadas,
@@ -552,10 +559,12 @@ export function liberar (motivo) {
   if (motivo == null) {
     const todo = e.fuera
     e.fuera = {}
+    cuadrarYRepartir('vuelta')
     return todo
   }
   const bloque = e.fuera[motivo] || {}
   delete e.fuera[motivo]
+  cuadrarYRepartir('vuelta')
   return bloque
 }
 
@@ -654,6 +663,7 @@ function levantarHeridos (motivo = 'tiempo') {
   events.emit(EV.UI_TOAST, {
     texto: `🩹 ${total === 1 ? 'Un herido vuelve' : `${total} heridos vuelven`} a filas`, tipo: 'bien'
   })
+  cuadrarYRepartir('curados')   // vuelven a su escuadrón, no al montón
   return total
 }
 
@@ -1025,6 +1035,7 @@ function nuevoEscuadron (nombre, cometido, tropas, indice) {
     cometido: COMETIDOS.includes(cometido) ? cometido : 'defensa',
     tropas: { ...(tropas || {}) },
     puesto: { x: p.x, z: p.z, fijado: false },
+    prioridad: indice + 1,      // a quién se sirve antes cuando no llega la tropa
     creado: Date.now()
   }
 }
@@ -1059,6 +1070,21 @@ function sanearEscuadrones () {
       q.puesto = { x: p.x, z: p.z, fijado: false }
     }
     if (typeof q.puesto.fijado !== 'boolean') q.puesto.fijado = false
+    // PLANTILLA: lo que el jugador quiere que tenga. Que no exista es válido y
+    // significa "este lo reparto yo a mano", que es como iba el juego antes.
+    if (!q.plantilla || typeof q.plantilla !== 'object' || Array.isArray(q.plantilla)) {
+      if ('plantilla' in q) delete q.plantilla
+    } else {
+      for (const [t, v] of Object.entries(q.plantilla)) {
+        const pide = Math.max(0, Math.floor(Number(v) || 0))
+        if (!pide || !UNIDADES[t] || !(UNIDADES[t].espacio > 0)) delete q.plantilla[t]
+        else q.plantilla[t] = Math.min(pide, TOPE_PLANTILLA)
+      }
+      if (!Object.keys(q.plantilla).length) delete q.plantilla
+    }
+    if ('auto' in q && typeof q.auto !== 'boolean') delete q.auto
+    if (!Number.isFinite(q.prioridad)) q.prioridad = i + 1
+    else q.prioridad = Math.max(1, Math.min(MAX_ESCUADRONES, Math.round(q.prioridad)))
   }
   // Partida vieja (o recién empezada): un solo escuadrón con toda la hueste.
   if (!lista.length) lista.push(nuevoEscuadron('La Guardia', 'defensa', e.tropas, 0))
@@ -1120,7 +1146,15 @@ function fichaEscuadron (q, enCasa) {
     enCasa: { ...casa },
     total: sumaDe(q.tropas),
     totalEnCasa: sumaDe(casa),
-    poder: poderDe(casa)
+    poder: poderDe(casa),
+    // --- plantilla: sin ella, `plantilla` es null y todo se comporta como antes ---
+    plantilla: tienePlantilla(q) ? { ...q.plantilla } : null,
+    auto: autoDe(q),
+    prioridad: q.prioridad || 1,
+    falta: faltaDe(q),
+    faltan: sumaDe(faltaDe(q)),
+    completo: tienePlantilla(q) ? !sumaDe(faltaDe(q)) : true,
+    pideTotal: sumaDe(q.plantilla)
   }
 }
 
@@ -1191,6 +1225,7 @@ export function crearEscuadron (nombre = '', cometido = 'defensa') {
   const q = nuevoEscuadron(nombre, cometido, {}, lista.length)
   q.id = idEscuadron(lista)
   lista.push(q)
+  normalizarPrioridades(lista)
   avisarEscuadrones('creado')
   events.emit(EV.ESCUADRON_MOVIDO, {
     id: q.id, nombre: q.nombre, cometido: q.cometido, x: q.puesto.x, z: q.puesto.z, flanco: flancoDe(q.puesto.x, q.puesto.z), ajustado: false
@@ -1280,6 +1315,8 @@ export function borrarEscuadron (id) {
   const [q] = lista.splice(i, 1)
   const destino = lista[0]
   for (const [t, n] of Object.entries(q.tropas)) destino.tropas[t] = (destino.tropas[t] || 0) + n
+  normalizarPrioridades(lista)
+  repartirAutomatico('borrado', { silencioso: true })   // su gente busca sitio sola
   avisarEscuadrones('borrado')
   events.emit(EV.UI_TOAST, { texto: `${q.nombre} se disuelve: su gente pasa a ${destino.nombre}`, tipo: 'info' })
   return { ok: true, motivo: '', destino: destino.id }
@@ -1309,6 +1346,389 @@ export function renombrarEscuadron (id, nombre) {
   q.nombre = n
   avisarEscuadrones('nombre')
   return { ok: true, motivo: '', nombre: n }
+}
+
+/* ===========================================================================
+   PLANTILLAS Y REPARTO AUTOMÁTICO
+   ---------------------------------------------------------------------------
+   El problema que resuelve: repartir la hueste a mano cada vez que sale tropa
+   del cuartel, cada vez que se cura un herido y cada vez que vuelve un asalto
+   es la clase de tarea repetitiva que hace cerrar el juego.
+
+   La PLANTILLA es lo que el jugador quiere que tenga un escuadrón («6 lanceros,
+   4 arqueros»), no lo que tiene hoy. Se fija UNA vez y se queda guardada en el
+   estado (JSON puro), así que aguanta cerrar la app, perder media hueste, curar
+   heridos y volver de una batalla.
+
+   A partir de ahí el reparto se hace solo:
+     - la tropa nueva entra en el escuadrón de acogida (la RESERVA, que es el
+       primero de la lista) y de ahí se coloca sola donde la piden;
+     - se sirve por PRIORIDAD (1 primero). Si no llega para todos, el de
+       prioridad 1 se completa ENTERO y el último se queda a medias: más vale un
+       flanco bien guardado que cuatro a medio montar;
+     - solo se mueve tropa que SOBRA: la de la reserva, o la que un escuadrón
+       lleve por encima de su plantilla. Un escuadrón sin plantilla no se toca
+       nunca (salvo que sea la reserva), así que quien reparta a mano sigue
+       repartiendo a mano y una partida ya empezada se comporta exactamente
+       igual que antes hasta que el jugador fije su primera plantilla.
+
+   Un escuadrón vacío NO se borra: conserva nombre, puesto, cometido y plantilla,
+   y se vuelve a llenar solo según entra tropa.
+   =========================================================================== */
+
+/** Tope por tipo dentro de una plantilla: más no cabe ni en la hueste ni en la pantalla. */
+const TOPE_PLANTILLA = 99
+/** Cerrojo: repartir mueve tropa y eso avisa a medio juego. Nada de reentrar. */
+let repartiendo = false
+
+/** ¿Tiene plantilla puesta? Sin ella se reparte a mano, como toda la vida. */
+const tienePlantilla = (q) => !!(q && q.plantilla && Object.keys(q.plantilla).length)
+/** El reparto automático está encendido salvo que el jugador lo apague a propósito. */
+const autoDe = (q) => !!q && q.auto !== false
+/** «La Guardia, Los del Vado y La Reserva» */
+const enumerarNombres = (l) => (l.length <= 1 ? (l[0] || '') : `${l.slice(0, -1).join(', ')} y ${l[l.length - 1]}`)
+/** «🔱 6 · 🏹 4» */
+const resumenTropa = (tropas) => Object.entries(tropas || {})
+  .filter(([, n]) => n > 0)
+  .map(([t, n]) => `${UNIDADES[t]?.icono || '🧍'} ${n}`).join(' · ')
+
+/** Los escuadrones por orden de reparto: el de prioridad 1 se llena primero. */
+function porPrioridad (lista) {
+  return lista
+    .map((q, i) => ({ q, i }))
+    .sort((a, b) => ((a.q.prioridad ?? 99) - (b.q.prioridad ?? 99)) || (a.i - b.i))
+    .map(x => x.q)
+}
+
+/** Renumera 1..N sin huecos: el jugador siempre ve 1, 2, 3, no 1, 4, 7. */
+function normalizarPrioridades (lista) {
+  porPrioridad(lista).forEach((q, i) => { q.prioridad = i + 1 })
+}
+
+/** Lo que le falta para cumplir su plantilla. `{}` si está completo o no la tiene. */
+function faltaDe (q) {
+  const falta = {}
+  if (!tienePlantilla(q)) return falta
+  for (const [tipo, pide] of Object.entries(q.plantilla)) {
+    const hay = q.tropas[tipo] || 0
+    if (hay < pide) falta[tipo] = pide - hay
+  }
+  return falta
+}
+
+/**
+ * Tropa de ese tipo que este escuadrón puede SOLTAR sin romper lo que el jugador
+ * ha pedido: con plantilla, solo el excedente; la reserva, todo lo que no le
+ * pida su propia plantilla; los demás sin plantilla, nada.
+ */
+function sobraDeTipo (q, tipo, acogida) {
+  const hay = q.tropas[tipo] || 0
+  if (!hay || !autoDe(q)) return 0
+  if (tienePlantilla(q)) return Math.max(0, hay - (q.plantilla[tipo] || 0))
+  return q === acogida ? hay : 0
+}
+
+/**
+ * EL REPARTO AUTOMÁTICO. Coloca sola la tropa libre en los escuadrones que la
+ * piden por plantilla, de mayor a menor prioridad.
+ * @param {string} [motivo] de dónde viene la tropa, para el aviso
+ * @param {{silencioso?:boolean}} [opciones] sin ruido, para las consultas
+ * @returns {{movidas:number, completos:string[], movimientos:object}}
+ */
+export function repartirAutomatico (motivo = 'auto', opciones = {}) {
+  const vacio = { movidas: 0, completos: [], movimientos: {} }
+  if (repartiendo) return vacio
+  // Atajo barato: sin una sola plantilla no hay nada que repartir y el juego se
+  // comporta EXACTAMENTE como antes (partidas ya empezadas incluidas).
+  const cruda = ej().escuadrones
+  if (!cruda.some(q => q && q.plantilla && Object.keys(q.plantilla).length)) return vacio
+
+  repartiendo = true
+  try {
+    const lista = sanearEscuadrones()
+    const acogida = lista[0]
+    const orden = porPrioridad(lista)
+    const destinos = orden.filter(q => tienePlantilla(q) && autoDe(q))
+    if (!destinos.length) return vacio
+    // Se saca primero de la reserva y, si no basta, del escuadrón MENOS
+    // prioritario: al que menos duele quedarse corto.
+    const fuentes = [acogida, ...orden.filter(q => q !== acogida).reverse()]
+
+    let movidas = 0
+    const completos = []
+    const movimientos = {}
+    for (const destino of destinos) {
+      if (!sumaDe(faltaDe(destino))) continue
+      for (const [tipo, pide] of Object.entries(destino.plantilla)) {
+        let falta = pide - (destino.tropas[tipo] || 0)
+        if (falta <= 0) continue
+        for (const fuente of fuentes) {
+          if (falta <= 0) break
+          if (fuente === destino) continue
+          const libre = sobraDeTipo(fuente, tipo, acogida)
+          if (libre <= 0) continue
+          const pasa = Math.min(libre, falta)
+          fuente.tropas[tipo] -= pasa
+          if (!fuente.tropas[tipo]) delete fuente.tropas[tipo]
+          destino.tropas[tipo] = (destino.tropas[tipo] || 0) + pasa
+          movimientos[tipo] = (movimientos[tipo] || 0) + pasa
+          falta -= pasa
+          movidas += pasa
+        }
+      }
+      if (!sumaDe(faltaDe(destino))) completos.push(destino.nombre)
+    }
+    if (!movidas) return vacio
+    if (!opciones.silencioso) {
+      avisarEscuadrones('auto')
+      events.emit(EV.UI_TOAST, {
+        texto: completos.length
+          ? `🚩 ${enumerarNombres(completos)} ya ${completos.length === 1 ? 'está' : 'están'} al completo`
+          : `🚩 ${movidas} ${movidas === 1 ? 'soldado ocupa su puesto' : 'soldados ocupan su puesto'} solos`,
+        tipo: 'bien'
+      })
+    }
+    return { movidas, completos, movimientos }
+  } finally { repartiendo = false }
+}
+
+/**
+ * Cuadra el reparto con el censo Y coloca lo que pidan las plantillas. Es lo que
+ * se llama en CADA sitio donde la hueste cambia de tamaño (cola, enfermería,
+ * bajas, vuelta de un asalto): así el estado guardado nunca miente.
+ */
+function cuadrarYRepartir (motivo) {
+  sanearEscuadrones()
+  return repartirAutomatico(motivo)
+}
+
+/** Fuerza un reparto y contesta aunque no haya nada que mover. Lo usa el botón del panel. */
+export function repartirAhora () {
+  const r = repartirAutomatico('mano')
+  if (!r.movidas) {
+    events.emit(EV.UI_TOAST, { texto: 'Nada que recolocar: cada uno está en su sitio', tipo: 'info' })
+  }
+  return { ok: true, motivo: '', ...r }
+}
+
+/**
+ * Fija la plantilla de un escuadrón. Se guarda tal cual en el estado y el
+ * reparto empieza a respetarla en el acto.
+ * @param {string} id @param {Record<string,number>} plantilla p.ej. { lancero: 6 }
+ */
+export function fijarPlantilla (id, plantilla = {}) {
+  const q = sanearEscuadrones().find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  const limpia = {}
+  for (const [tipo, n] of Object.entries(plantilla || {})) {
+    const u = UNIDADES[tipo]
+    if (!u || !(u.espacio > 0)) continue       // aldeanos y civiles no forman escuadrón
+    const v = Math.max(0, Math.min(TOPE_PLANTILLA, Math.floor(Number(n) || 0)))
+    if (v) limpia[tipo] = v
+  }
+  if (!Object.keys(limpia).length) return quitarPlantilla(id)
+  q.plantilla = limpia
+  if (typeof q.auto !== 'boolean') q.auto = true
+  repartirAutomatico('plantilla', { silencioso: true })
+  avisarEscuadrones('plantilla')
+  events.emit(EV.UI_TOAST, { texto: `📋 ${q.nombre} pide ${resumenTropa(limpia)}`, tipo: 'bien' })
+  return { ok: true, motivo: '', plantilla: { ...limpia }, falta: faltaDe(q) }
+}
+
+/** «Usa lo que tengo ahora como plantilla»: el atajo para no teclear nada. */
+export function usarActualComoPlantilla (id) {
+  const q = sanearEscuadrones().find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  if (!sumaDe(q.tropas)) return { ok: false, motivo: 'No lleva a nadie dentro: no hay nada que copiar' }
+  return fijarPlantilla(id, q.tropas)
+}
+
+/** Quita la plantilla: ese escuadrón vuelve a repartirse a mano. No pierde tropa. */
+export function quitarPlantilla (id) {
+  const q = sanearEscuadrones().find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  if (!q.plantilla) return { ok: true, motivo: '' }
+  delete q.plantilla
+  avisarEscuadrones('plantilla')
+  events.emit(EV.UI_TOAST, { texto: `📋 ${q.nombre} vuelve a repartirse a mano`, tipo: 'info' })
+  return { ok: true, motivo: '' }
+}
+
+/** Enciende o apaga el reparto automático de UN escuadrón. */
+export function fijarAutoReparto (id, activo = true) {
+  const q = sanearEscuadrones().find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  q.auto = !!activo
+  if (q.auto) repartirAutomatico('auto-on', { silencioso: true })
+  avisarEscuadrones('plantilla')
+  events.emit(EV.UI_TOAST, {
+    texto: q.auto ? `🔁 ${q.nombre} se rellena solo` : `✋ ${q.nombre} lo repartes tú`, tipo: 'info'
+  })
+  return { ok: true, motivo: '', auto: q.auto }
+}
+
+/** Pone a un escuadrón en ese lugar de la cola de reparto (1 = el primero en llenarse). */
+export function fijarPrioridad (id, prioridad) {
+  const lista = sanearEscuadrones()
+  const q = lista.find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  const destino = Math.max(1, Math.min(lista.length, Math.round(Number(prioridad) || 1)))
+  const antes = q.prioridad || 1
+  if (destino !== antes) {
+    // Medio punto por delante (o por detrás) del que ocupaba el puesto, y a renumerar.
+    q.prioridad = destino > antes ? destino + 0.5 : destino - 0.5
+    normalizarPrioridades(lista)
+    repartirAutomatico('prioridad', { silencioso: true })
+    avisarEscuadrones('plantilla')
+  }
+  return { ok: true, motivo: '', prioridad: q.prioridad }
+}
+
+/** Sube (delta<0) o baja un puesto en la cola de reparto. */
+export function moverPrioridad (id, delta = -1) {
+  const q = sanearEscuadrones().find(e => e.id === id)
+  if (!q) return { ok: false, motivo: 'Ese escuadrón ya no existe' }
+  return fijarPrioridad(id, (q.prioridad || 1) + (delta < 0 ? -1 : 1))
+}
+
+/**
+ * QUÉ LE FALTA A CADA ESCUADRÓN para estar completo. Antes de mirar reparte lo
+ * que haya suelto: lo que aquí pone que falta es lo que hay que ENTRENAR, no lo
+ * que está esperando en la reserva.
+ * @returns {{total:object, faltan:number, porEscuadron:Array, conPlantilla:number, completos:number}}
+ */
+export function faltaDePlantillas () {
+  repartirAutomatico('consulta', { silencioso: true })
+  const lista = sanearEscuadrones()
+  const total = {}
+  const porEscuadron = []
+  for (const q of porPrioridad(lista)) {
+    if (!tienePlantilla(q)) continue
+    const falta = faltaDe(q)
+    for (const [t, n] of Object.entries(falta)) total[t] = (total[t] || 0) + n
+    porEscuadron.push({
+      id: q.id,
+      nombre: q.nombre,
+      prioridad: q.prioridad,
+      auto: autoDe(q),
+      plantilla: { ...q.plantilla },
+      tropas: { ...q.tropas },
+      falta,
+      faltan: sumaDe(falta),
+      completo: !sumaDe(falta)
+    })
+  }
+  return {
+    total,
+    faltan: sumaDe(total),
+    porEscuadron,
+    conPlantilla: porEscuadron.length,
+    completos: porEscuadron.filter(x => x.completo).length
+  }
+}
+
+/**
+ * EL PLAN DE RELLENO: qué habría que encargar HOY para completar las plantillas,
+ * con su coste y su tiempo. Descuenta lo que ya viene de camino (la cola del
+ * cuartel y la enfermería: esos van a volver) y recorta por hueco de ejército y
+ * por lo que hay en el almacén, sirviendo antes al escuadrón más prioritario.
+ * @returns {{tropas:object, coste:object, segundos:number, total:number, pedido:object,
+ *            faltan:number, recortes:object, bloqueados:object, camino:object}}
+ */
+export function planDeRelleno () {
+  const e = ej()
+  const info = faltaDePlantillas()
+
+  // Lo que ya está en marcha no se vuelve a encargar.
+  const camino = {}
+  for (const item of e.cola) camino[item.tipo] = (camino[item.tipo] || 0) + 1
+  for (const [t, n] of Object.entries(e.heridos)) camino[t] = (camino[t] || 0) + (n || 0)
+  const enCamino = { ...camino }
+
+  // Se agrega por tipo respetando el orden de prioridad (el Map conserva el orden).
+  const pedido = new Map()
+  for (const f of info.porEscuadron) {
+    for (const [tipo, n] of Object.entries(f.falta)) {
+      let v = n
+      const hay = camino[tipo] || 0
+      if (hay > 0) { const usa = Math.min(hay, v); camino[tipo] = hay - usa; v -= usa }
+      if (v > 0) pedido.set(tipo, (pedido.get(tipo) || 0) + v)
+    }
+  }
+
+  const oc = ocupacion()
+  let hueco = Math.max(0, oc.total - oc.usado)
+  const bolsa = { ...(game.state.recursos || {}) }
+  const tropas = {}
+  const coste = {}
+  const recortes = {}
+  const bloqueados = {}
+  let segundos = 0
+  for (const [tipo, pide] of pedido) {
+    const u = UNIDADES[tipo]
+    if (!u) continue
+    const permiso = puedeEntrenar(tipo, 1)
+    // Si el "no" es por edificio, edad o requisito, esa tropa hoy no se encarga.
+    if (!permiso.ok && !/recursos|cabe/i.test(permiso.motivo)) { bloqueados[tipo] = { pide, motivo: permiso.motivo }; continue }
+    let n = pide
+    if (u.espacio > 0) n = Math.min(n, Math.floor(hueco / u.espacio))
+    for (const [r, c] of Object.entries(u.coste || {})) {
+      if (c > 0) n = Math.min(n, Math.floor((bolsa[r] || 0) / c))
+    }
+    n = Math.max(0, n)
+    if (n < pide) recortes[tipo] = pide - n
+    if (!n) continue
+    tropas[tipo] = n
+    hueco -= (u.espacio || 0) * n
+    for (const [r, c] of Object.entries(u.coste || {})) {
+      if (c > 0) { bolsa[r] -= c * n; coste[r] = (coste[r] || 0) + c * n }
+    }
+    segundos += duracion(tipo) * n
+  }
+  return {
+    tropas,
+    coste,
+    segundos,
+    total: sumaDe(tropas),
+    pedido: Object.fromEntries(pedido),
+    faltan: info.faltan,
+    recortes,
+    bloqueados,
+    camino: enCamino
+  }
+}
+
+/**
+ * ENTRENAR LO QUE FALTA: encarga de una vez toda la tropa que hace falta para
+ * completar las plantillas. Cobra por los cauces de siempre (`entrenar`), así
+ * que respeta hueco, recursos y cola; solo se calla el toast por tipo y da uno.
+ */
+export function entrenarLoQueFalta () {
+  const plan = planDeRelleno()
+  if (!plan.total) {
+    const motivo = !plan.faltan
+      ? 'No falta nadie: tus escuadrones están completos'
+      : Object.keys(plan.bloqueados).length
+        ? Object.values(plan.bloqueados)[0].motivo
+        : !Object.keys(plan.pedido).length
+          ? 'Lo que falta ya está en la cola o en la enfermería'
+          : 'Ni hueco ni recursos para encargar nada ahora mismo'
+    events.emit(EV.UI_TOAST, { texto: motivo, tipo: 'mal' })
+    return { ok: false, motivo, plan }
+  }
+  const encargadas = {}
+  for (const [tipo, n] of Object.entries(plan.tropas)) {
+    const r = entrenar(tipo, n, { aviso: false })
+    if (r.ok) encargadas[tipo] = n
+  }
+  const total = sumaDe(encargadas)
+  if (!total) return { ok: false, motivo: 'No se pudo encargar la tropa', plan }
+  const quedan = Math.max(0, plan.faltan - total - sumaDe(plan.camino))
+  events.emit(EV.UI_TOAST, {
+    texto: `⚒️ ${total} en camino para completar tus escuadrones${quedan ? ` (faltarán ${quedan})` : ''}: ${resumenTropa(encargadas)}`,
+    tipo: 'bien'
+  })
+  return { ok: true, motivo: '', encargadas, total, coste: plan.coste, segundos: plan.segundos, quedan, plan }
 }
 
 /**
@@ -1546,8 +1966,15 @@ export function init () {
   // tres miran la diferencia real con Date.now(), con el tope offline de CONFIG.
   events.on(EV.STATE_LOADED, () => {
     ensuciarSuelo(); ej(); procesarCola(); recuperarHeridos(); revisarReunion()
+    // Las plantillas viajan en el guardado: al volver, cada uno a su puesto.
+    cuadrarYRepartir('cargada')
     avisarEscuadrones('cargada')
   })
+  // Al acabar una batalla la tropa que sobrevivió vuelve a estar en casa: es el
+  // momento de rehacer los escuadrones que quedaron cojos.
+  for (const ev of [EV.RAID_RESOLVED, EV.DEFENSE_RESOLVED]) {
+    events.on(ev, () => cuadrarYRepartir('vuelta'))
+  }
   // Entrenar, curar o perder gente cambia el reparto: el panel y el render se
   // enteran por aquí en vez de tener que preguntar en cada frame.
   for (const ev of [EV.UNIT_TRAINED, EV.TROPAS_CURADAS, EV.TROPAS_HERIDAS]) {

@@ -470,6 +470,9 @@ function vistaEscuadrones (zona) {
     }))
   }
 
+  // --- plantillas: lo que le falta a cada uno y el botón de entrenarlo ---
+  zona.appendChild(bloquePlantillas(lista))
+
   // --- una tarjeta por escuadrón ---
   for (const q of lista) zona.appendChild(tarjetaEscuadron(q, cob))
 
@@ -524,8 +527,19 @@ function tarjetaEscuadron (q, cob) {
     el('div', { clase: 'pequeño', estilo: { lineHeight: '1.3' }, texto: sug })
   ]))
 
-  caja.appendChild(el('div', { clase: 'panel', estilo: { padding: '8px 10px', margin: '0' } }, [
-    el('div', { clase: 'pequeño', estilo: { fontWeight: '800' }, texto: tropaEnLinea(q.enCasa) })
+  caja.appendChild(el('div', { clase: 'panel col', estilo: { padding: '8px 10px', margin: '0', gap: '4px' } }, [
+    el('div', { clase: 'pequeño', estilo: { fontWeight: '800' }, texto: tropaEnLinea(q.enCasa) }),
+    el('div', { clase: 'fila fila-sep', estilo: { gap: '8px' } }, [
+      el('span', {
+        clase: 'pequeño tenue crece', estilo: { lineHeight: '1.3' },
+        texto: q.plantilla
+          ? `📋 pide ${tropaEnLinea(q.plantilla)}${q.auto === false ? ' · a mano' : ''}`
+          : '📋 sin plantilla: lo repartes a mano'
+      }),
+      q.plantilla
+        ? chip(q.completo ? '✅' : '⚠️', q.completo ? 'completo' : `faltan ${q.faltan}`, { tono: q.completo ? 'bien' : 'oro' })
+        : null
+    ])
   ]))
 
   caja.appendChild(el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } }, [
@@ -543,6 +557,13 @@ function tarjetaEscuadron (q, cob) {
     clase: 'btn btn-oro btn-gordo', type: 'button', texto: '🚩 Plantar aquí en el mapa',
     estilo: { minHeight: '52px' },
     onclick: () => plantarEnMapa(q.id)
+  }))
+
+  caja.appendChild(el('button', {
+    clase: q.plantilla ? 'btn btn-piedra' : 'btn btn-oro', type: 'button',
+    texto: q.plantilla ? `📋 Plantilla (${q.pideTotal}) · se sirve ${q.prioridad}º` : '📋 Fijar plantilla y olvidarte',
+    estilo: { minHeight: '52px' },
+    onclick: () => hojaPlantilla(q.id)
   }))
 
   caja.appendChild(el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
@@ -631,6 +652,286 @@ function pedirNombre (q) {
   })
   campo.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); guardar() } })
   setTimeout(() => { try { campo.focus(); campo.select() } catch { /* da igual */ } }, 80)
+}
+
+/* ---------------------------------------------------------- plantillas ---
+   La plantilla es lo que el jugador quiere que tenga un escuadrón. Se fija una
+   vez con los mismos −/+ de siempre y a partir de ahí la tropa nueva se coloca
+   sola. Aquí solo se pinta y se pregunta: quien reparte es sim/army.js.
+   ------------------------------------------------------------------------ */
+
+/** Los tipos que tiene sentido meter en una plantilla: tropa de combate y nada más. */
+function tiposDePlantilla (q) {
+  const dentro = new Set([...Object.keys(q?.plantilla || {}), ...Object.keys(q?.tropas || {})])
+  return ENTRENABLES.filter(t => {
+    const u = UNIDADES[t]
+    if (!u || !(u.espacio > 0)) return false
+    if (dentro.has(t)) return true
+    const permiso = pedir(Ejercito, 'puedeEntrenar', [t, 1], null)
+    // Se enseña lo que hoy sabes sacar, aunque ahora mismo no te llegue el dinero.
+    return !permiso || permiso.ok || /recursos|cabe/i.test(permiso.motivo || '')
+  })
+}
+
+/**
+ * EL RESUMEN DE ARRIBA: cuántos escuadrones están completos, qué falta en total
+ * y el botón que encarga de una vez toda la tropa que hace falta.
+ */
+function bloquePlantillas (lista) {
+  const info = pedir(Ejercito, 'faltaDePlantillas', [], null)
+  const caja = el('div', { clase: 'panel col' })
+
+  if (!info || !info.conPlantilla) {
+    caja.append(
+      el('div', { clase: 'titular', texto: '📋 Plantillas: repartir una vez y no volver' }),
+      el('div', {
+        clase: 'pequeño', estilo: { lineHeight: '1.4' },
+        texto: 'Dile a un escuadrón qué quieres que lleve («6 lanceros, 4 arqueros») y la tropa nueva se coloca sola ahí: al salir del cuartel, al curarse un herido y al volver de un asalto. No tendrás que repartir a mano cada vez que renueves el ejército.'
+      }),
+      el('div', { clase: 'pequeño tenue', texto: 'Se fija abajo, en cada escuadrón: 📋 Plantilla.' })
+    )
+    return caja
+  }
+
+  const plan = pedir(Ejercito, 'planDeRelleno', [], null)
+  const completos = info.completos === info.conPlantilla
+
+  caja.appendChild(el('div', { clase: 'fila fila-sep' }, [
+    el('span', { clase: 'titular', texto: '📋 Tus plantillas' }),
+    chip(completos ? '✅' : '⚠️', `${info.completos}/${info.conPlantilla} completos`, { tono: completos ? 'bien' : 'oro' })
+  ]))
+
+  for (const f of info.porEscuadron) {
+    caja.appendChild(el('div', { clase: 'fila fila-sep', estilo: { gap: '8px' } }, [
+      el('div', { clase: 'fila', estilo: { gap: '6px', alignItems: 'center', minWidth: '0' } }, [
+        marcaColor(colorEscuadron(f.id), 12),
+        el('span', { clase: 'pequeño', estilo: { fontWeight: '800' }, texto: `${f.prioridad}. ${f.nombre}` })
+      ]),
+      el('span', {
+        clase: 'pequeño crece',
+        estilo: { textAlign: 'right', color: f.completo ? '' : 'var(--rojo-oscuro)' },
+        texto: f.completo ? '✅ completo' : `le faltan ${tropaEnLinea(f.falta)}`
+      })
+    ]))
+  }
+
+  if (completos) {
+    caja.appendChild(el('div', {
+      clase: 'pequeño', estilo: { lineHeight: '1.35', borderTop: '2px dashed rgba(90,58,34,.25)', paddingTop: '8px' },
+      texto: '✅ Todos tus escuadrones están como los pediste. La tropa que entrenes de más se queda en la reserva.'
+    }))
+  } else {
+    const enCamino = suma(plan?.camino || {})
+    const pie = []
+    if (plan && plan.total) {
+      pie.push(`Encarga ${plan.total} de una vez: ${tropaEnLinea(plan.tropas)}.`)
+      if (suma(plan.recortes || {}) > 0) pie.push(`Para ${suma(plan.recortes)} más no hay hueco o no llegan los recursos.`)
+    } else if (enCamino) {
+      pie.push('Lo que falta ya está en la cola del cuartel o en la enfermería: llegará solo.')
+    } else {
+      pie.push('Ahora mismo no hay hueco ni recursos para encargar lo que falta.')
+    }
+    for (const b of Object.values(plan?.bloqueados || {})) pie.push(`🔒 ${b.motivo}.`)
+    caja.appendChild(el('div', {
+      clase: 'pequeño', estilo: { lineHeight: '1.35', borderTop: '2px dashed rgba(90,58,34,.25)', paddingTop: '8px' },
+      texto: pie.join(' ')
+    }))
+
+    if (plan && plan.total) {
+      caja.appendChild(el('div', { clase: 'tarjeta-coste', html: costeHTML({ ...plan.coste, tiempo: plan.segundos }) }))
+      caja.appendChild(el('button', {
+        clase: 'btn btn-oro btn-gordo', type: 'button',
+        texto: `⚒️ Entrenar lo que falta (${plan.total})`,
+        estilo: { minHeight: '54px' },
+        onclick: () => {
+          const r = pedir(Ejercito, 'entrenarLoQueFalta', [], { ok: false, motivo: 'No se pudo' })
+          if (!r || !r.ok) { toast(r?.motivo || 'No se pudo encargar', 'mal'); return }
+          pintar()
+        }
+      }))
+    }
+  }
+
+  caja.appendChild(el('button', {
+    clase: 'btn btn-fantasma', type: 'button', texto: '🔁 Recolocar la tropa ahora',
+    estilo: { minHeight: '48px' },
+    onclick: () => { pedir(Ejercito, 'repartirAhora', [], null); pintar() }
+  }))
+  return caja
+}
+
+/** La hoja donde se fija la plantilla: −/+ con el dedo y atajos para no teclear. */
+function hojaPlantilla (id) {
+  const q = listaEscuadrones().find(e => e.id === id)
+  if (!q) return
+  const borrador = { ...(q.plantilla || {}) }
+  const tipos = tiposDePlantilla(q)
+  const total = () => listaEscuadrones().length
+
+  const resumen = el('div', { clase: 'panel col', estilo: { gap: '6px' } })
+  const filas = el('div', { clase: 'col' })
+  let sub = null
+
+  const refrescarResumen = () => {
+    vaciar(resumen)
+    const pide = suma(borrador)
+    const huecos = Object.entries(borrador).reduce((a, [t, n]) => a + (UNIDADES[t]?.espacio || 0) * n, 0)
+    resumen.append(
+      el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } }, [
+        chip('📋', pide ? `${pide} soldados` : 'sin plantilla', { tono: pide ? 'bien' : '' }),
+        chip('🪑', `${huecos} de hueco`, {}),
+        chip('🧍', `${q.total} dentro ahora`, {})
+      ]),
+      el('div', {
+        clase: 'pequeño tenue', estilo: { lineHeight: '1.35' },
+        texto: pide
+          ? 'Cada vez que entre tropa nueva, esto se llenará solo hasta aquí.'
+          : 'Sin plantilla, este escuadrón lo repartes tú a mano, como hasta ahora.'
+      })
+    )
+  }
+
+  for (const t of tipos) {
+    const u = UNIDADES[t]
+    const num = el('span', {
+      clase: 'num', estilo: { flex: 'none', minWidth: '44px', textAlign: 'center', fontSize: '1.15em' },
+      texto: `${borrador[t] || 0}`
+    })
+    const cambiar = (d) => {
+      const v = Math.max(0, Math.min(99, (borrador[t] || 0) + d))
+      if (v) borrador[t] = v; else delete borrador[t]
+      num.textContent = `${v}`
+      refrescarResumen()
+    }
+    filas.appendChild(el('div', { clase: 'tarjeta', estilo: { flexDirection: 'row', alignItems: 'center', gap: '6px' } }, [
+      el('div', { clase: 'tarjeta-icono', texto: u?.icono || '🧍' }),
+      el('div', { clase: 'tarjeta-cuerpo col crece', estilo: { gap: '0' } }, [
+        el('div', { clase: 'tarjeta-nombre', texto: u?.nombre || t }),
+        el('div', { clase: 'tarjeta-detalle', texto: `lleva ${q.tropas[t] || 0} · ocupa ${u?.espacio || 0}` })
+      ]),
+      el('button', { clase: 'btn btn-piedra', type: 'button', texto: '−', estilo: { flex: 'none', width: '48px', minHeight: '48px', padding: '0', fontSize: '1.3em' }, onclick: () => cambiar(-1) }),
+      num,
+      el('button', { clase: 'btn btn-piedra', type: 'button', texto: '+', estilo: { flex: 'none', width: '48px', minHeight: '48px', padding: '0', fontSize: '1.3em' }, onclick: () => cambiar(1) })
+    ]))
+  }
+
+  // --- atajos: copiar lo que lleva ahora y vaciar ---
+  const atajos = el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
+    el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '📥 Usar lo que tengo ahora',
+      estilo: { minHeight: '52px', fontSize: '.9em' },
+      disabled: !q.total,
+      onclick: () => {
+        for (const k of Object.keys(borrador)) delete borrador[k]
+        for (const [t, n] of Object.entries(q.tropas)) if (n > 0 && (UNIDADES[t]?.espacio > 0)) borrador[t] = n
+        sub?.cerrar()
+        const r = pedir(Ejercito, 'fijarPlantilla', [q.id, borrador], { ok: false, motivo: 'No se pudo' })
+        if (!r || !r.ok) toast(r?.motivo || 'No se pudo', 'mal')
+        pintar()
+      }
+    }),
+    el('button', {
+      clase: 'btn btn-fantasma', type: 'button', texto: '↩️ Vaciar la cuenta',
+      estilo: { minHeight: '52px', fontSize: '.9em' },
+      onclick: () => {
+        for (const k of Object.keys(borrador)) delete borrador[k]
+        for (const n of filas.querySelectorAll('.num')) n.textContent = '0'
+        refrescarResumen()
+      }
+    })
+  ])
+
+  // --- prioridad: a quién se sirve antes cuando no llega la tropa ---
+  const prioridad = el('div', { clase: 'panel col', estilo: { gap: '6px' } })
+  const pintarPrioridad = () => {
+    const actual = listaEscuadrones().find(e => e.id === q.id)?.prioridad || 1
+    vaciar(prioridad)
+    prioridad.append(
+      el('div', { clase: 'fila fila-sep' }, [
+        el('span', { clase: 'titular', texto: '🥇 A quién se sirve antes' }),
+        chip('#', `${actual} de ${total()}`, { tono: actual === 1 ? 'oro' : '' })
+      ]),
+      el('div', {
+        clase: 'pequeño', estilo: { lineHeight: '1.35' },
+        texto: actual === 1
+          ? 'Es el primero: si no llega tropa para todos, este se completa entero y los demás esperan.'
+          : `Hay ${actual - 1} por delante. Si la tropa no llega para todos, este se queda a medias.`
+      }),
+      el('div', { estilo: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' } }, [
+        el('button', {
+          clase: 'btn btn-piedra', type: 'button', texto: '⬆️ Antes', estilo: { minHeight: '48px' },
+          disabled: actual <= 1,
+          onclick: () => { pedir(Ejercito, 'moverPrioridad', [q.id, -1], null); pintarPrioridad(); pintar() }
+        }),
+        el('button', {
+          clase: 'btn btn-piedra', type: 'button', texto: '⬇️ Después', estilo: { minHeight: '48px' },
+          disabled: actual >= total(),
+          onclick: () => { pedir(Ejercito, 'moverPrioridad', [q.id, 1], null); pintarPrioridad(); pintar() }
+        })
+      ])
+    )
+  }
+  pintarPrioridad()
+
+  // --- el interruptor del automático ---
+  const automatico = el('div', { clase: 'panel col', estilo: { gap: '6px' } })
+  const pintarAuto = () => {
+    const v = listaEscuadrones().find(e => e.id === q.id)
+    const on = v ? v.auto !== false : true
+    vaciar(automatico)
+    automatico.append(
+      el('div', { clase: 'fila fila-sep' }, [
+        el('span', { clase: 'titular', texto: on ? '🔁 Se rellena solo' : '✋ Lo repartes tú' }),
+        chip(on ? '✅' : '⛔', on ? 'automático' : 'a mano', { tono: on ? 'bien' : '' })
+      ]),
+      el('div', {
+        clase: 'pequeño', estilo: { lineHeight: '1.35' },
+        texto: on
+          ? 'La tropa que entre se coloca aquí sola hasta cumplir la plantilla, y lo que le sobre se va a donde haga falta.'
+          : 'Nadie le toca la tropa: ni le meten ni le quitan. Lo mueves tú con «Repartir tropa».'
+      }),
+      el('button', {
+        clase: 'btn btn-fantasma', type: 'button', estilo: { minHeight: '48px' },
+        texto: on ? '✋ Repartirlo yo a mano' : '🔁 Que se rellene solo',
+        onclick: () => { pedir(Ejercito, 'fijarAutoReparto', [q.id, !on], null); pintarAuto(); pintar() }
+      })
+    )
+  }
+  pintarAuto()
+
+  const guardar = () => {
+    const r = suma(borrador)
+      ? pedir(Ejercito, 'fijarPlantilla', [q.id, borrador], { ok: false, motivo: 'No se pudo' })
+      : pedir(Ejercito, 'quitarPlantilla', [q.id], { ok: false, motivo: 'No se pudo' })
+    if (!r || !r.ok) { toast(r?.motivo || 'No se pudo guardar', 'mal'); return }
+    sub?.cerrar()
+    pintar()
+  }
+
+  refrescarResumen()
+  sub = hoja({
+    titulo: `📋 Plantilla de ${q.nombre}`,
+    contenido: [
+      el('div', { clase: 'pequeño tenue', estilo: { lineHeight: '1.35' }, texto: 'Marca lo que quieres que lleve SIEMPRE. Se guarda y la tropa nueva se coloca aquí sola: al salir del cuartel, al curarse un herido y al volver de un asalto.' }),
+      resumen,
+      atajos,
+      filas,
+      prioridad,
+      automatico,
+      q.plantilla
+        ? el('button', {
+          clase: 'btn btn-fantasma', type: 'button', texto: '🗑️ Quitar la plantilla',
+          estilo: { minHeight: '48px' },
+          onclick: () => {
+            pedir(Ejercito, 'quitarPlantilla', [q.id], null)
+            sub?.cerrar()
+            pintar()
+          }
+        })
+        : null
+    ],
+    pie: [el('button', { clase: 'btn btn-oro btn-gordo', type: 'button', texto: 'Guardar plantilla', estilo: { minHeight: '52px', width: '100%' }, onclick: guardar })]
+  })
 }
 
 // -------------------------------------------------------------- repartir ---

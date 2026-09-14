@@ -205,7 +205,11 @@ export function init () {
 
   // tocar una casilla del mapa 3D abre su ficha directamente
   events.on(EV.UI_SELECT, (p = {}) => {
-    if (!p || (p.kind !== 'worldtile' && p.kind !== 'tile')) return
+    // SOLO las casillas del mapa del mundo. Escuchar también 'tile' hacía que
+    // tocar el suelo de tu propia aldea abriera «El valle» de sopetón: cada vez
+    // que el dedo no acertaba de lleno en un edificio, el panel del mundo se
+    // plantaba encima. 'tile' es la casilla de la aldea; 'worldtile', la del mapa.
+    if (!p || p.kind !== 'worldtile') return
     if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return
     casilla = { x: p.x, y: p.y }
     solapa = 'casilla'
