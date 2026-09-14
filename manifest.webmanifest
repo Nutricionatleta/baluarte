@@ -1,0 +1,20 @@
+{
+  "name": "Baluarte",
+  "short_name": "Baluarte",
+  "description": "Juego de estrategia medieval: levanta tu aldea, reparte a tus aldeanos y defiende el baluarte.",
+  "lang": "es",
+  "dir": "ltr",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "portrait",
+  "background_color": "#1a2340",
+  "theme_color": "#1a2340",
+  "categories": ["games", "strategy"],
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

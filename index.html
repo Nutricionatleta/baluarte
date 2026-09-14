@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1a2340">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Baluarte</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1a2340;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none; touch-action: none; }
+  #escena { position: fixed; inset: 0; }
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  #hud > * { pointer-events: auto; }
+  #carga { position: fixed; inset: 0; display: grid; place-content: center; gap: 14px;
+    background: linear-gradient(160deg, #1a2340, #35426b); color: #f5eede; text-align: center; z-index: 99; }
+  #carga h1 { margin: 0; font-size: 2.4rem; letter-spacing: .18em; font-weight: 800; }
+  #carga p { margin: 0; opacity: .75; font-size: .9rem; }
+  .barra { width: 220px; height: 6px; border-radius: 99px; background: #ffffff22; overflow: hidden; }
+  .barra i { display: block; height: 100%; width: 15%; background: #ffc107; transition: width .3s; }
+</style>
+  <script type="module" crossorigin src="./assets/index-C7hnj_QW.js"></script>
+</head>
+<body>
+  <div id="escena"></div>
+  <div id="hud"></div>
+  <div id="carga">
+    <h1>BALUARTE</h1>
+    <p id="carga-txt">Levantando la aldea…</p>
+    <div class="barra"><i id="carga-barra"></i></div>
+  </div>
+</body>
+</html>
