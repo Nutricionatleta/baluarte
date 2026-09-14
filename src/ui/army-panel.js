@@ -880,17 +880,53 @@ function prepararAsalto () {
 
 // --------------------------------------------------------------- la batalla ---
 
+/**
+ * El campo de batalla en 3D (render/battle.js). Se carga la primera vez que se
+ * ataca, no al arrancar: en móvil el arranque es sagrado. Si no estuviera, el
+ * panel se queda con el plano 2D de toda la vida y nadie se entera del apaño.
+ */
+let Campo = null
+async function cargarCampo () {
+  if (Campo !== null) return Campo
+  try { Campo = (await import('../render/battle.js')) } catch (err) {
+    console.warn('[army-panel] sin campo de batalla 3D', err)
+    Campo = false
+  }
+  return Campo
+}
+
 function pararBatalla () {
   if (reproduccion) { try { reproduccion.parar() } catch { /* da igual */ } reproduccion = null }
   if (animacion) { clearInterval(animacion); animacion = 0 }
 }
 
-function lanzar (base) {
+async function lanzar (base) {
   if (!panel || !rival) return
   const tropas = { ...seleccion }
+  const ladoElegido = lado
   const resultado = pedir(Combate, 'lanzarAsalto', [{ base, tropas, ladoEntrada: lado }], null)
   if (!resultado) { toast('El motor de batalla no responde', 'mal'); return }
 
+  // --- lo normal: la batalla se ve en el terreno, en 3D ---
+  const campo = await cargarCampo()
+  if (campo && typeof campo.jugarBatalla === 'function') {
+    const e = rival.enemigo
+    const verla = () => campo.jugarBatalla({
+      resultado,
+      base,
+      tropas,
+      lado: ladoElegido,
+      guarnicion: base.guarnicion,
+      titulo: `La hueste entra por el ${ladoElegido} de ${e.nombre}`,
+      repetir: verla,
+      alSalir: () => events.emit(EV.UI_PANEL, { panel: 'ejercito', datos: { solapa: 'atacar' } })
+    })
+    panel?.cerrar()
+    verla()
+    return
+  }
+
+  // --- reserva: el plano 2D de siempre, si el 3D no está disponible ---
   relojes = []
   const zona = vaciar(panel.zona)
   const plano = crearPlano(base)
@@ -1027,8 +1063,12 @@ function lanzar (base) {
 function parteFinal (pie, resultado, enviadas, base) {
   const estrellas = resultado.estrellas || 0
   const botin = resultado.botin || {}
+  // `bajas` son los muertos de verdad; los malheridos vuelven y se curan solos.
   const bajas = resultado.bajas || {}
+  const heridos = resultado.heridosTropas || {}
   const perdidas = suma(bajas)
+  const malheridos = suma(heridos)
+  const cayeron = suma(resultado.caidos) || perdidas + malheridos
   const total = suma(enviadas)
 
   const razones = []
@@ -1054,6 +1094,7 @@ function parteFinal (pie, resultado, enviadas, base) {
     el('div', { clase: 'fila', estilo: { flexWrap: 'wrap', justifyContent: 'center' } }, [
       chip('💥', `${resultado.porcentajeDestruido} % arrasado`, {}),
       chip('🧍', `${resultado.supervivientes}/${total} vuelven`, { tono: perdidas ? 'mal' : 'bien' }),
+      cayeron ? chip('🩸', `${cayeron} ${cayeron === 1 ? 'caído' : 'caídos'}`, { tono: 'mal' }) : null,
       resultado.defensores
         ? chip('🛡️', `guarnición ${resultado.defensores - resultado.defensoresVivos}/${resultado.defensores} abatida`, { tono: resultado.defensoresVivos ? 'mal' : 'bien' })
         : null
@@ -1064,10 +1105,14 @@ function parteFinal (pie, resultado, enviadas, base) {
       ? el('div', { html: costeHTML({ madera: botin.madera, piedra: botin.piedra, comida: botin.comida, oro: botin.oro }, { madera: 1e9, piedra: 1e9, comida: 1e9, oro: 1e9 }) })
       : el('div', { clase: 'tenue pequeño', texto: 'Nada aprovechable: no se llegó a los almacenes.' }),
     botin.gemas ? el('div', { clase: 'num', texto: `💎 ${botin.gemas}` }) : null,
-    perdidas ? el('div', { clase: 'col', estilo: { gap: '2px' } }, [
-      el('div', { clase: 'titular', texto: 'Bajas' }),
-      ...Object.entries(bajas).map(([t, n]) => el('div', { clase: 'pequeño', texto: `${UNIDADES[t]?.icono || ''} ${n} × ${UNIDADES[t]?.nombre || t}` }))
-    ]) : el('div', { clase: 'pequeño', texto: 'Sin bajas.' }),
+    cayeron ? el('div', { clase: 'col', estilo: { gap: '2px' } }, [
+      el('div', { clase: 'titular', texto: 'Tu tropa' }),
+      el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: malheridos
+        ? `${cayeron} ${cayeron === 1 ? 'cayó' : 'cayeron'} en el campo: ${malheridos} ${malheridos === 1 ? 'vuelve malherido' : 'vuelven malheridos'} al cuartel y ${perdidas} no ${perdidas === 1 ? 'vuelve' : 'vuelven'}.`
+        : `${cayeron} ${cayeron === 1 ? 'cayó' : 'cayeron'} en el campo y ${perdidas} no ${perdidas === 1 ? 'vuelve' : 'vuelven'}.` }),
+      ...Object.entries(heridos).filter(([, n]) => n).map(([t, n]) => el('div', { clase: 'pequeño', texto: `⛑️ ${n} × ${UNIDADES[t]?.nombre || t} se recupera${n === 1 ? '' : 'n'}` })),
+      ...Object.entries(bajas).filter(([, n]) => n).map(([t, n]) => el('div', { clase: 'pequeño', texto: `${UNIDADES[t]?.icono || ''} ${n} × ${UNIDADES[t]?.nombre || t}: no vuelve${n === 1 ? '' : 'n'}` }))
+    ]) : el('div', { clase: 'pequeño', texto: 'No cayó ni un hombre.' }),
     el('div', { clase: 'separador' }),
     el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: razones.join(' ') })
   ])
@@ -1106,6 +1151,14 @@ function bloqueParteDefensa (p) {
     ]),
     el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: p.titular }),
     el('div', { clase: 'pequeño', estilo: { lineHeight: '1.4' }, texto: p.resumen }),
+    el('button', {
+      clase: 'btn btn-oro btn-gordo', type: 'button', texto: '🎬 Ver el asalto en tu aldea',
+      onclick: async () => {
+        const campo = await cargarCampo()
+        if (!campo || !campo.verAsedio || !campo.verAsedio()) { toast('No se guardó la crónica de ese asalto', 'info'); return }
+        panel?.cerrar()
+      }
+    }),
     el('div', { clase: 'fila', estilo: { flexWrap: 'wrap' } }, [
       chip('💀', `${p.bajasEnemigas}/${p.atacantes} atacantes caídos`, { tono: p.bajasEnemigas >= p.atacantes / 2 ? 'bien' : 'mal' }),
       p.defensores ? chip('🧍', `${p.misCaidos}/${p.defensores} de los tuyos caídos`, { tono: p.misCaidos ? 'mal' : 'bien' }) : null,

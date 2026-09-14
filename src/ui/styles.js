@@ -871,8 +871,8 @@ export function toast (texto, tipo = 'info', ms = 2600) {
   nodo.addEventListener('click', quitar)
   capaToast.appendChild(nodo)
 
-  // más de tres apilados tapan el juego
-  while (capaToast.children.length > 3) capaToast.firstChild.remove()
+  // tres apilados tapaban la aldea entera: dos como mucho, y el más viejo se va
+  while (capaToast.children.length > 2) capaToast.firstChild.remove()
 
   setTimeout(quitar, ms)
   return quitar

@@ -1,11 +1,16 @@
 /** Constantes del juego. Un solo sitio para tocar el equilibrio. */
 
 export const CONFIG = {
-  VERSION: 1,
+  VERSION: 2,   // 2 = el tablero se reparte en parcelas (territorio que crece)
   NOMBRE: 'Baluarte',
 
   // --- tablero ---
-  GRID: 34,          // aldea de 34x34 casillas
+  // El valle mide 60x60 casillas, pero NO todo es tuyo: el tablero se reparte en
+  // parcelas de 12x12 y solo se construye en las conquistadas. Empiezas con las
+  // nueve del centro (36x36, más de lo que había antes) y el resto está en
+  // barbecho hasta que lo ganes. Ver core/grid.js y el bloque TERRITORIO.
+  GRID: 60,          // valle de 60x60 casillas (5x5 parcelas)
+  PARCELA: 12,       // lado de cada parcela, en casillas
   CELDA: 1,          // 1 casilla = 1 unidad de Three.js
   ALTURA_MAX: 0.6,   // relieve suave, nada de montañas
 
@@ -19,10 +24,29 @@ export const CONFIG = {
   RECURSOS: ['madera', 'piedra', 'comida', 'oro'],
   ALMACEN_BASE: { madera: 800, piedra: 800, comida: 600, oro: 400 },
 
+  // --- territorio que crece ---
+  TERRITORIO: {
+    // Lo que cuesta plantar la bandera en una parcela ya ganada. Barato a
+    // propósito: el precio de verdad lo pagaste en el campo de batalla.
+    COSTE_RECLAMAR: { madera: 120, piedra: 90, comida: 60, oro: 25 },
+    // Encadenar conquistas sube el precio: el imperio se administra, no se hereda.
+    SUBIDA_POR_PARCELA: 0.35,
+    // Edades que regalan una parcela al llegar (la recompensa es el sitio, no el oro).
+    PARCELA_POR_EDAD: { feudal: 1, castillos: 1, imperial: 1 },
+    // Un explorador que vuelve puede traer una linde sin dueño: 1 de cada 4 viajes.
+    PROB_HALLAZGO: 0.25,
+    // Mantener una avanzadilla cuesta cada minuto. Si no hay con qué pagar, se
+    // queda desabastecida: sigue en pie, pero deja de dar lo suyo.
+    MANTENIMIENTO_MIN: { comida: 4, oro: 1 }
+  },
+
   // --- cámara móvil ---
   ZOOM_MIN: 14,
-  ZOOM_MAX: 70,      // hay que poder ver la aldea entera de un vistazo
-  ZOOM_INICIAL: 42,  // de lejos se ve el pueblo; de cerca, solo tejados
+  // Tope de alejarse: con el valle de 60x60 se ha subido de 70 a 80, pero no
+  // más. Por encima, la niebla de render/scene.js (FogExp2 0.011) se come el
+  // color y el valle se ve lechoso: es más bonito acercarse y pasear el dedo.
+  ZOOM_MAX: 80,
+  ZOOM_INICIAL: 46,  // de lejos se ve el pueblo; de cerca, solo tejados
   ANGULO_CAMARA: Math.PI / 5   // isométrica suave, tipo Stellar Settlers
 }
 
@@ -44,6 +68,12 @@ export const PALETA = {
   rocaOscura: 0x607d8b,
   nieve: 0xeceff1,
   rejilla: 0xf3fbff,      // líneas de la rejilla de construcción
+  // terreno que aún no es tuyo: el mismo verde apagado y agrisado, para que se
+  // vea de un vistazo dónde acaba tu reino sin ensuciar la paleta
+  barbecho: 0x6f8353,
+  barbechoOscuro: 0x566541,
+  maleza: 0x7d8f56,       // hierba alta y zarzas de lo que no se cultiva
+  linde: 0x9aa69b,        // mojones de piedra que marcan el límite
 
   // construcciones
   madera: 0xa1662f,
@@ -65,6 +95,13 @@ export const PALETA = {
   entramado: 0x6b4a33,     // vigas oscuras del entramado medieval
   pizarra: 0x59697a,       // tejado de pizarra de los niveles altos
   pizarraClara: 0x7b8b9c,
+  // Código de color por función: el tejado dice de un vistazo para qué sirve el
+  // edificio. Recursos = tablilla de madera, militar = teja granate, saber =
+  // azul y cobre, defensa = piedra y pizarra, centro = teja roja de siempre.
+  tejaMadera: 0x8f6239,    // tablilla de madera: edificios de recursos
+  tejaMaderaOscura: 0x68462a,
+  tejadoAzulOscuro: 0x35547e,
+  cobre: 0x4f9e8b,         // cúpulas oxidadas de universidad y monasterio
   carbon: 0x3b3f42,        // madera quemada: ruinas y chimeneas
   ceniza: 0x6b7176,
   fuego: 0xff7043,         // llama de fragua y hoguera

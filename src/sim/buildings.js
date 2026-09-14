@@ -1,7 +1,11 @@
 import { events, EV } from '../core/events.js'
 import { CONFIG } from '../core/config.js'
 import { game, getBuilding, nuevoId } from '../core/state.js'
-import { huecoLibre, dentro } from '../core/grid.js'
+import {
+  huecoLibre, dentro, parcelaDe, rectParcela, centroParcela, coordsParcela,
+  parcelaEsMia, parcelaDisponible, parcelasMias, fronteraDe, territorioInicial,
+  territorioLibre, casillasDeTerritorio, NUCLEO, PARCELAS
+} from '../core/grid.js'
 import { def, ORDEN_EDADES, AGE_NOMBRE } from '../data/buildings.js'
 import { TECNOLOGIAS } from '../data/techs.js'
 // Única importación pactada fuera de core/ y data/: el banco. Los recursos no se
@@ -233,8 +237,17 @@ export function validarColocacion (tipo, x, z) {
   if (!d) return no('Ese edificio no existe.', 'inexistente')
   const base = puedeEncargar(tipo)
   if (!base.ok) return base
-  if (!dentro(x, z) || !dentro(x + d.ancho - 1, z + d.alto - 1)) return no('Se sale del terreno', 'sitio')
+  if (!dentro(x, z) || !dentro(x + d.ancho - 1, z + d.alto - 1)) return no('Se sale del valle', 'sitio')
+  // El territorio antes que el solape: "aquí ya hay algo" sobre un bosque en
+  // barbecho no le dice al jugador lo que de verdad pasa.
+  if (!territorioLibre(game.state, x, z, d.ancho, d.alto)) {
+    const p = parcelaDe(x, z)
+    if (p && parcelaDisponible(game.state, p.id)) return no('Ese terreno está esperando: reclámalo primero', 'territorio')
+    return no('Ese terreno todavía no es tuyo', 'territorio')
+  }
   if (!huecoLibre(game.state, x, z, d.ancho, d.alto)) return no('Aquí ya hay algo', 'sitio')
+  const avanzadilla = reglaDeAvanzadilla(tipo, x, z)
+  if (avanzadilla) return avanzadilla
   return ok()
 }
 
@@ -763,6 +776,285 @@ function revisarObras (avisar = true) {
   return n
 }
 
+// =============================================================================
+//  TERRITORIO: el reino que crece
+// =============================================================================
+
+/**
+ * El valle es de 60x60 casillas repartidas en parcelas de 12x12, pero solo se
+ * construye en las tuyas. Empiezas con las nueve del centro y las demás se ganan:
+ *
+ *   - CONQUISTA: derrotas al señor de una comarca del mapa del mundo y su linde,
+ *     la que mira hacia allí, queda libre para que plantes la bandera.
+ *   - EXPLORACIÓN: cada cuatro viajes, el explorador vuelve con un terreno sin dueño.
+ *   - EDAD: cambiar de edad te trae una parcela de regalo, sin pagar.
+ *
+ * Una parcela ganada queda 'disponible' (hay que reclamarla: cuesta y se paga)
+ * y pasa a 'mia' al reclamarla. La de la edad entra directa.
+ */
+
+const AJUSTES_T = CONFIG.TERRITORIO || {}
+const VIAJES_POR_HALLAZGO = Math.max(1, Math.round(1 / (AJUSTES_T.PROB_HALLAZGO || 0.25)))
+
+function territorio () {
+  const s = game.state
+  if (!s.territorio || typeof s.territorio !== 'object' || !s.territorio.parcelas) {
+    s.territorio = territorioInicial(Date.now())
+  }
+  return s.territorio
+}
+
+const fichaParcela = (id) => ({ parcela: id, rect: rectParcela(id), centro: centroParcela(id) })
+
+/** Cuántas parcelas te has ganado además del núcleo con el que naciste. */
+const parcelasGanadas = () => Math.max(0, parcelasMias(game.state).length - NUCLEO.length)
+
+/**
+ * Lo que cuesta plantar la bandera. Sube con cada parcela ganada: el imperio se
+ * administra, no se hereda, y así crecer sigue siendo una decisión y no un trámite.
+ */
+export function costeReclamar (id = null) {
+  const base = AJUSTES_T.COSTE_RECLAMAR || { madera: 120, piedra: 90, comida: 60, oro: 25 }
+  const k = 1 + (AJUSTES_T.SUBIDA_POR_PARCELA || 0.35) * parcelasGanadas()
+  const c = {}
+  for (const r of RECURSOS) c[r] = Math.round((base[r] || 0) * k / 5) * 5
+  return c
+}
+
+/** Las que están esperando a que plantes la bandera. La interfaz lee esto. */
+export function parcelasDisponibles () {
+  const m = territorio().parcelas
+  return Object.keys(m)
+    .filter(id => m[id].estado === 'disponible')
+    .map(id => ({ ...fichaParcela(id), motivo: m[id].motivo, origen: m[id].origen || null, coste: costeReclamar(id) }))
+}
+
+/** Resumen del reino, para el HUD: "9 parcelas · 1.296 casillas · 2 sin reclamar". */
+export function resumenTerritorio () {
+  return {
+    parcelas: parcelasMias(game.state).length,
+    casillas: casillasDeTerritorio(game.state),
+    disponibles: parcelasDisponibles(),
+    frontera: fronteraDe(game.state),
+    puestos: edificiosOperativos('puesto_avanzado').length
+  }
+}
+
+/**
+ * Parcela de frontera que mira hacia una comarca del mapa del mundo. Que el
+ * terreno que ganas esté DEL LADO por el que has ido a pelear es la mitad de la
+ * gracia: el reino crece hacia donde tú has empujado.
+ */
+function parcelaHaciaComarca (x, y) {
+  const w = game.state.world || {}
+  const casa = w.casa || { x: 8, y: 8 }
+  let dx = (Number.isFinite(x) ? x : casa.x) - casa.x
+  let dy = (Number.isFinite(y) ? y : casa.y) - casa.y
+  if (!dx && !dy) { dx = 1; dy = 0 }
+  const largo = Math.hypot(dx, dy) || 1
+  dx /= largo; dy /= largo
+
+  const centro = (PARCELAS - 1) / 2
+  let mejor = null; let mejorPunto = -Infinity
+  for (const id of fronteraDe(game.state)) {
+    const c = coordsParcela(id)
+    if (!c) continue
+    const vx = c.px - centro; const vz = c.pz - centro
+    const l = Math.hypot(vx, vz) || 1
+    // lo que apunta hacia la comarca pesa; entre iguales, la más cercana a casa
+    const punto = (vx / l) * dx + (vz / l) * dy - l * 0.08
+    if (punto > mejorPunto) { mejorPunto = punto; mejor = id }
+  }
+  return mejor
+}
+
+/** Cualquier parcela de frontera (para la exploración y las edades). */
+function parcelaDeFrontera () {
+  const libres = fronteraDe(game.state).filter(id => !parcelaDisponible(game.state, id))
+  const pool = libres.length ? libres : fronteraDe(game.state)
+  if (!pool.length) return null
+  // la más pegada al centro: el reino crece en mancha, no a saltos
+  const centro = (PARCELAS - 1) / 2
+  return pool.slice().sort((a, b) => {
+    const ca = coordsParcela(a); const cb = coordsParcela(b)
+    return Math.hypot(ca.px - centro, ca.pz - centro) - Math.hypot(cb.px - centro, cb.pz - centro)
+  })[0]
+}
+
+/**
+ * Deja una parcela a la espera de que el jugador plante la bandera.
+ * @returns {string|null} el id de la parcela ofrecida
+ */
+export function ofrecerParcela (id, motivo = 'conquista', origen = null) {
+  if (!id || !rectParcela(id)) return null
+  const t = territorio()
+  if (t.parcelas[id] && t.parcelas[id].estado === 'mia') return null
+  if (t.parcelas[id] && t.parcelas[id].estado === 'disponible') return null
+  t.parcelas[id] = { estado: 'disponible', motivo, origen, cuando: Date.now() }
+  const ficha = { ...fichaParcela(id), motivo, origen, coste: costeReclamar(id) }
+  events.emit(EV.TERRITORIO_DISPONIBLE, ficha)
+  toast(motivo === 'conquista'
+    ? '🚩 Ese terreno se ha quedado sin señor. Tócalo en el mapa para reclamarlo.'
+    : '🗺️ Tus exploradores han encontrado tierra sin dueño. Tócala para reclamarla.', 'bien')
+  return id
+}
+
+/**
+ * La parcela pasa a ser tuya. Emite el evento con el que el render abre la
+ * linde, retira la maleza y lleva la cámara: el momento de ganar terreno tiene
+ * que verse, que es lo que se pidió.
+ */
+export function desbloquearParcela (id, motivo = 'conquista', origen = null) {
+  if (!id || !rectParcela(id)) return false
+  const t = territorio()
+  if (t.parcelas[id] && t.parcelas[id].estado === 'mia') return false
+  t.parcelas[id] = { estado: 'mia', motivo, origen, cuando: Date.now() }
+  const ficha = { ...fichaParcela(id), motivo, origen }
+  events.emit(EV.TERRITORIO_DESBLOQUEADO, ficha)
+  events.emit(EV.SFX, { nombre: 'listo' })
+  const c = ficha.centro
+  if (c) events.emit(EV.CAMERA_FOCUS, { x: c.x, z: c.z, zoom: 40 })
+  const r = ficha.rect
+  toast(`🚩 Tierra nueva: ${r.ancho}x${r.alto} casillas más para tu baluarte`, 'bien')
+  darXp(60)
+  return true
+}
+
+/** Plantar la bandera: se paga y el terreno pasa a ser tuyo. */
+export function reclamarParcela (id) {
+  if (!parcelaDisponible(game.state, id)) {
+    if (parcelaEsMia(game.state, id)) toast('Ese terreno ya es tuyo', 'info')
+    return false
+  }
+  const coste = costeReclamar(id)
+  if (!puedePagar(coste)) { avisoFalta(coste); return false }
+  const t = territorio()
+  const antes = t.parcelas[id] || {}
+  pagar(coste)
+  return desbloquearParcela(id, antes.motivo || 'conquista', antes.origen || null)
+}
+
+// --- avanzadillas ------------------------------------------------------------
+
+/**
+ * Un puesto avanzado es un poblado pequeño con su torre y su empalizada: se
+ * levanta FUERA del núcleo, uno por parcela, y es lo que hace que la tierra
+ * ganada valga algo más que sitio para almacenes.
+ */
+export function reglaDeAvanzadilla (tipo, x, z) {
+  if (tipo !== 'puesto_avanzado') return null
+  const p = parcelaDe(x, z)
+  if (!p) return no('Se sale del valle', 'sitio')
+  if (NUCLEO.includes(p.id)) return no('La avanzadilla se levanta en tierra conquistada, no en casa', 'sitio')
+  const yaHay = game.state.buildings.some(b => {
+    if (b.tipo !== 'puesto_avanzado') return false
+    const q = parcelaDe(b.x, b.z)
+    return q && q.id === p.id
+  })
+  if (yaHay) return no('Ya hay una avanzadilla en esta parcela', 'tope')
+  return null
+}
+
+/** Las que están en pie y abastecidas: las únicas que cuentan para los bonos. */
+export const avanzadillasActivas = () =>
+  game.state.buildings.filter(b => b.tipo === 'puesto_avanzado' && operativo(b) && !b.desabastecido)
+
+/**
+ * Mantener guarnición lejos de casa cuesta. Se cobra por minuto; si un mes no
+ * hay con qué, el puesto no se cae: se queda desabastecido (deja de avisar y de
+ * defender como es debido) y va perdiendo fuelle hasta que vuelvas a pagarle.
+ */
+function cobrarMantenimiento () {
+  const puestos = game.state.buildings.filter(b => b.tipo === 'puesto_avanzado' && operativo(b))
+  const t = territorio()
+  if (!puestos.length) { t.ultimaSoldada = 0; return }
+  const ahora = Date.now()
+  if (!t.ultimaSoldada) { t.ultimaSoldada = ahora; return }
+  const minutos = Math.floor((ahora - t.ultimaSoldada) / 60000)
+  if (minutos <= 0) return
+  // tope de 8 horas: volver tras dos días fuera no puede dejarte a cero
+  const cobrar = Math.min(minutos, 8 * 60)
+  t.ultimaSoldada += cobrar * 60000
+
+  const tarifa = AJUSTES_T.MANTENIMIENTO_MIN || { comida: 4, oro: 1 }
+  const total = {}
+  for (const r of RECURSOS) total[r] = Math.round((tarifa[r] || 0) * puestos.length * cobrar)
+  if (!RECURSOS.some(r => total[r] > 0)) return
+
+  // puedePagar antes que pagar: `pagar` grita por el bus si no llega, y una
+  // soldada que no cuadra no es motivo para enseñarle al jugador un "te falta".
+  if (puedePagar(total) && pagar(total)) {
+    for (const b of puestos) {
+      if (!b.desabastecido) continue
+      b.desabastecido = false
+      toast(`🏕️ La avanzadilla vuelve a estar abastecida`, 'bien')
+    }
+    return
+  }
+  let aviso = false
+  for (const b of puestos) {
+    if (!b.desabastecido) aviso = true
+    b.desabastecido = true
+    b.hp = Math.max(1, Math.round((b.hp ?? b.hpMax) - (b.hpMax || 100) * 0.02 * cobrar))
+  }
+  if (aviso) toast('🏕️ Tus avanzadillas se han quedado sin soldada: la gente se desbanda', 'mal')
+}
+
+// --- de dónde salen las parcelas ---------------------------------------------
+
+/** Ganar una comarca deja su linde libre. Lo llama EV.RAID_RESOLVED. */
+function alGanarAsalto (p) {
+  if (!p || !p.victoria) return
+  const base = p.base || p.enemyBase || p.enemigo || null
+  const id = parcelaHaciaComarca(base && base.x, base && base.y)
+  if (!id) return
+  ofrecerParcela(id, 'conquista', base ? { x: base.x, y: base.y, nombre: base.nombre || null } : null)
+}
+
+/** Un explorador de cada cuatro vuelve con una linde sin dueño. */
+function alVolverExplorador () {
+  const t = territorio()
+  t.viajes = (t.viajes || 0) + 1
+  if (t.viajes % VIAJES_POR_HALLAZGO !== 0) return
+  const id = parcelaDeFrontera()
+  if (id) ofrecerParcela(id, 'exploracion', null)
+}
+
+/** Cambiar de edad trae tierra de regalo: sin pagar y sin pelear. */
+function alAvanzarEdad (p) {
+  const cuantas = (AJUSTES_T.PARCELA_POR_EDAD || {})[p && p.age] || 0
+  for (let i = 0; i < cuantas; i++) {
+    const id = parcelaDeFrontera()
+    if (id) desbloquearParcela(id, 'edad', { age: p.age })
+  }
+}
+
+/**
+ * Tocar una parcela que está esperando = plantar la bandera. Con confirmación:
+ * el primer toque dice lo que cuesta y el segundo paga. Sin eso, arrastrar el
+ * dedo por el mapa te gastaría el granero sin haber decidido nada.
+ */
+let colocando = false
+let parcelaArmada = { id: null, hasta: 0 }
+const MS_CONFIRMAR = 6000
+
+function alTocarCasilla (p) {
+  if (colocando) return                       // el dedo lleva un fantasma, no una bandera
+  if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.z)) return
+  const q = parcelaDe(Math.round(p.x), Math.round(p.z))
+  if (!q || !parcelaDisponible(game.state, q.id)) return
+  const ahora = Date.now()
+  if (parcelaArmada.id === q.id && ahora < parcelaArmada.hasta) {
+    parcelaArmada = { id: null, hasta: 0 }
+    reclamarParcela(q.id)
+    return
+  }
+  parcelaArmada = { id: q.id, hasta: ahora + MS_CONFIRMAR }
+  const c = costeReclamar(q.id)
+  const precio = RECURSOS.filter(r => c[r] > 0).map(r => `${c[r]} de ${NOMBRE_RECURSO[r]}`).join(', ')
+  toast(`🚩 Reclamar este terreno cuesta ${precio}. Tócalo otra vez para plantar la bandera.`, 'info')
+}
+
 // --- partida nueva: la aldea inicial ----------------------------------------
 
 /**
@@ -770,15 +1062,16 @@ function revisarObras (avisar = true) {
  * en el centro, serrería y granja en las esquinas de atrás. Nada en fila india:
  * el primer minuto de juego tiene que entrar por los ojos.
  */
+const C = Math.floor(CONFIG.GRID / 2)      // casilla central del valle
 const ALDEA_INICIAL = [
-  { tipo: 'ayuntamiento', x: 15, z: 13 },
-  { tipo: 'casa', x: 12, z: 17 },
-  { tipo: 'casa', x: 20, z: 17 },
-  { tipo: 'serreria', x: 11, z: 12 },
-  { tipo: 'granja', x: 20, z: 12 },
-  { tipo: 'pozo', x: 16, z: 18 },
-  { tipo: 'estandarte', x: 14, z: 17 },
-  { tipo: 'estandarte', x: 19, z: 17 }
+  { tipo: 'ayuntamiento', x: C - 2, z: C - 4 },
+  { tipo: 'casa', x: C - 5, z: C },
+  { tipo: 'casa', x: C + 3, z: C },
+  { tipo: 'serreria', x: C - 6, z: C - 5 },
+  { tipo: 'granja', x: C + 3, z: C - 5 },
+  { tipo: 'pozo', x: C - 1, z: C + 1 },
+  { tipo: 'estandarte', x: C - 3, z: C },
+  { tipo: 'estandarte', x: C + 2, z: C }
 ]
 
 function montarAldeaInicial () {
@@ -815,6 +1108,7 @@ function montarAldeaInicial () {
 /** Rellena campos que falten en partidas viejas y tira obras huérfanas. */
 function normalizar () {
   const s = game.state
+  territorio()                      // toda partida tiene su núcleo, venga de donde venga
   if (!Array.isArray(s.buildings)) s.buildings = []
   if (!Array.isArray(s.obras)) s.obras = []
   if (!Array.isArray(s.colaObras)) s.colaObras = []
@@ -859,7 +1153,16 @@ function arranque () {
 }
 
 export function init () {
-  events.on(EV.TICK, () => revisarObras(true))
+  events.on(EV.TICK, () => { revisarObras(true); cobrarMantenimiento() })
+  // --- territorio: de dónde sale la tierra nueva ---
+  events.on(EV.RAID_RESOLVED, alGanarAsalto)
+  events.on(EV.SCOUT_RETURNED, alVolverExplorador)
+  events.on(EV.AGE_ADVANCED, alAvanzarEdad)
+  events.on(EV.TERRITORIO_RECLAMAR, (p) => reclamarParcela(p && p.parcela))
+  // Tocar el terreno que está esperando también vale: es lo primero que hace
+  // cualquiera al ver una bandera clavada en el mapa de su ciudad.
+  events.on(EV.GRID_TAP, alTocarCasilla)
+  events.on(EV.BUILD_MODE, ({ activo } = {}) => { colocando = !!activo })
   // Una defensa recién investigada engorda también la piedra ya levantada.
   events.on(EV.TECH_RESEARCHED, () => recalcularDefensas())
   events.on(EV.BUILD_REQUESTED, ({ tipo, x, z, rot }) => colocar(tipo, x, z, rot))

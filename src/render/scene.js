@@ -200,6 +200,10 @@ function colocarCamara () {
     cam.objetivo.z + cam.distancia * ce * Math.cos(cam.azimut)
   )
   camera.lookAt(cam.objetivo)
+  // La niebla se retira al alejarse (el dueño pidió que no tapara la aldea en
+  // vista general). Lo lleva `ajustarNieblaDistancia()` de render/worldmap.js,
+  // que además deja un velo en la vista del mundo: aquí solo se fija la
+  // densidad de partida, arriba en la creación de la escena.
 }
 
 /** La cámara no puede irse a mirar el vacío: el objetivo vive dentro del tablero. */

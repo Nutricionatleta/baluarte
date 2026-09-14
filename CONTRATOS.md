@@ -60,16 +60,25 @@ jugador:  { nombre, nivel, xp, gemas }
 age: 'oscura' | 'feudal' | 'castillos' | 'imperial'
 buildings: [{ id, tipo, nivel, x, z, rot, ancho, alto, hp, enObra, finObra, trabajadores:[ids] }]
 villagers: [{ id, nombre, job, buildingId, x, z, estado, portando:{tipo,cant} }]
-ejercito:  { tropas: { lancero: 4, ... }, cola: [{ tipo, fin }] }
-obras:     [{ id, buildingId, tipo:'construir'|'mejorar', inicio, fin }]
+ejercito:  { tropas: { lancero: 4, ... }, cola: [{ tipo, fin }],
+             heridos: { lancero: 2, ... },           // convalecientes: no pelean, ocupan hueco
+             curacion: { inicio, fin },              // reloj real de la enfermería
+             reunion: { x, z, fijada, ancla } }      // el estandarte de batalla, en casillas
+obras:     [{ id, buildingId, tipo:'construir'|'mejorar', inicio, fin }]   // en marcha
+colaObras: [{ id, buildingId, tipo:'construir'|'mejorar', encargada, aviso }] // esperando turno
 expediciones: [{ id, destino, vuelve, explorador }]
+territorio: { parcelas: { '2,2': { estado:'mia'|'disponible', motivo, cuando } } }  // el tablero crece
 world:     { descubierto: {}, nodos: [], enemigos: [] }
 research:  { techId: true }
 quests:    { activas: [], completadas: [] }
 ```
 - Coordenadas de edificios y aldeanos **en casillas** (enteros para edificios,
   decimales para aldeanos que caminan). El render convierte con `gridAMundo()`.
-- Tablero de **34×34 casillas**. El centro del tablero es el (0,0) del mundo 3D.
+- Valle de **60×60 casillas** repartido en **parcelas de 12×12** (`CONFIG.PARCELA`).
+  El centro del tablero es el (0,0) del mundo 3D. **Solo se construye en las parcelas
+  tuyas**: empiezas con las nueve del centro (36×36) y el resto se gana conquistando,
+  explorando o cambiando de edad. `huecoLibre()` ya lo comprueba: no hace falta que
+  nadie mire el territorio a mano.
 
 ## Eventos
 Están todos en `EV` (`src/core/events.js`) con el payload comentado al lado.

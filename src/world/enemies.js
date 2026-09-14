@@ -1,6 +1,7 @@
 import { game } from '../core/state.js'
 import { events, EV } from '../core/events.js'
 import { makeRng } from '../core/rng.js'
+import { parcelasMias, NUCLEO } from '../core/grid.js'
 import { def } from '../data/buildings.js'
 import { UNIDADES } from '../data/units.js'
 import { nombreEnemigo } from '../data/names.js'
@@ -40,8 +41,12 @@ const AVISO_MAX_SEG = 480
 /** Rivales que la lista de asalto tiene SIEMPRE, desde el primer minuto. */
 const RIVALES_MINIMOS = 3
 
-/** Vasallaje: dos escarmientos y se te arrodillan. */
-const DERROTAS_PARA_VASALLO = 2
+/**
+ * Vasallaje al PRIMER escarmiento: es el escalón intermedio de la escalera de
+ * conquista (ver la cabecera de world/imperio.js). Le ganas una vez y te paga
+ * tributo; vuelves y le ganas del todo, y su plaza pasa a tu bandera.
+ */
+const DERROTAS_PARA_VASALLO = 1
 const TRIBUTO_CADA_MIN = 30
 /**
  * De su despensa, en cada entrega. Al 5 % y con entregas de media hora, un
@@ -142,8 +147,12 @@ try { MODULOS_BANCO = import.meta.glob('../sim/resources.js') } catch { MODULOS_
 let banco = null
 async function cargarBanco () {
   const carga = MODULOS_BANCO['../sim/resources.js']
-  if (typeof carga !== 'function') return null
-  try { return await carga() } catch { return null }
+  if (typeof carga === 'function') {
+    try { return await carga() } catch { /* se prueba con el import normal */ }
+  }
+  // Fuera de Vite (el banco de pruebas de scripts/) el glob no existe: con el
+  // import normal los tributos pasan por caja igual que dentro del juego.
+  try { return await import('../sim/resources.js') } catch { return null }
 }
 
 /** Mete recursos en el granero respetando los topes. Devuelve lo que cupo. */
@@ -161,6 +170,18 @@ function ingresarRecursos (recursos, motivo = 'tributo') {
   events.emit(EV.RESOURCES_CHANGED, { resources: s.recursos })
   return recursos
 }
+/**
+ * EL IMPERIO. world/imperio.js se registra aquí al arrancar (inyección: este
+ * módulo no lo importa, así no hay ciclo). Si no está, todo sigue funcionando
+ * como antes: sin regla de adyacencia y sin plazas que cambien de bandera.
+ */
+let IMPERIO = null
+export function registrarImperio (api) { IMPERIO = api || null; return IMPERIO }
+
+/** ¿Toca tu frontera? Sin imperio cargado, todo está a tiro (modo degradado). */
+const aTiro = (e) => !IMPERIO || typeof IMPERIO.alcanzableBruto !== 'function' ||
+  IMPERIO.alcanzableBruto(e.x, e.y)
+
 const enemigos = () => {
   const w = mundo()
   if (!w) return []
@@ -835,12 +856,27 @@ function sincronizarNiebla (tiles = null) {
 const conBase = (e) => { if (e && e.descubierto) baseDe(e); return e || null }
 
 export const enemigoEn = (x, y) => conBase(enemigos().find(e => e.x === x && e.y === y))
+/** Lo mismo pero SIN levantarles la aldea: para recorrer el valle entero barato. */
+export const todosLosRivales = () => enemigos()
+export const rivalEn = (x, y) => enemigos().find(e => e.x === x && e.y === y) || null
+export const rivalPorId = (id) => enemigos().find(e => e.id === id) || null
 export const enemigoPorId = (id) => conBase(enemigos().find(e => e.id === id))
 export const enemigosVisibles = () => enemigos().filter(e => e.descubierto)
-export const enemigosVivos = () => enemigos().filter(e => e.descubierto && !e.derrotado && !e.vasallo)
+export const enemigosVivos = () => enemigos().filter(e => e.descubierto && !e.derrotado && !e.vasallo && !e.conquistado)
 
-/** A quién se puede asaltar hoy mismo: avistado, en pie y que no sea de los tuyos. */
-const asaltables = () => enemigos().filter(e => e.descubierto && !e.derrotado && !e.vasallo)
+/**
+ * A quién se puede asaltar hoy mismo. Los VASALLOS siguen en la lista: ya te
+ * pagan, pero volver y ganarles del todo es lo que te da su plaza. Lo que ya
+ * ondea tu bandera sale de aquí para siempre.
+ */
+const asaltables = () => enemigos().filter(e => e.descubierto && !e.derrotado && !e.conquistado)
+
+/** De los asaltables, los que tocan tu frontera. Si ninguno, se devuelven todos. */
+function alcanzables () {
+  const todos = asaltables()
+  const cerca = todos.filter(aTiro)
+  return cerca.length ? cerca : todos
+}
 
 /** Cuándo se acaban las horas de gracia de esta partida. */
 function finGracia () {
@@ -858,8 +894,10 @@ function finGracia () {
 export function revelarVecinos (cuantos = RIVALES_MINIMOS) {
   const casa = casaDelMapa()
   const d = (e) => Math.hypot(e.x - casa.x, e.y - casa.y)
-  const ocultos = enemigos()
-    .filter(e => !e.descubierto && !e.derrotado && !e.vasallo)
+  const candidatos = enemigos().filter(e => !e.descubierto && !e.derrotado && !e.conquistado && !e.vasallo)
+  // primero los que tu brazo alcanza: sacar de la niebla algo inatacable no sirve
+  const cerca = candidatos.filter(aTiro)
+  const ocultos = (cerca.length ? cerca : candidatos)
     .sort((a, b) => (a.nivel - b.nivel) || (d(a) - d(b)))
   const sacados = []
   for (const e of ocultos) {
@@ -889,6 +927,25 @@ export function poderJugadorActual () {
   return Math.max(PODER_MINIMO, p)
 }
 
+// ---------------------------------------------- cuánto pesa ya tu reino ---
+
+/** Parcelas ganadas además del núcleo de partida: hasta dónde llega tu bandera. */
+const parcelasGanadas = () => Math.max(0, parcelasMias(game.state).length - NUCLEO.length)
+
+/** Avanzadillas en pie y con la soldada pagada. */
+const avanzadillas = () => (game.state.buildings || []).filter(b =>
+  b.tipo === 'puesto_avanzado' && !b.enObra && !b.arruinado && (b.nivel || 0) > 0 && !b.desabastecido).length
+
+/**
+ * CRECER TIENE CONSECUENCIAS. Quien tiene medio valle ya no se pelea con
+ * bandidos: los señores de al lado se lo toman en serio, montan mejor y vienen
+ * con más gente. Esta es la vara con la que se escoge (y se cría) a los rivales.
+ * Tope en 1,8: que el reino aprieta, no que el juego se vuelva imposible.
+ */
+export function escalaDelReino () {
+  return Math.min(1.8, 1 + 0.09 * parcelasGanadas() + 0.04 * avanzadillas())
+}
+
 const OBJETIVOS = [
   { etiqueta: 'cómodo', ratio: 0.55, consejo: 'Te lo llevas con lo que tienes. Botín seguro.' },
   { etiqueta: 'igualado', ratio: 0.92, consejo: 'Pelea de verdad. Lleva la tropa entera.' },
@@ -906,13 +963,17 @@ export function emparejar (poderJugador = poderJugadorActual()) {
   const pj = Math.max(PODER_MINIMO, poderJugador)
   // Regla dura: SIEMPRE hay a quien atacar. Si el valle avistado no da para
   // tres, se sacan de la niebla los vecinos más flojos antes de emparejar.
-  if (asaltables().length < RIVALES_MINIMOS) revelarVecinos(RIVALES_MINIMOS - asaltables().length)
-  const pool = asaltables()
+  if (alcanzables().length < RIVALES_MINIMOS) revelarVecinos(RIVALES_MINIMOS - alcanzables().length)
+  // REGLA DE ADYACENCIA: solo se empareja con lo que toca tu valle o una plaza
+  // tuya. El resto lo devuelve imperio.objetivosAlcanzables() con su motivo.
+  const pool = alcanzables()
   const usados = new Set()
   const salida = []
+  // El listón no lo pone solo tu ejército: lo pone también tu territorio.
+  const escala = escalaDelReino()
 
   for (const obj of OBJETIVOS) {
-    const deseado = pj * obj.ratio
+    const deseado = pj * obj.ratio * escala
     let mejor = null
     let mejorError = Infinity
     for (const e of pool) {
@@ -958,13 +1019,21 @@ function fichaDeAsalto (enemigo, pj, etiqueta = null, consejo = null) {
   if ((enemigo.fracasos || 0) >= 1) {
     aviso = `Ya te ha parado ${enLetra(enemigo.fracasos)} ${enemigo.fracasos === 1 ? 'vez' : 'veces'}: vuelve con arietes o con más gente.`
   }
+  const alc = (IMPERIO && typeof IMPERIO.alcanzable === 'function')
+    ? IMPERIO.alcanzable(enemigo.x, enemigo.y)
+    : { ok: true, motivo: '' }
+  if (enemigo.vasallo) aviso = 'Ya te paga tributo. Gánale otra vez y su plaza pasa a tu bandera.'
   return {
     enemigo,
     etiqueta: eti,
     ratio: Math.round(ratio * 100) / 100,
     recompensa: recompensaDe(enemigo),
     fracasos: enemigo.fracasos || 0,
-    consejo: aviso
+    consejo: aviso,
+    // en qué escalón está: primero se le somete, después se le toma la plaza
+    paso: enemigo.vasallo ? 'conquistar' : 'someter',
+    alcanzable: alc.ok,
+    bloqueo: alc.ok ? null : (alc.sugerencia || alc.motivo)
   }
 }
 
@@ -1005,7 +1074,8 @@ function criarRival (poderDeseado, usados = new Set()) {
   }
 
   // 1) ¿hay ya una hueste de paso que nadie está mirando? se recicla
-  const reciclable = lista.find(e => e.criado && !usados.has(e.id) && !e.derrotado)
+  const reciclable = lista.find(e => e.criado && !usados.has(e.id) && !e.derrotado &&
+    !e.conquistado && !e.vasallo)
   if (reciclable) {
     reciclable.nivel = nivel
     reciclable.semilla = semillaDe(`cria:${reciclable.id}:${Date.now()}`)
@@ -1028,6 +1098,10 @@ function criarRival (poderDeseado, usados = new Set()) {
   // de que el panel de ataque apareciese vacío el primer día.
   if (!candidatas.length) candidatas = w.tiles.filter(libre).sort((a, b) =>
     Math.hypot(a.x - casa.x, a.y - casa.y) - Math.hypot(b.x - casa.x, b.y - casa.y)).slice(0, 12)
+  // y siempre dentro de tu alcance: un campamento que no puedes atacar no es
+  // una válvula, es una burla. Si no hay sitio a tiro, se deja donde se pueda.
+  const aTiroDeAqui = candidatas.filter(t => aTiro(t))
+  if (aTiroDeAqui.length) candidatas = aTiroDeAqui
   if (!candidatas.length) return null
 
   const t = rng.pick(candidatas)
@@ -1310,9 +1384,10 @@ export function hacerVasallo (enemigo) {
   enemigo.tituloPrevio = enemigo.tituloPrevio || enemigo.titulo
   enemigo.titulo = `Vasallo · ${enemigo.tituloPrevio}`
   enemigo.amenaza = 'Vasallo tuyo'
-  enemigo.descripcion = `Han hincado la rodilla. Cada ${TRIBUTO_CADA_MIN} minutos mandan ${textoTributo(enemigo.tributo)} a tu granero.`
+  enemigo.descripcion = `Han hincado la rodilla. Cada ${TRIBUTO_CADA_MIN} minutos mandan ${textoTributo(enemigo.tributo)} a tu granero. ` +
+    'Si vuelves y les ganas del todo, la plaza deja de ser suya.'
   events.emit(EV.UI_TOAST, {
-    texto: `🏳️ ${enemigo.nombre} te jura vasallaje: tributo cada ${TRIBUTO_CADA_MIN} min`,
+    texto: `🏳️ ${enemigo.nombre} te jura vasallaje: tributo cada ${TRIBUTO_CADA_MIN} min. Vuelve a ganarle y su plaza será tuya`,
     tipo: 'bien'
   })
   return enemigo
@@ -1320,6 +1395,60 @@ export function hacerVasallo (enemigo) {
 
 /** Los que te pagan. */
 export const vasallos = () => enemigos().filter(e => e.vasallo)
+
+/** Las comarcas que ya ondean tu estandarte (su ficha vive en imperio.plazas). */
+export const conquistados = () => enemigos().filter(e => e.conquistado)
+
+/**
+ * Su plaza pasa a tu bandera: deja de ser rival, deja de pagar tributo (ahora
+ * produce) y deja de rehacerse. Lo llama world/imperio.js al conquistar.
+ */
+export function marcarConquistado (enemigo) {
+  if (!enemigo) return null
+  enemigo.conquistado = true
+  enemigo.vasallo = false
+  enemigo.derrotado = false
+  enemigo.reaparece = 0
+  enemigo.rencor = 0
+  enemigo.proximoAtaque = 0
+  enemigo.proximoTributo = 0
+  enemigo.tributo = null
+  enemigo.descubierto = true
+  enemigo.señor = null
+  enemigo.tituloPrevio = enemigo.tituloPrevio || enemigo.titulo
+  enemigo.titulo = `Plaza tuya · ${enemigo.tituloPrevio}`
+  enemigo.amenaza = 'Bajo tu bandera'
+  enemigo.descripcion = 'Tu estandarte ondea en la plaza: produce para tu granero y desde ella alcanzas a sus vecinos.'
+  return enemigo
+}
+
+/**
+ * Te la han quitado. Vuelve a estar en pie y con ganas, bajo la bandera del
+ * señor que entró (o de nadie). Conquistar no puede ser un billete de ida.
+ */
+export function devolverPlaza (enemigo, señorId = null) {
+  if (!enemigo) return null
+  enemigo.conquistado = false
+  enemigo.vasallo = false
+  enemigo.derrotas = 0
+  enemigo.fracasos = 0
+  enemigo.derrotado = false
+  enemigo.señor = señorId || null
+  enemigo.titulo = enemigo.tituloPrevio || enemigo.titulo
+  enemigo.rencor = clamp((enemigo.rencor || 0) + 1, 0, 5)
+  reconstruir(enemigo)
+  enemigo.proximoAtaque = Date.now() + intervaloAtaque(enemigo)
+  return enemigo
+}
+
+/** Un señor rival se queda con una plaza neutral: sube de talla y cambia de casa. */
+export function absorberRival (enemigo, señor) {
+  if (!enemigo) return null
+  enemigo.señor = señor ? señor.id : enemigo.señor || null
+  if (señor) enemigo.casa = `la bandera de ${señor.nombre}`
+  subirDeNivel(enemigo, 1)
+  return enemigo
+}
 
 /**
  * El contador de imperio: cuánta gente te debe pleitesía, cuánta tierra hay
@@ -1343,7 +1472,8 @@ export function imperio () {
     señores: v.filter(e => e.nivel >= 8).length,
     explorado: Object.keys((w && w.descubierto) || {}).length,
     asaltosGanados: lista.reduce((n, e) => n + (e.derrotas || 0), 0),
-    enPie: lista.filter(e => !e.vasallo && !e.derrotado).length,
+    enPie: lista.filter(e => !e.vasallo && !e.derrotado && !e.conquistado).length,
+    plazas: lista.filter(e => e.conquistado).length,
     tributoDia: dia,
     tributoDiaTotal: Object.values(dia).reduce((a, b) => a + b, 0),
     proximoTributo: Number.isFinite(proximo) ? proximo : 0,
@@ -1390,10 +1520,20 @@ function cobrarTributos () {
 
 /** Marca la base como arrasada y pone el reloj de la reconstrucción. */
 export function derrotar (enemigo) {
-  if (!enemigo || enemigo.derrotado || enemigo.vasallo) return enemigo
+  if (!enemigo || enemigo.derrotado || enemigo.conquistado) return enemigo
   enemigo.saqueos = (enemigo.saqueos || 0) + 1
   enemigo.derrotas = (enemigo.derrotas || 0) + 1
-  // Al segundo escarmiento no se rehacen: se rinden y pasan a pagar.
+
+  // SEGUNDO ESCARMIENTO: al vasallo que vuelves a batir se le toma la plaza.
+  // A partir de aquí la comarca es tuya y produce para ti (world/imperio.js).
+  if (enemigo.vasallo) {
+    if (IMPERIO && typeof IMPERIO.conquistar === 'function' && IMPERIO.conquistar(enemigo)) return enemigo
+    return enemigo          // sin imperio cargado sigue de vasallo: nada se rompe
+  }
+
+  // PRIMER ESCARMIENTO: hinca la rodilla y pasa a pagarte tributo.
+  // Tomar una comarca no despeja el camino: lo que hay DETRÁS cierra filas.
+  endurecerDetras(enemigo)
   if (enemigo.derrotas >= DERROTAS_PARA_VASALLO) return hacerVasallo(enemigo)
   enemigo.derrotado = true
   enemigo.rencor = clamp((enemigo.rencor || 0) + 1, 0, 5)
@@ -1405,12 +1545,66 @@ export function derrotar (enemigo) {
 }
 
 /**
+ * Le sube el nivel a un rival y le rehace la aldea a esa talla. Es lo que
+ * permite que el valle entero se endurezca mientras tú creces, sin tener que
+ * repoblarlo ni inventarse gente nueva.
+ */
+function subirDeNivel (enemigo, cuantos = 1) {
+  const nivel = clamp((enemigo.nivel || 1) + cuantos, 1, NIVEL_MAX)
+  if (nivel === enemigo.nivel) return enemigo
+  enemigo.nivel = nivel
+  enemigo.semilla = semillaDe(`sube:${enemigo.id}:${nivel}`)
+  // La base solo se levanta si ya estaba levantada: la niebla no gasta guardado.
+  if (enemigo.base) enemigo.base = generarBase(nivel, enemigo.personalidad, makeRng(enemigo.semilla))
+  enemigo.guarnicion = generarGuarnicion(nivel, enemigo.personalidad, makeRng(enemigo.semilla + 1))
+  enemigo.guarnicionBase = { ...enemigo.guarnicion }
+  enemigo.botin = generarBotin(nivel, enemigo.personalidad, makeRng(enemigo.semilla + 2))
+  enemigo.poder = poderTropas(enemigo.guarnicion) + (enemigo.base ? poderDefensas(enemigo.base) : 0)
+  enemigo.amenaza = etiquetaAmenaza(nivel)
+  enemigo.descripcion = describirBase(enemigo)
+  return enemigo
+}
+
+/**
+ * Al tomar una comarca, los que viven MÁS ALLÁ en esa misma dirección se
+ * preparan: suben un nivel. Así avanzar hacia el confín es cada vez más caro y
+ * el mapa no se convierte en una lista de aldeas indefensas.
+ * @returns {number} a cuántos les ha subido la sangre
+ */
+function endurecerDetras (caido) {
+  if (!caido || !Number.isFinite(caido.x)) return 0
+  const casa = casaDelMapa()
+  const dx = caido.x - casa.x; const dy = caido.y - casa.y
+  const d0 = Math.hypot(dx, dy)
+  if (d0 < 0.5) return 0
+  let tocados = 0
+  for (const e of enemigos()) {
+    if (e === caido || e.vasallo || e.criado) continue
+    const ex = e.x - casa.x; const ey = e.y - casa.y
+    const de = Math.hypot(ex, ey)
+    if (de <= d0) continue                                       // los de acá ya los conoces
+    if ((ex * dx + ey * dy) / (de * d0) < 0.55) continue          // que estén detrás, no a un lado
+    if (Math.hypot(e.x - caido.x, e.y - caido.y) > 4.5) continue  // vecinos suyos, no el confín entero
+    subirDeNivel(e, 1)
+    if (++tocados >= 3) break
+  }
+  if (tocados) {
+    events.emit(EV.UI_TOAST, {
+      texto: '⚔️ Al otro lado de la comarca han visto el humo: los vecinos cierran filas.',
+      tipo: 'info'
+    })
+  }
+  return tocados
+}
+
+/**
  * Se rehacen un poco más fuertes: reconstruyen con lo aprendido, suben un
  * nivel de vez en cuando y nunca se olvidan de quién les quemó el granero.
+ * Cuanto más grande es tu reino, más seguro es que se rehagan un escalón arriba.
  */
 export function reconstruir (enemigo) {
   const rng = makeRng(semillaDe(`re:${enemigo.id}:${enemigo.saqueos}`))
-  const sube = enemigo.rencor >= 2 || rng.chance(0.65)
+  const sube = enemigo.rencor >= 2 || rng.chance(0.65 + 0.05 * parcelasGanadas())
   const nivel = clamp(enemigo.nivel + (sube ? 1 : 0), 1, NIVEL_MAX)
   const semilla = semillaDe(`${enemigo.semilla}:${enemigo.saqueos}`)
   const poderAntes = enemigo.poder || 0
@@ -1501,7 +1695,7 @@ const REFUERZO_FRACCION = 0.2
  */
 function reforzarGuarniciones (ahora) {
   for (const e of enemigos()) {
-    if (e.vasallo || e.derrotado || !e.guarnicionBase) continue
+    if (e.derrotado || e.conquistado || !e.guarnicionBase) continue
     if (ahora - (e.ultimoRefuerzo || 0) < REFUERZO_CADA) continue
     e.ultimoRefuerzo = ahora
     let cambio = false
@@ -1544,7 +1738,7 @@ function alTick (p) {
   // bandidos salen de la niebla; si no, un jugador que no explora no recibía
   // una sola visita en toda la partida.
   const candidatos = lista.filter(e =>
-    !e.derrotado && !e.vasallo && e.proximoAtaque && ahora >= e.proximoAtaque &&
+    !e.derrotado && !e.vasallo && !e.conquistado && e.proximoAtaque && ahora >= e.proximoAtaque &&
     Object.keys(e.guarnicion || {}).length            // sin gente no se sale de casa
   )
   if (!candidatos.length) return
@@ -1579,7 +1773,11 @@ export function lanzarAtaque (enemigo, segundos = null) {
     return null
   }
   const rng = makeRng(semillaDe(`atk:${enemigo.id}:${Date.now()}`))
-  const llegaEn = segundos ?? rng.int(AVISO_MIN_SEG, AVISO_MAX_SEG)
+  // Para esto están las avanzadillas: el vigía las ve cruzar la linde y manda
+  // el aviso antes. Cada puesto abastecido regala 45 s para reforzar la defensa.
+  const vigias = avanzadillas()
+  const adelanto = Math.min(180, vigias * 45)
+  const llegaEn = (segundos ?? rng.int(AVISO_MIN_SEG, AVISO_MAX_SEG)) + adelanto
   const ahora = Date.now()
 
   enemigo.ultimoAtaque = ahora
@@ -1613,9 +1811,11 @@ export function lanzarAtaque (enemigo, segundos = null) {
     poder: poderTropas(hueste),
     unidades: Object.values(hueste).reduce((a, b) => a + b, 0),
     motivo: (enemigo.rencor || 0) > 0 ? 'venganza' : 'saqueo',
-    texto: (enemigo.rencor || 0) > 0
+    avisoAvanzadilla: adelanto,
+    texto: ((enemigo.rencor || 0) > 0
       ? `${enemigo.nombre} no ha olvidado lo del granero. Viene a cobrárselo.`
-      : `${enemigo.nombre} ha puesto los ojos en tus almacenes.`
+      : `${enemigo.nombre} ha puesto los ojos en tus almacenes.`) +
+      (adelanto ? ' Tus avanzadillas los han visto cruzar la linde: tienes más tiempo.' : '')
   }
   events.emit(EV.ATTACK_INCOMING, aviso)
   return aviso
@@ -1678,7 +1878,7 @@ export async function init () {
     if (algo) e.poder = poderTropas(e.guarnicion) + poderDefensas(baseDe(e))
     if (p && p.victoria) {
       derrotar(e)
-    } else {
+    } else if (!e.conquistado) {
       // aguantar el asalto también les sube la sangre a la cabeza
       e.fracasos = (e.fracasos || 0) + 1     // y tú aprendes que ahí no se entra
       e.rencor = clamp((e.rencor || 0) + 1, 0, 5)
@@ -1705,7 +1905,13 @@ function asegurar () {
     if (typeof e.saqueos !== 'number') e.saqueos = 0
     if (typeof e.derrotas !== 'number') e.derrotas = e.saqueos || 0
     if (!e.guarnicionBase) e.guarnicionBase = { ...e.guarnicion }
-    if (e.vasallo) {
+    if (e.conquistado) {
+      e.vasallo = false
+      e.derrotado = false
+      e.proximoAtaque = 0
+      e.proximoTributo = 0
+      if (!e.amenaza || e.amenaza !== 'Bajo tu bandera') e.amenaza = 'Bajo tu bandera'
+    } else if (e.vasallo) {
       if (!e.tributo) e.tributo = tributoDe(e)
       if (!e.proximoTributo) e.proximoTributo = Date.now() + TRIBUTO_CADA_MIN * 60000
       e.proximoAtaque = 0

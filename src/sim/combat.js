@@ -2,6 +2,7 @@ import { events, EV } from '../core/events.js'
 import { CONFIG } from '../core/config.js'
 import { game } from '../core/state.js'
 import { makeRng } from '../core/rng.js'
+import { limitesDelTerritorio } from '../core/grid.js'
 import { def, valorEdificio } from '../data/buildings.js'
 import { defUnidad, PIEDRA_PAPEL } from '../data/units.js'
 
@@ -21,6 +22,15 @@ import { defUnidad, PIEDRA_PAPEL } from '../data/units.js'
 const G = CONFIG.GRID
 const PASO = 0.2            // segundos por paso de simulación
 const MAX_DURACION = 240    // 4 minutos y a casa (la interfaz lo reproduce acelerado)
+
+/**
+ * Casillas de respiro alrededor de lo edificado. El campo de batalla NO es el
+ * valle entero: con 60x60 el BFS del campo de flujo recorría 3.600 casillas casi
+ * todas vacías y una defensa costaba segundos en el móvil. Se pelea en la CAJA:
+ * tu territorio conquistado (o la rejilla propia de la base enemiga), recortada
+ * a lo que de verdad está en juego. Seis casillas bastan para formar y rodear.
+ */
+const MARGEN_CAMPO = 6
 
 /** Cadencia de ataque por clase (golpes/segundo). El catálogo no la trae: la tropa
  *  pesada pega fuerte pero lento, y así el asedio no se come una muralla de un tirón. */
@@ -94,10 +104,44 @@ function statsDe (tipo, conBonos = true) {
 // ------------------------------------------------- preparación del escenario
 
 /**
+ * EL CAMPO DE BATALLA, en casillas. No es el valle: es la rejilla propia de la
+ * base enemiga (24x24) o TU territorio conquistado, recortado además a lo que de
+ * verdad está en juego. Todo lo demás —entrada de la hueste, mapa de estorbos,
+ * campos de flujo, recuento del recinto— vive dentro de esta caja.
+ */
+function cajaDeBatalla (base, edificios, estado) {
+  let caja
+  const rejilla = Number(base && base.grid)
+  if (Number.isFinite(rejilla) && rejilla >= 8) {
+    // Base enemiga: tiene su propia rejilla (24x24). Su borde es su campo.
+    caja = { x0: 0, z0: 0, x1: Math.min(G, rejilla) - 1, z1: Math.min(G, rejilla) - 1 }
+  } else if (base && (base.id === 'aldea' || base.mia)) {
+    // Tu aldea: se entra por el borde de lo TUYO, no por el del valle.
+    caja = { ...limitesDelTerritorio(estado || game.state) }
+  } else {
+    caja = { x0: 0, z0: 0, x1: G - 1, z1: G - 1 }
+  }
+  if (!edificios.length) return caja
+  let bx0 = G; let bz0 = G; let bx1 = 0; let bz1 = 0
+  for (const e of edificios) {
+    if (e.x < bx0) bx0 = e.x
+    if (e.z < bz0) bz0 = e.z
+    if (e.x + e.ancho - 1 > bx1) bx1 = e.x + e.ancho - 1
+    if (e.z + e.alto - 1 > bz1) bz1 = e.z + e.alto - 1
+  }
+  // Se recorta a lo que está en juego, pero sin dejar nunca un edificio pegado
+  // al borde: hace falta al menos un anillo libre para rodearlo y para que el
+  // recuento del recinto sepa qué queda fuera.
+  const lo = (limite, borde) => clamp(Math.min(borde - 1, Math.max(limite, borde - MARGEN_CAMPO)), 0, G - 1)
+  const hi = (limite, borde) => clamp(Math.max(borde + 1, Math.min(limite, borde + MARGEN_CAMPO)), 0, G - 1)
+  return { x0: lo(caja.x0, bx0), z0: lo(caja.z0, bz0), x1: hi(caja.x1, bx1), z1: hi(caja.z1, bz1) }
+}
+
+/**
  * Convierte una base (enemiga o la tuya) en el campo de batalla: edificios vivos
  * con su vida, su valor y, los que disparan, su torreta ya resuelta por nivel.
  */
-function prepararBase (base) {
+function prepararBase (base, estado) {
   const lista = (base.buildings || []).filter(b => !b.enObra && def(b.tipo))
   const edificios = []
   let valorTotal = 0
@@ -124,6 +168,15 @@ function prepararBase (base) {
       cadencia: d.cadencia || 0,
       cd: 0, siega: 0
     }
+    // Los pesos de "a qué va cada clase" no cambian en toda la batalla: se
+    // resuelven aquí una vez. Dentro de elegirObjetivo() eran tres consultas a
+    // Set por edificio y por unidad, millones por asalto.
+    e.pesos = {
+      asedio: e.esMuro ? 0.55 : (valor > 400 || DEFENSIVOS.has(b.tipo)) ? 0.8 : 1.6,
+      caballeria: PRODUCTIVOS.has(b.tipo) ? 0.5 : e.esMuro ? 2.6 : 1.2,
+      distancia: DEFENSIVOS.has(b.tipo) ? 0.75 : e.esMuro ? 2.2 : 1,
+      infanteria: e.esMuro ? 1.5 : 1                // lo que pilla, y el muro si estorba
+    }
     if (e.cuenta) valorTotal += valor
     edificios.push(e)
   }
@@ -136,8 +189,12 @@ function prepararBase (base) {
   const centro = edificios.length
     ? edificios.reduce((a, e) => ({ x: a.x + e.cx / edificios.length, z: a.z + e.cz / edificios.length }), { x: 0, z: 0 })
     : { x: G / 2, z: G / 2 }
+  const caja = cajaDeBatalla(base, edificios, estado)
   return {
     edificios, valorTotal: valorTotal || 1, principal, centro,
+    // el campo de batalla, en casillas, y el tamaño de la rejilla local que usan
+    // el mapa de estorbos y los campos de flujo
+    caja, ancho: caja.x1 - caja.x0 + 1, alto: caja.z1 - caja.z0 + 1,
     torres: edificios.filter(e => e.dano > 0),
     vivos: edificios.slice(),          // lista cacheada; se rehace solo cuando cae algo
     muros: edificios.filter(e => e.bloquea)
@@ -152,17 +209,30 @@ function distAEdificio (x, z, e) {
   return Math.sqrt(dx * dx + dz * dz)
 }
 
+/** La misma distancia SIN raíz. Para comparar "cuál está más cerca" sobra: ordena
+ *  igual y se ahorra un sqrt en el bucle más caliente de la batalla. */
+function distAEdificio2 (x, z, e) {
+  const dx = Math.max(e.x - x, 0, x - (e.x + e.ancho - 1))
+  const dz = Math.max(e.z - z, 0, z - (e.z + e.alto - 1))
+  return dx * dx + dz * dz
+}
+
 const COLA_BFS = new Int32Array(G * G)
 
-/** Mapa de estorbos: 1 = casilla ocupada por edificio vivo (no se atraviesa). */
+/**
+ * Mapa de estorbos: 1 = casilla ocupada por edificio vivo (no se atraviesa).
+ * Va en coordenadas LOCALES de la caja: i = (z - z0) * ancho + (x - x0).
+ */
 function mapaBloqueo (esc) {
-  const m = esc.mapa || new Uint8Array(G * G)
+  const c = esc.caja
+  const W = esc.ancho
+  const m = esc.mapa || new Uint8Array(W * esc.alto)
   m.fill(0)
   for (const e of esc.vivos) {
-    for (let z = e.z; z < e.z + e.alto; z++) {
-      for (let x = e.x; x < e.x + e.ancho; x++) {
-        if (x >= 0 && z >= 0 && x < G && z < G) m[z * G + x] = 1
-      }
+    const z1 = Math.min(e.z + e.alto - 1, c.z1)
+    const x1 = Math.min(e.x + e.ancho - 1, c.x1)
+    for (let z = Math.max(e.z, c.z0); z <= z1; z++) {
+      for (let x = Math.max(e.x, c.x0); x <= x1; x++) m[(z - c.z0) * W + (x - c.x0)] = 1
     }
   }
   return m
@@ -181,14 +251,16 @@ function campoHacia (esc, objetivo) {
   // como mucho la tropa tarda un instante en enterarse de la brecha. Rehacerlo cada
   // vez costaría más de lo que arregla.
   if (guardado && esc.t - guardado.t < 1) return guardado.campo
-  const campo = guardado ? guardado.campo : new Int16Array(G * G)
+  const c = esc.caja
+  const W = esc.ancho; const H = esc.alto
+  const campo = guardado ? guardado.campo : new Int16Array(W * H)
   campo.fill(-1)
   const cola = COLA_BFS
   let cabeza = 0; let cola_ = 0
   for (let z = objetivo.z - 1; z <= objetivo.z + objetivo.alto; z++) {
     for (let x = objetivo.x - 1; x <= objetivo.x + objetivo.ancho; x++) {
-      if (x < 0 || z < 0 || x >= G || z >= G) continue
-      const i = z * G + x
+      if (x < c.x0 || z < c.z0 || x > c.x1 || z > c.z1) continue
+      const i = (z - c.z0) * W + (x - c.x0)
       if (esc.mapa[i] && !(x >= objetivo.x && x < objetivo.x + objetivo.ancho && z >= objetivo.z && z < objetivo.z + objetivo.alto)) continue
       if (campo[i] !== -1) continue
       campo[i] = 0
@@ -197,12 +269,12 @@ function campoHacia (esc, objetivo) {
   }
   while (cabeza < cola_) {
     const i = cola[cabeza++]
-    const x = i % G; const z = (i / G) | 0
+    const x = i % W; const z = (i / W) | 0
     const d = campo[i] + 1
     if (x > 0) { const j = i - 1; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
-    if (x < G - 1) { const j = i + 1; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
-    if (z > 0) { const j = i - G; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
-    if (z < G - 1) { const j = i + G; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
+    if (x < W - 1) { const j = i + 1; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
+    if (z > 0) { const j = i - W; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
+    if (z < H - 1) { const j = i + W; if (campo[j] === -1 && !esc.mapa[j]) { campo[j] = d; cola[cola_++] = j } }
   }
   cache.set(objetivo.id, { version: esc.versionMapa, t: esc.t, campo })
   return campo
@@ -217,7 +289,7 @@ function crearTropas (tropas, ladoEntrada, esc, rng, propias) {
   tipos.sort()
   let i = 0
   const total = tipos.reduce((a, t) => a + (tropas[t] | 0), 0)
-  const frente = Math.max(6, Math.min(G - 4, Math.ceil(Math.sqrt(total) * 2.2)))
+  const frente = Math.max(6, Math.min(Math.max(6, esc.ancho - 4), Math.ceil(Math.sqrt(total) * 2.2)))
   for (const tipo of tipos) {
     const u = statsDe(tipo, propias)
     if (!u || u.espacio === 0) continue   // aldeanos y exploradores no van al asalto
@@ -266,7 +338,7 @@ function crearGuarnicion (tropas, esc, rng, propias) {
         id: `g${i}`, tipo, nombre: u.nombre, icono: u.icono, clase: u.clase,
         hp: u.hp, hpMax: u.hp, atk: u.ataque, arm: u.armadura,
         vel: u.velocidad, alcance: u.alcance || 0,
-        x: clamp(x, 0.5, G - 1.5), z: clamp(z, 0.5, G - 1.5),
+        x: clamp(x, esc.caja.x0 + 0.5, esc.caja.x1 - 0.5), z: clamp(z, esc.caja.z0 + 0.5, esc.caja.z1 - 0.5),
         cd: rng.float(0, 0.4), viva: true, defensor: true,
         casa: casa ? { x: casa.cx, z: casa.cz } : { x: esc.centro.x, z: esc.centro.z },
         objetivo: null, revisar: 0
@@ -277,12 +349,19 @@ function crearGuarnicion (tropas, esc, rng, propias) {
   return unidades
 }
 
-/** El enemigo vivo más cercano. Se llama cada segundo y pico, no cada paso. */
+/**
+ * El enemigo vivo más cercano. Se llama cada segundo y pico, no cada paso, pero
+ * recorre la lista entera: con 100 atacantes contra 100 defensores son millones
+ * de comparaciones por batalla, así que va con distancia al cuadrado (mismo
+ * orden, sin raíz) y sin Math.hypot, que es lo más lento del módulo.
+ */
 function masCerca (u, lista) {
   let mejor = null; let mejorD = Infinity
+  const ux = u.x; const uz = u.z
   for (const o of lista) {
     if (!o.viva) continue
-    const d = Math.hypot(o.x - u.x, o.z - u.z)
+    const dx = o.x - ux; const dz = o.z - uz
+    const d = dx * dx + dz * dz
     if (d < mejorD) { mejorD = d; mejor = o }
   }
   return mejor
@@ -301,12 +380,18 @@ function irHacia (u, x, z) {
 /** Por dónde entra la hueste. El lado lo elige el jugador: es su única decisión táctica. */
 function puntoEntrada (lado, esc, desvio, fila) {
   const c = esc.centro
+  const k = esc.caja
   const m = 0.6 + fila * 0.9
+  // Se entra por el borde del CAMPO, que es tu linde (o la rejilla del rival):
+  // antes se entraba por el borde del valle y la hueste se pasaba media batalla
+  // cruzando hierba de nadie.
+  const ex = (v) => clamp(v, k.x0 + 1, k.x1 - 1)
+  const ez = (v) => clamp(v, k.z0 + 1, k.z1 - 1)
   switch (lado) {
-    case 'norte': return { x: clamp(c.x + desvio, 1, G - 2), z: clamp(m, 0.5, G - 1.5) }
-    case 'este': return { x: clamp(G - 1 - m, 0.5, G - 1.5), z: clamp(c.z + desvio, 1, G - 2) }
-    case 'oeste': return { x: clamp(m, 0.5, G - 1.5), z: clamp(c.z + desvio, 1, G - 2) }
-    default: return { x: clamp(c.x + desvio, 1, G - 2), z: clamp(G - 1 - m, 0.5, G - 1.5) }
+    case 'norte': return { x: ex(c.x + desvio), z: clamp(k.z0 + m, k.z0 + 0.5, k.z1 - 0.5) }
+    case 'este': return { x: clamp(k.x1 - m, k.x0 + 0.5, k.x1 - 0.5), z: ez(c.z + desvio) }
+    case 'oeste': return { x: clamp(k.x0 + m, k.x0 + 0.5, k.x1 - 0.5), z: ez(c.z + desvio) }
+    default: return { x: ex(c.x + desvio), z: clamp(k.z1 - m, k.z0 + 0.5, k.z1 - 0.5) }
   }
 }
 
@@ -324,21 +409,12 @@ function ladoDe (x, z, centro) {
  */
 function elegirObjetivo (u, esc) {
   let mejor = null; let mejorCoste = Infinity
+  const clase = u.clase; const ux = u.x; const uz = u.z
   for (const e of esc.vivos) {
-    const d = distAEdificio(u.x, u.z, e)
-    let peso = 1
-    if (u.clase === 'asedio') {
-      peso = e.esMuro ? 0.55 : (e.valor > 400 || DEFENSIVOS.has(e.tipo)) ? 0.8 : 1.6
-    } else if (u.clase === 'caballeria') {
-      peso = PRODUCTIVOS.has(e.tipo) ? 0.5 : e.esMuro ? 2.6 : 1.2
-    } else if (u.clase === 'distancia') {
-      peso = DEFENSIVOS.has(e.tipo) ? 0.75 : e.esMuro ? 2.2 : 1
-    } else if (u.clase === 'infanteria') {
-      peso = e.esMuro ? 1.5 : 1                  // lo que pilla, y el muro si estorba
-    } else {
-      peso = 3                                   // los civiles no van a por edificios
-    }
-    const coste = (d + 1) * peso
+    const peso = e.pesos[clase] ?? 3              // los civiles no van a por edificios
+    const dx = Math.max(e.x - ux, 0, ux - (e.x + e.ancho - 1))
+    const dz = Math.max(e.z - uz, 0, uz - (e.z + e.alto - 1))
+    const coste = (Math.sqrt(dx * dx + dz * dz) + 1) * peso
     if (coste < mejorCoste) { mejorCoste = coste; mejor = e }
   }
   return mejor
@@ -406,7 +482,7 @@ function pluralNombre (nombre) {
 export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, propias = true }) {
   const sem = (semilla ?? hashCadena(`${base?.id || base?.nombre || 'base'}|${ladoEntrada}|${JSON.stringify(tropas)}`)) >>> 0
   const rng = makeRng(sem || 1)
-  const esc = prepararBase(base || {})
+  const esc = prepararBase(base || {}, game.state)
   esc.campos = new Map()
   esc.versionMapa = 0
   esc.t = 0
@@ -481,10 +557,10 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
       if (!torre.vivo || torre.cadencia <= 0) continue
       torre.cd -= PASO
       if (torre.cd > 0) continue
-      let presa = null; let mejorD = torre.radio
+      let presa = null; let mejorD = torre.radio * torre.radio
       for (const u of vivasLista) {
         if (!u.viva) continue
-        const d = distAEdificio(u.x, u.z, torre)
+        const d = distAEdificio2(u.x, u.z, torre)
         if (d <= mejorD) { mejorD = d; presa = u }
       }
       if (!presa) { torre.cd = 0.15; continue }
@@ -591,9 +667,10 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
 
       // --- moverse: por el campo de flujo, y si no hay camino, a golpes ---
       const campo = campoHacia(esc, obj)
-      const cx = clamp(Math.round(u.x), 0, G - 1)
-      const cz = clamp(Math.round(u.z), 0, G - 1)
-      const aqui = campo[cz * G + cx]
+      const K = esc.caja; const W = esc.ancho
+      const cx = clamp(Math.round(u.x), K.x0, K.x1)
+      const cz = clamp(Math.round(u.z), K.z0, K.z1)
+      const aqui = campo[(cz - K.z0) * W + (cx - K.x0)]
       if (aqui < 0) {
         // Encerrado fuera: decide entre rodear (si el rodeo es corto) o romper el muro.
         const muro = muroMasCerca(u, esc)
@@ -606,13 +683,13 @@ export function simularAsalto ({ base, tropas, ladoEntrada = 'sur', semilla, pro
         if (muro && muro !== obj) { u.objetivo = muro; u.rompiendo = true; u.revisar = 3; continue }
       }
       let mejorI = -1; let mejorV = aqui
-      const i = cz * G + cx
-      if (cx > 0 && campo[i - 1] >= 0 && campo[i - 1] < mejorV) { mejorV = campo[i - 1]; mejorI = i - 1 }
-      if (cx < G - 1 && campo[i + 1] >= 0 && campo[i + 1] < mejorV) { mejorV = campo[i + 1]; mejorI = i + 1 }
-      if (cz > 0 && campo[i - G] >= 0 && campo[i - G] < mejorV) { mejorV = campo[i - G]; mejorI = i - G }
-      if (cz < G - 1 && campo[i + G] >= 0 && campo[i + G] < mejorV) { mejorV = campo[i + G]; mejorI = i + G }
-      const destX = mejorI < 0 ? obj.cx : mejorI % G
-      const destZ = mejorI < 0 ? obj.cz : (mejorI / G) | 0
+      const i = (cz - K.z0) * W + (cx - K.x0)
+      if (cx > K.x0 && campo[i - 1] >= 0 && campo[i - 1] < mejorV) { mejorV = campo[i - 1]; mejorI = i - 1 }
+      if (cx < K.x1 && campo[i + 1] >= 0 && campo[i + 1] < mejorV) { mejorV = campo[i + 1]; mejorI = i + 1 }
+      if (cz > K.z0 && campo[i - W] >= 0 && campo[i - W] < mejorV) { mejorV = campo[i - W]; mejorI = i - W }
+      if (cz < K.z1 && campo[i + W] >= 0 && campo[i + W] < mejorV) { mejorV = campo[i + W]; mejorI = i + W }
+      const destX = mejorI < 0 ? obj.cx : (mejorI % W) + K.x0
+      const destZ = mejorI < 0 ? obj.cz : ((mejorI / W) | 0) + K.z0
       const vx = destX - u.x; const vz = destZ - u.z
       const largo = Math.hypot(vx, vz) || 1
       const avance = u.vel * PASO
@@ -807,13 +884,19 @@ function saquear (perdidas) {
   events.emit(EV.RESOURCES_CHANGED, { resources: s.recursos })
 }
 
-/** Quita del saco lo que no ha vuelto. army.js manda si existe. */
-function aplicarBajas (bajas) {
+/**
+ * Reparte a los que cayeron en el campo. army.js manda si existe: él decide
+ * cuántos salva el monasterio, cuántos vuelven MALHERIDOS a la enfermería del
+ * cuartel y cuántos se quedan allí de verdad.
+ * @param {Record<string,number>} bajas
+ * @param {{victoria?:boolean}} [opciones] ganar permite recoger mejor el campo
+ */
+function aplicarBajas (bajas, opciones = {}) {
   if (!bajas || !Object.keys(bajas).length) return
   if (modArmy && typeof modArmy.perderTropas === 'function') {
     // Ojo: army.js ya devuelve a casa a los heridos del monasterio. Curar aquí
     // otra vez sería regalar tropa, así que este camino NO pasa por curarBajas().
-    try { return modArmy.perderTropas(bajas) } catch { /* a mano */ }
+    try { return modArmy.perderTropas(bajas, opciones) } catch { /* a mano */ }
   }
   const tropas = game.state.ejercito.tropas
   for (const tipo in bajas) tropas[tipo] = Math.max(0, (tropas[tipo] || 0) - bajas[tipo])
@@ -887,38 +970,41 @@ export function lanzarAsalto ({ base, tropas, ladoEntrada = 'sur', semilla }) {
 
   const resultado = simularAsalto({ base, tropas: enviadas, ladoEntrada, semilla, propias: true })
 
-  // LOS HERIDOS DE UNA VICTORIA VUELVEN. Ganando se recupera una cuarta parte de
-  // los caídos: quedaron tirados en el campo, no muertos. Es lo que hace que un
-  // asalto bien planteado salga a cuenta, sin quitarle el castigo a la derrota
-  // (perder sigue costando la hueste entera menos lo que se retire).
-  if (resultado.victoria) {
-    const rngHeridos = makeRng((resultado.semilla ^ 0x51ed270b) >>> 0)
-    let vueltos = 0
-    for (const tipo of Object.keys(resultado.bajas)) {
-      const n = resultado.bajas[tipo]
-      const salvados = Math.floor(n * 0.25 + (rngHeridos.chance(0.5) ? 0.5 : 0))
-      if (salvados <= 0) continue
-      resultado.bajas[tipo] -= salvados
-      if (!resultado.bajas[tipo]) delete resultado.bajas[tipo]
-      vueltos += salvados
-    }
-    if (vueltos) {
-      resultado.heridos = vueltos
-      resultado.supervivientes += vueltos
-      resultado.sucesos.push({ t: resultado.duracion + 0.2, tipo: 'heridos', texto: `Vuelven a casa ${plural(vueltos, 'herido', 'heridos')} que se daban por perdidos`, x: 0, z: 0 })
-    }
-  }
-
-  // Las bajas de la crónica son las que caen en el campo; cuántas vuelven a casa
-  // lo decide el monasterio (army.js si está, y si no, aquí mismo).
+  // QUIÉN CAYÓ EN EL CAMPO Y QUIÉN NO VUELVE. No es lo mismo.
+  // `caidos` es la crónica: los que se fueron al suelo durante la batalla.
+  // De ahí, army.js separa a los que recoge el monasterio, a los MALHERIDOS
+  // (vuelven a casa y se curan solos en el cuartel) y a los muertos de verdad,
+  // que son los pocos que hay que volver a pagar. `resultado.bajas` pasa a ser
+  // ESO último: lo que de verdad has perdido, que es lo que lee la interfaz.
+  const caidos = { ...resultado.bajas }
+  const cayeron = sumaTropas(caidos)
   let salvados = 0
-  const parte = aplicarBajas(resultado.bajas)
-  if (parte && parte.curadas) salvados = Object.values(parte.curadas).reduce((a, b) => a + b, 0)
-  else salvados = curarBajas(resultado.bajas, makeRng((resultado.semilla ^ 0x9e3779b9) >>> 0))
+  const parte = aplicarBajas(resultado.bajas, { victoria: resultado.victoria })
+  if (parte) {
+    salvados = sumaTropas(parte.curadas)
+    const enCamilla = sumaTropas(parte.heridos)
+    resultado.caidos = caidos
+    resultado.bajas = parte.perdidas || {}
+    resultado.heridosTropas = parte.heridos || {}
+    resultado.heridos = enCamilla                   // número, como siempre lo leyó la interfaz
+    resultado.curadas = parte.curadas || null
+    // Volver herido es volver: cuentan como supervivientes del asalto.
+    resultado.supervivientes += enCamilla + salvados
+    if (enCamilla) {
+      resultado.sucesos.push({ t: resultado.duracion + 0.2, tipo: 'heridos', x: 0, z: 0, heridos: enCamilla, texto: `Vuelven ${plural(enCamilla, 'herido', 'heridos')}: se recuperan en el cuartel` })
+    }
+  } else {
+    // Sin army.js (arranque degradado): al menos el monasterio hace su trabajo.
+    salvados = curarBajas(resultado.bajas, makeRng((resultado.semilla ^ 0x9e3779b9) >>> 0))
+    resultado.caidos = caidos
+    resultado.heridosTropas = {}
+    resultado.heridos = 0
+  }
   if (salvados) {
     resultado.sucesos.push({ t: resultado.duracion + 0.4, tipo: 'monjes', texto: `Los monjes devuelven al mundo a ${plural(salvados, 'herido', 'heridos')}`, x: 0, z: 0 })
-    resultado.curadas = parte?.curadas || null
   }
+  resultado.muertos = sumaTropas(resultado.bajas)
+  resultado.cayeron = cayeron
   ingresar(resultado.botin)
 
   const s = game.state
@@ -928,6 +1014,8 @@ export function lanzarAsalto ({ base, tropas, ladoEntrada = 'sur', semilla }) {
 
   events.emit(EV.RAID_RESOLVED, {
     victoria: resultado.victoria, botin: resultado.botin, bajas: resultado.bajas,
+    // `bajas` = muertos de verdad; `heridos` = los que vuelven a la enfermería.
+    heridos: resultado.heridos, heridosTropas: resultado.heridosTropas, caidos: resultado.caidos,
     log: resultado.sucesos, estrellas: resultado.estrellas,
     porcentajeDestruido: resultado.porcentajeDestruido, duracion: resultado.duracion,
     base, resultado
@@ -978,6 +1066,7 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
   }
   const base = {
     id: 'aldea',
+    mia: true,
     nombre: s.jugador?.nombre || 'Tu aldea',
     nivel: nivelDe(s.buildings || [], 'ayuntamiento') || 1,
     buildings: s.buildings || [],
@@ -1012,9 +1101,16 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
     }
   }
 
-  // Tu tropa se ha dejado la piel en la muralla: las bajas son de verdad.
+  // Tu tropa se ha dejado la piel en la muralla. Defendiendo en casa se recoge
+  // a los caídos mejor que en campo ajeno (los tuyos están en su aldea), así que
+  // aguantar el asalto se paga sobre todo en heridos, no en muertos.
   let parteBajas = null
-  if (Object.keys(r.bajasDefensa || {}).length) parteBajas = aplicarBajas(r.bajasDefensa)
+  if (Object.keys(r.bajasDefensa || {}).length) parteBajas = aplicarBajas(r.bajasDefensa, { victoria: defendida })
+  if (parteBajas) {
+    r.heridosTropas = parteBajas.heridos || {}
+    r.heridos = sumaTropas(parteBajas.heridos)
+    r.muertos = sumaTropas(parteBajas.perdidas)
+  }
 
   if (!defendida) {
     saquear(perdidas)
@@ -1033,6 +1129,8 @@ export function simularDefensa ({ atacante = {}, tropasEnemigas = {}, semilla } 
 
   events.emit(EV.DEFENSE_RESOLVED, {
     victoria: defendida, perdidas, log: r.sucesos, daños, parte,
+    // Defender también deja heridos, no solo muertos: la enfermería se llena igual.
+    heridos: r.heridos || 0, heridosTropas: r.heridosTropas || {}, muertos: r.muertos || 0,
     atacante, estrellas: r.estrellas, porcentajeDestruido: r.porcentajeDestruido, resultado: r
   })
   return { ...r, victoria: defendida, perdidas, daños, parte }
@@ -1112,7 +1210,8 @@ function parteDefensa ({ r, defendida, perdidas, daños, atacante, tropasEnemiga
  * el jugador vuelva a reorganizar la aldea.
  */
 export function calcularDefensa (estado = game.state) {
-  const esc = prepararBase({ buildings: estado.buildings || [] })
+  // 'aldea': el recuento del recinto se hace dentro de TU linde, no del valle.
+  const esc = prepararBase({ id: 'aldea', buildings: estado.buildings || [] }, estado)
   const vale = esc.edificios.filter(e => !e.esMuro && e.tipo !== 'pozo' && e.tipo !== 'estandarte')
   const resultado = {
     puntuacion: 0, nota: 'Indefensa', cobertura: 0, recinto: 0, resumen: '',
@@ -1147,27 +1246,35 @@ export function calcularDefensa (estado = game.state) {
   // pero un asaltante tiene que echarla abajo igual que un tramo de muralla.
   const muros = esc.edificios.filter(e => e.esMuro)
   resultado.murosVivos = muros.length
-  const bloqueo = new Uint8Array(G * G)
+  const K = esc.caja; const W = esc.ancho; const H = esc.alto
+  const bloqueo = new Uint8Array(W * H)
   for (const m of muros) {
-    for (let z = m.z; z < m.z + m.alto; z++) for (let x = m.x; x < m.x + m.ancho; x++) {
-      if (x >= 0 && z >= 0 && x < G && z < G) bloqueo[z * G + x] = 1
+    const mz1 = Math.min(m.z + m.alto - 1, K.z1)
+    const mx1 = Math.min(m.x + m.ancho - 1, K.x1)
+    for (let z = Math.max(m.z, K.z0); z <= mz1; z++) {
+      for (let x = Math.max(m.x, K.x0); x <= mx1; x++) bloqueo[(z - K.z0) * W + (x - K.x0)] = 1
     }
   }
-  const fuera = new Uint8Array(G * G)
-  const cola = new Int32Array(G * G)
+  const fuera = new Uint8Array(W * H)
+  const cola = new Int32Array(W * H)
   let cab = 0; let fin = 0
-  for (let i = 0; i < G; i++) {
-    for (const j of [i, (G - 1) * G + i, i * G, i * G + G - 1]) {
+  for (let x = 0; x < W; x++) {
+    for (const j of [x, (H - 1) * W + x]) {
+      if (!bloqueo[j] && !fuera[j]) { fuera[j] = 1; cola[fin++] = j }
+    }
+  }
+  for (let z = 0; z < H; z++) {
+    for (const j of [z * W, z * W + W - 1]) {
       if (!bloqueo[j] && !fuera[j]) { fuera[j] = 1; cola[fin++] = j }
     }
   }
   while (cab < fin) {
     const i = cola[cab++]
-    const x = i % G; const z = (i / G) | 0
+    const x = i % W; const z = (i / W) | 0
     if (x > 0 && !bloqueo[i - 1] && !fuera[i - 1]) { fuera[i - 1] = 1; cola[fin++] = i - 1 }
-    if (x < G - 1 && !bloqueo[i + 1] && !fuera[i + 1]) { fuera[i + 1] = 1; cola[fin++] = i + 1 }
-    if (z > 0 && !bloqueo[i - G] && !fuera[i - G]) { fuera[i - G] = 1; cola[fin++] = i - G }
-    if (z < G - 1 && !bloqueo[i + G] && !fuera[i + G]) { fuera[i + G] = 1; cola[fin++] = i + G }
+    if (x < W - 1 && !bloqueo[i + 1] && !fuera[i + 1]) { fuera[i + 1] = 1; cola[fin++] = i + 1 }
+    if (z > 0 && !bloqueo[i - W] && !fuera[i - W]) { fuera[i - W] = 1; cola[fin++] = i - W }
+    if (z < H - 1 && !bloqueo[i + W] && !fuera[i + W]) { fuera[i + W] = 1; cola[fin++] = i + W }
   }
 
   let protegido = 0
@@ -1175,8 +1282,8 @@ export function calcularDefensa (estado = game.state) {
     let expuesto = false
     for (let z = e.z - 1; z <= e.z + e.alto && !expuesto; z++) {
       for (let x = e.x - 1; x <= e.x + e.ancho; x++) {
-        if (x < 0 || z < 0 || x >= G || z >= G) { expuesto = true; break }
-        if (fuera[z * G + x]) { expuesto = true; break }
+        if (x < K.x0 || z < K.z0 || x > K.x1 || z > K.z1) { expuesto = true; break }
+        if (fuera[(z - K.z0) * W + (x - K.x0)]) { expuesto = true; break }
       }
     }
     e._dentro = !expuesto
@@ -1196,9 +1303,9 @@ export function calcularDefensa (estado = game.state) {
   let brechas = 0
   for (let i = 0; i < bloqueo.length; i++) {
     if (bloqueo[i] || !fuera[i]) continue
-    const x = i % G; const z = (i / G) | 0
+    const x = i % W; const z = (i / W) | 0
     let tocaMuro = false; let tocaDentro = false
-    const vec = [x > 0 ? i - 1 : -1, x < G - 1 ? i + 1 : -1, z > 0 ? i - G : -1, z < G - 1 ? i + G : -1]
+    const vec = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, z > 0 ? i - W : -1, z < H - 1 ? i + W : -1]
     for (const j of vec) {
       if (j < 0) continue
       if (bloqueo[j]) tocaMuro = true

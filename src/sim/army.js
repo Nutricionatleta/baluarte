@@ -1,10 +1,11 @@
 /**
- * EJÉRCITO. Dueño de `game.state.ejercito` = { tropas, cola, fuera, hambre }.
+ * EJÉRCITO. Dueño de `game.state.ejercito`:
+ *   { tropas, cola, fuera, hambre, heridos, curacion, reunion }
  *
  * Aquí vive todo lo de la hueste: entrenar, la cola del cuartel, cuánto sitio
- * hay, cuánto come, qué tropa está fuera de casa y —lo más importante para el
- * combate— las estadísticas REALES de cada unidad, ya mejoradas con la
- * herrería y las tecnologías investigadas.
+ * hay, cuánto come, qué tropa está fuera de casa, quién está convaleciente,
+ * dónde forma y —lo más importante para el combate— las estadísticas REALES de
+ * cada unidad, ya mejoradas con la herrería y las tecnologías investigadas.
  *
  * EQUILIBRIO (el porqué de los números):
  *   - El hueco del ejército sale de los edificios militares: si quieres más
@@ -12,13 +13,20 @@
  *   - La tropa COME. Un ejército grande se lleva varias granjas por delante y,
  *     si se acaba el grano, pierde moral y pega un 20 % menos. Eso impide
  *     acumular hueste infinita y dejarla criando polvo.
+ *   - **Casi nadie muere del todo.** Perder una batalla ya no borra el ejército:
+ *     la mayoría vuelve HERIDA y se recupera con el tiempo (ver la sección de
+ *     heridos). El precio de atacar no es volver a pagar la hueste, es quedarte
+ *     sin ella unas horas. Los heridos siguen ocupando hueco y comiendo a
+ *     medias, así que tampoco puedes rellenar el ejército mientras convalecen.
  *   - `poderMilitar()` es el número con el que el mundo te empareja enemigos:
- *     si miente, el juego se vuelve un paseo o un muro.
+ *     si miente, el juego se vuelve un paseo o un muro. Los heridos NO cuentan,
+ *     porque no pueden pelear.
  */
 
 import { CONFIG } from '../core/config.js'
 import { events, EV } from '../core/events.js'
 import { game } from '../core/state.js'
+import { dentro, tamañoDe, centroDe, dist, esTerritorio } from '../core/grid.js'
 import { EDIFICIOS, ORDEN_EDADES, AGE_NOMBRE } from '../data/buildings.js'
 import { UNIDADES, defUnidad } from '../data/units.js'
 import { TECNOLOGIAS } from '../data/techs.js'
@@ -59,6 +67,19 @@ function ej () {
   if (typeof e.hambre !== 'boolean') e.hambre = false
   if (typeof e.ultimoConsumo !== 'number') e.ultimoConsumo = Date.now()
   if (typeof e.restoComida !== 'number') e.restoComida = 0
+  // Enfermería: quién está convaleciente y hasta cuándo (reloj real, también offline).
+  if (!e.heridos || typeof e.heridos !== 'object') e.heridos = {}
+  if (!e.curacion || typeof e.curacion !== 'object') e.curacion = { inicio: 0, fin: 0 }
+  if (typeof e.curacion.inicio !== 'number') e.curacion.inicio = 0
+  if (typeof e.curacion.fin !== 'number') e.curacion.fin = 0
+  // Punto de reunión: `fijada` distingue el que puso el jugador del automático.
+  if (e.reunion && typeof e.reunion === 'object') {
+    if (!Number.isFinite(e.reunion.x) || !Number.isFinite(e.reunion.z)) e.reunion = null
+    else {
+      if (typeof e.reunion.fijada !== 'boolean') e.reunion.fijada = false
+      if (typeof e.reunion.ancla !== 'string') e.reunion.ancla = null
+    }
+  } else e.reunion = null
   return e
 }
 
@@ -142,11 +163,17 @@ export function capacidad () {
   return HUECOS_BASE + niveles * HUECOS_POR_NIVEL
 }
 
-/** Lo ocupado. La cola CUENTA: si no, se encargaría tropa que luego no cabe. */
+/**
+ * Lo ocupado. La cola CUENTA: si no, se encargaría tropa que luego no cabe.
+ * Los HERIDOS también: siguen siendo tuyos y volverán, así que si no ocupasen
+ * sitio podrías rellenar el ejército mientras convalecen y desbordar el cuartel
+ * en cuanto se levantaran. Es, además, el verdadero precio de una batalla dura.
+ */
 export function ocupacion () {
   const e = ej()
   let usado = 0
   for (const [tipo, n] of Object.entries(e.tropas)) usado += (UNIDADES[tipo]?.espacio || 0) * n
+  for (const [tipo, n] of Object.entries(e.heridos)) usado += (UNIDADES[tipo]?.espacio || 0) * n
   for (const item of e.cola) usado += (UNIDADES[item.tipo]?.espacio || 0)
   return { usado, total: capacidad() }
 }
@@ -320,18 +347,22 @@ function procesarCola () {
 /**
  * Lo que come la hueste por minuto, proporcional al coste de cada unidad:
  * la carne de cañón casi se alimenta sola y el caballero se come una granja.
+ * Los heridos comen a MEDIAS: están en el catre, no de campaña, pero tampoco
+ * salen gratis (por eso convalecer con el granero vacío escuece).
  * @returns {number} comida por minuto
  */
 export function consumoComida () {
   const e = ej()
   let total = 0
-  for (const [tipo, n] of Object.entries(e.tropas)) {
+  const racion = (tipo, n, factor) => {
     const u = UNIDADES[tipo]
-    if (!u || u.espacio <= 0) continue      // los aldeanos comen en villagers, no aquí
+    if (!u || u.espacio <= 0) return 0      // los aldeanos comen en villagers, no aquí
     let valor = 0
     for (const [r, peso] of Object.entries(PESO_MANUTENCION)) valor += (u.coste[r] || 0) * peso
-    total += Math.max(0.05, valor / DIVISOR_MANUTENCION) * n
+    return Math.max(0.05, valor / DIVISOR_MANUTENCION) * n * factor
   }
+  for (const [tipo, n] of Object.entries(e.tropas)) total += racion(tipo, n, 1)
+  for (const [tipo, n] of Object.entries(e.heridos)) total += racion(tipo, n, 0.5)
   return Math.round(total * 100) / 100
 }
 
@@ -417,36 +448,61 @@ function descontarDeFuera (tipo, cantidad) {
 }
 
 /**
- * Resta las bajas de una batalla. Con monasterio, parte vuelve a casa
- * REDONDEANDO HACIA ARRIBA: que se note que pagaste por él.
+ * Resta las bajas de una batalla. De cada soldado que cae en el campo salen
+ * TRES caminos, y solo el último es definitivo:
+ *
+ *   1. El monasterio lo recoge y lo devuelve a filas en el acto (`curadas`),
+ *      redondeando hacia arriba: que se note que pagaste por él.
+ *   2. De lo que queda, la mayor parte vuelve MALHERIDA (`heridos`): sale del
+ *      ejército útil, entra en la enfermería del cuartel y se recupera sola con
+ *      el tiempo. Ganando se recoge mejor el campo (68 %) que perdiendo (52 %).
+ *   3. Solo el resto muere de verdad (`perdidas`). Sin esa pizca de muerte real,
+ *      atacar no tendría ningún riesgo y el juego se quedaría sin tensión.
+ *
  * @param {Record<string,number>} bajas p.ej. { lancero: 3 }
- * @returns {{perdidas:object, curadas:object}}
+ * @param {{victoria?:boolean, fraccionHeridos?:number}} [opciones]
+ * @returns {{perdidas:object, curadas:object, heridos:object, muertos:number, enfermeria:number}}
  */
-export function perderTropas (bajas = {}) {
+export function perderTropas (bajas = {}, opciones = {}) {
   const e = ej()
   const cura = curacionMonasterio()
+  const fraccion = Math.max(0, Math.min(0.9, Number.isFinite(opciones.fraccionHeridos)
+    ? opciones.fraccionHeridos
+    : (opciones.victoria === false ? HERIDOS_DERROTA : HERIDOS_VICTORIA)))
   const perdidas = {}
   const curadas = {}
+  const enfermeria = {}
   for (const [tipo, cant] of Object.entries(bajas)) {
     const pedidas = Math.max(0, Math.floor(cant || 0))
     if (!pedidas || !UNIDADES[tipo]) continue
     const caidas = Math.min(pedidas, e.tropas[tipo] || 0)
     if (!caidas) continue
     const salvadas = cura > 0 ? Math.min(caidas, Math.ceil(caidas * cura)) : 0
-    const muertas = caidas - salvadas
-    if (muertas > 0) {
-      e.tropas[tipo] -= muertas
+    const resto = caidas - salvadas
+    const heridas = Math.round(resto * fraccion)
+    const muertas = resto - heridas
+    const fuera = muertas + heridas
+    if (fuera > 0) {
+      e.tropas[tipo] -= fuera
       if (e.tropas[tipo] <= 0) delete e.tropas[tipo]
-      descontarDeFuera(tipo, muertas)
-      perdidas[tipo] = muertas
+      descontarDeFuera(tipo, fuera)
     }
+    if (muertas > 0) perdidas[tipo] = muertas
+    if (heridas > 0) enfermeria[tipo] = heridas
     if (salvadas > 0) curadas[tipo] = salvadas
   }
   if (Object.keys(curadas).length) {
     const n = Object.values(curadas).reduce((a, b) => a + b, 0)
     events.emit(EV.UI_TOAST, { texto: `⛪ El monasterio ha salvado a ${n} de los tuyos`, tipo: 'bien' })
   }
-  return { perdidas, curadas }
+  const aCamilla = apuntarHeridos(enfermeria)
+  return {
+    perdidas,
+    curadas,
+    heridos: enfermeria,
+    muertos: Object.values(perdidas).reduce((a, b) => a + b, 0),
+    enfermeria: aCamilla
+  }
 }
 
 /** Copia de la tropa que está en casa: la que salió no puede pelear en dos sitios. */
@@ -509,13 +565,479 @@ export function tropasFuera () {
   return total
 }
 
+// ------------------------------------------------------ heridos (enfermería)
+/**
+ * LOS HERIDOS. Antes, una baja era una tropa borrada: había que volver a pagarla
+ * y a esperar la cola entera. Eso convertía cada asalto en un castigo y la gente
+ * dejaba de atacar. Ahora la mayor parte de los que caen en el campo vuelven a
+ * casa MALHERIDOS: siguen siendo tuyos, ocupan hueco de ejército y comen (a
+ * medias), pero no pueden pelear hasta que se recuperan en el cuartel.
+ *
+ * El coste de atacar deja de ser recursos y pasa a ser TIEMPO: tu hueste está
+ * fuera de combate un rato. Quien tenga prisa paga comida y oro (el cirujano) o
+ * gemas (y salen al instante). El monasterio acorta la convalecencia.
+ */
+
+/** De cada baja, cuánta se salva como herida. Ganando se recoge el campo; perdiendo, no. */
+const HERIDOS_VICTORIA = 0.68
+const HERIDOS_DERROTA = 0.52
+
+/**
+ * Segundos de convalecencia = tiempo de entrenamiento × esto, más un suelo fijo.
+ * Se cura EN PARALELO (todos a la vez), así que aun con el factor por encima de 1
+ * levantar la hueste sigue siendo bastante más rápido que reentrenarla en la cola
+ * del cuartel, que va de uno en uno. Ese es el trato: el asalto ya no te cuesta
+ * recursos, te cuesta quedarte sin ejército un rato.
+ */
+const CURA_POR_SEGUNDO_ENTRENO = 1.1
+const CURA_SUELO = 45
+const CURA_TOPE = 4 * 3600            // por muy grande que sea la hueste, un día no
+/** Lo que cobra el cirujano por sacarlos ya: fracción del coste de reentrenarlos. */
+const FRACCION_COSTE_CURA = 0.45
+
+const sumaDe = (obj) => Object.values(obj || {}).reduce((a, b) => a + (b || 0), 0)
+
+/** Cuánto acortan la convalecencia el cuartel y el monasterio. */
+function rapidezCuracion () {
+  const cuartel = nivelDe('cuartel')
+  const monasterio = curacionMonasterio()      // 0,15 … 0,40
+  return 1 + cuartel * 0.06 + monasterio * 2.2
+}
+
+/** Segundos que tardan en levantarse esos heridos. */
+function segundosDe (heridos) {
+  let bruto = 0
+  for (const [tipo, n] of Object.entries(heridos || {})) {
+    const u = UNIDADES[tipo]
+    if (!u || !n) continue
+    bruto += u.tiempo * n * CURA_POR_SEGUNDO_ENTRENO
+  }
+  if (bruto <= 0) return 0
+  return Math.min(CURA_TOPE, Math.round((CURA_SUELO + bruto) / rapidezCuracion()))
+}
+
+/**
+ * Mete heridos en la enfermería. El reloj NO se reinicia: los nuevos ALARGAN la
+ * convalecencia, así que atacar dos veces seguidas con la hueste tocada se paga
+ * en espera, que es justo el castigo que queremos (y no más muertos).
+ */
+function apuntarHeridos (heridos) {
+  const e = ej()
+  const cuantos = sumaDe(heridos)
+  if (!cuantos) return 0
+  const ahora = Date.now()
+  const suma = segundosDe(heridos) * 1000
+  const habia = sumaDe(e.heridos) > 0
+  for (const [tipo, n] of Object.entries(heridos)) {
+    if (!n) continue
+    e.heridos[tipo] = (e.heridos[tipo] || 0) + n
+  }
+  if (!habia || !(e.curacion.fin > ahora)) e.curacion = { inicio: ahora, fin: ahora + suma }
+  else e.curacion.fin += suma
+  events.emit(EV.TROPAS_HERIDAS, { tropas: { ...heridos }, total: cuantos, fin: e.curacion.fin })
+  return cuantos
+}
+
+/** Los saca de la enfermería y los devuelve a filas. */
+function levantarHeridos (motivo = 'tiempo') {
+  const e = ej()
+  const vueltos = { ...e.heridos }
+  const total = sumaDe(vueltos)
+  if (!total) return 0
+  for (const [tipo, n] of Object.entries(vueltos)) e.tropas[tipo] = (e.tropas[tipo] || 0) + n
+  e.heridos = {}
+  e.curacion = { inicio: 0, fin: 0 }
+  events.emit(EV.TROPAS_CURADAS, { tropas: vueltos, total, motivo })
+  events.emit(EV.UI_TOAST, {
+    texto: `🩹 ${total === 1 ? 'Un herido vuelve' : `${total} heridos vuelven`} a filas`, tipo: 'bien'
+  })
+  return total
+}
+
+/** Va por reloj real, así que la enfermería también avanza con la app cerrada. */
+function recuperarHeridos () {
+  const e = ej()
+  if (!sumaDe(e.heridos)) return
+  if (Date.now() >= (e.curacion.fin || 0)) levantarHeridos('tiempo')
+}
+
+/** @returns {Record<string,number>} copia de los heridos, para pintarlos. */
+export function heridos () {
+  return { ...ej().heridos }
+}
+
+/** Lo que cuesta al cirujano sacarlos ya: comida y oro, nunca madera ni piedra. */
+function costeCuracion () {
+  const e = ej()
+  const coste = { comida: 0, oro: 0 }
+  for (const [tipo, n] of Object.entries(e.heridos)) {
+    const u = UNIDADES[tipo]
+    if (!u || !n) continue
+    coste.comida += Math.ceil((u.coste.comida || 0) * n * FRACCION_COSTE_CURA)
+    coste.oro += Math.ceil((u.coste.oro || 0) * n * FRACCION_COSTE_CURA)
+  }
+  if (!coste.comida) delete coste.comida
+  if (!coste.oro) delete coste.oro
+  return coste
+}
+
+/**
+ * Estado de la enfermería para la interfaz.
+ * @returns {{heridos:number, restante:number, total:number, fin:number, gemas:number, coste:object, detalle:object}}
+ */
+export function tiempoRecuperacion () {
+  const e = ej()
+  const cuantos = sumaDe(e.heridos)
+  if (!cuantos) return { heridos: 0, restante: 0, total: 0, fin: 0, gemas: 0, coste: {}, detalle: {} }
+  const restante = Math.max(0, Math.ceil((e.curacion.fin - Date.now()) / 1000))
+  const total = Math.max(restante, Math.ceil((e.curacion.fin - e.curacion.inicio) / 1000))
+  return {
+    heridos: cuantos,
+    restante,
+    total,
+    fin: e.curacion.fin,
+    gemas: Math.max(1, Math.ceil(restante / CONFIG.SEG_POR_GEMA)),
+    coste: costeCuracion(),
+    detalle: { ...e.heridos }
+  }
+}
+
+/**
+ * Saca a TODOS los heridos ya mismo.
+ * @param {'gemas'|'recursos'} [coste] con qué se paga la prisa
+ * @returns {{ok:boolean, motivo:string, curados?:number, gemas?:number, coste?:object}}
+ */
+export function curarTodo (coste = 'gemas') {
+  const info = tiempoRecuperacion()
+  if (!info.heridos) return { ok: false, motivo: 'No tienes heridos' }
+  if (info.restante <= 0) return { ok: true, motivo: '', curados: levantarHeridos('tiempo') }
+
+  if (coste === 'recursos' || coste === 'comida' || coste === 'oro') {
+    const precio = info.coste
+    if (!puedePagar(precio)) {
+      events.emit(EV.UI_TOAST, { texto: 'El cirujano no trabaja gratis: te faltan recursos', tipo: 'mal' })
+      events.emit(EV.RESOURCE_DENIED, { falta: faltaPara(precio), motivo: 'curar heridos' })
+      return { ok: false, motivo: 'No tienes recursos', coste: precio }
+    }
+    pagar(precio, 'curar heridos')
+    return { ok: true, motivo: '', curados: levantarHeridos('recursos'), coste: precio }
+  }
+
+  const precio = info.gemas
+  if (!gemas(-precio, 'curar heridos')) {
+    events.emit(EV.UI_TOAST, { texto: `Te faltan gemas: cuesta ${precio} 💎`, tipo: 'mal' })
+    return { ok: false, motivo: `Necesitas ${precio} gemas`, gemas: precio }
+  }
+  events.emit(EV.SFX, { nombre: 'gema' })
+  return { ok: true, motivo: '', curados: levantarHeridos('gemas'), gemas: precio }
+}
+
+// ------------------------------------------- punto de reunión (el estandarte)
+/**
+ * EL ESTANDARTE DE BATALLA. Hasta ahora la tropa la plantaba el render con un
+ * salto a ojo desde el cuartel (`centro.z + alto/2 + 1,4`) sin mirar si allí
+ * había algo: en cuanto tenías una casa o una granja pegada al cuartel, o no
+ * tenías cuartel y caía sobre el ayuntamiento, la formación aparecía DENTRO del
+ * edificio y encima de la puerta por la que salen los aldeanos. De ahí lo de
+ * "se buguean delante del ayuntamiento".
+ *
+ * Ahora el punto de reunión es ESTADO (`ejercito.reunion`), lo valida la
+ * simulación contra el tablero real y el jugador lo mueve con el dedo. El render
+ * solo pinta lo que le digamos por `EV.REUNION_CAMBIADA` y `formacionReunion()`.
+ */
+
+/** Edificios que sí pisan suelo (la puerta se cruza y el pozo es adorno). */
+function pisaSuelo (b) {
+  const d = EDIFICIOS[b.tipo]
+  if (!d) return true
+  if (d.categoria === 'decoracion') return false
+  return d.bloquea !== false
+}
+
+/**
+ * MAPA DE SUELO, cacheado. Se consulta muchísimo (colocar el estandarte y toda
+ * la formación), y recorrer los cientos de edificios de la aldea por cada
+ * casilla se come el tick. Igual que hace sim/villagers.js, se guarda una
+ * rejilla y solo se rehace cuando la aldea cambia:
+ *   0 = libre · 1 = edificio · 2 = anillo pegado a un edificio (puerta de aldeanos)
+ * El anillo del edificio ANCLA no se marca: ahí es justo donde debe acampar la
+ * tropa, pegada a su cuartel.
+ */
+let suelo = null
+let sueloSucio = true
+let sueloEdificios = -1
+let sueloAncla = null
+
+function refrescarSuelo () {
+  const G = CONFIG.GRID
+  if (!suelo || suelo.length !== G * G) suelo = new Uint8Array(G * G)
+  else suelo.fill(0)
+  const bs = game.state.buildings || []
+  sueloAncla = anclaDeReunion()?.id || null
+  for (const b of bs) {
+    if (!pisaSuelo(b)) continue
+    const t = tamañoDe(b)
+    for (let z = b.z; z < b.z + t.alto; z++) {
+      for (let x = b.x; x < b.x + t.ancho; x++) if (dentro(x, z)) suelo[z * G + x] = 1
+    }
+  }
+  for (const b of bs) {
+    if (!pisaSuelo(b) || b.id === sueloAncla) continue
+    const t = tamañoDe(b)
+    for (let z = b.z - 1; z <= b.z + t.alto; z++) {
+      for (let x = b.x - 1; x <= b.x + t.ancho; x++) {
+        if (!dentro(x, z)) continue
+        const i = z * G + x
+        if (!suelo[i]) suelo[i] = 2
+      }
+    }
+  }
+  sueloEdificios = bs.length
+  sueloSucio = false
+}
+
+/**
+ * El mapa se rehace si alguien lo marcó sucio o si cambió el número de
+ * edificios. Las dos comprobaciones son O(1) a propósito: esto se llama por
+ * cada casilla que se mira, y ahí no cabe recorrer la aldea.
+ */
+function sueloAlDia () {
+  if (sueloSucio || sueloEdificios !== (game.state.buildings || []).length) refrescarSuelo()
+}
+/** Cualquier cambio en la aldea (o de partida) invalida el mapa. */
+function ensuciarSuelo () { sueloSucio = true }
+
+/** ¿Hay un edificio en esa casilla? */
+function casillaOcupada (x, z) {
+  const cx = Math.round(x); const cz = Math.round(z)
+  if (!dentro(cx, cz)) return true
+  sueloAlDia()
+  return suelo[cz * CONFIG.GRID + cx] === 1
+}
+
+/**
+ * Casilla buena para plantar a un soldado. En modo estricto también deja libre
+ * el anillo pegado a los edificios: es por donde entran y salen los aldeanos
+ * (`puertaDe()` en sim/villagers.js elige justo esa casilla), y si la tropa se
+ * planta ahí se quedan los dos amontonados en la misma baldosa.
+ */
+function casillaParaTropa (x, z, estricto = true) {
+  const cx = Math.round(x); const cz = Math.round(z)
+  if (!dentro(cx, cz)) return false
+  // El valle es más grande que tu reino: la tropa no acampa en parcela ajena.
+  if (!esTerritorio(game.state, cx, cz)) return false
+  sueloAlDia()
+  const v = suelo[cz * CONFIG.GRID + cx]
+  if (v === 1) return false
+  return !(estricto && v === 2)
+}
+
+/** La casilla libre más cercana a un punto, en anillos. Nunca devuelve nada fuera. */
+function libreCerca (x, z, estricto = true) {
+  const cx = Math.round(x); const cz = Math.round(z)
+  if (casillaParaTropa(cx, cz, estricto)) return { x: cx, z: cz }
+  for (let r = 1; r <= 8; r++) {
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+        if (casillaParaTropa(cx + dx, cz + dz, estricto)) return { x: cx + dx, z: cz + dz }
+      }
+    }
+  }
+  // Aldea tapiada: al menos que no sea un edificio ni esté fuera del tablero.
+  if (estricto) return libreCerca(x, z, false)
+  const medio = Math.floor((CONFIG.GRID - 1) / 2)
+  return { x: Math.min(CONFIG.GRID - 2, Math.max(1, cx)), z: Math.min(CONFIG.GRID - 2, Math.max(1, cz)) }
+}
+
+/** El edificio al que se pega la tropa por defecto: cuartel, si no otro militar, si no el ayuntamiento. */
+function anclaDeReunion () {
+  const bs = game.state.buildings || []
+  return bs.find(b => b.tipo === 'cuartel' && (b.nivel || 0) > 0) ||
+    bs.find(b => EDIFICIOS_HUECO.includes(b.tipo) && (b.nivel || 0) > 0) ||
+    bs.find(b => b.tipo === 'cuartel') ||
+    bs.find(b => b.tipo === 'ayuntamiento') || null
+}
+
+/** Punto de reunión por defecto: a DOS casillas del edificio, fuera de su puerta. */
+function reunionPorDefecto () {
+  const medio = Math.floor((CONFIG.GRID - 1) / 2)
+  const ancla = anclaDeReunion()
+  if (!ancla) return libreCerca(medio, medio + 3)
+  const t = tamañoDe(ancla)
+  const c = centroDe(ancla)
+  // Se prueban los cuatro costados y gana el que mire hacia fuera de la aldea:
+  // así la formación no se planta en mitad de la plaza, por donde pasa todo el mundo.
+  const lados = [
+    { x: c.x, z: ancla.z + t.alto + 1 },
+    { x: c.x, z: ancla.z - 2 },
+    { x: ancla.x + t.ancho + 1, z: c.z },
+    { x: ancla.x - 2, z: c.z }
+  ]
+  let mejor = null; let mejorD = -Infinity
+  for (const p of lados) {
+    const q = { x: Math.round(p.x), z: Math.round(p.z) }
+    if (!casillaParaTropa(q.x, q.z, true)) continue
+    const d = dist(q.x, q.z, medio, medio)
+    if (d > mejorD) { mejorD = d; mejor = q }
+  }
+  // Aldea apretada: se busca el hueco bueno más cercano al costado de salida.
+  return mejor || libreCerca(c.x, ancla.z + t.alto + 1)
+}
+
+/** @returns {{x:number, z:number}} dónde está hoy el estandarte (siempre válido). */
+export function puntoReunion () {
+  const e = ej()
+  const r = e.reunion
+  if (!r || !Number.isFinite(r.x) || !Number.isFinite(r.z) || !casillaParaTropa(r.x, r.z, false)) {
+    const nuevo = r && Number.isFinite(r.x)
+      ? libreCerca(r.x, r.z)
+      : reunionPorDefecto()
+    e.reunion = { x: nuevo.x, z: nuevo.z, fijada: !!(r && r.fijada), ancla: anclaDeReunion()?.id || null }
+  }
+  return { x: e.reunion.x, z: e.reunion.z }
+}
+
+/**
+ * Mueve el estandarte. Si la casilla pedida no sirve (edificio, borde, puerta de
+ * aldeanos), se planta en la más cercana que sí: el jugador no se queda sin
+ * saber dónde ha caído su tropa.
+ * @returns {{ok:boolean, motivo:string, x:number, z:number, ajustado:boolean}}
+ */
+export function fijarReunion (x, z) {
+  const e = ej()
+  const px = Math.round(Number(x)); const pz = Math.round(Number(z))
+  if (!Number.isFinite(px) || !Number.isFinite(pz) || !dentro(px, pz)) {
+    return { ok: false, motivo: 'Esa casilla no está en la aldea', x: e.reunion?.x ?? 0, z: e.reunion?.z ?? 0, ajustado: false }
+  }
+  const destino = casillaParaTropa(px, pz, true) ? { x: px, z: pz } : libreCerca(px, pz)
+  const ajustado = destino.x !== px || destino.z !== pz
+  const antes = e.reunion || {}
+  // A partir de aquí manda el jugador: el estandarte deja de seguir al cuartel.
+  e.reunion = { x: destino.x, z: destino.z, fijada: true, ancla: anclaDeReunion()?.id || null }
+  if (antes.x !== destino.x || antes.z !== destino.z) {
+    events.emit(EV.REUNION_CAMBIADA, { x: destino.x, z: destino.z, ajustado })
+    events.emit(EV.SFX, { nombre: 'entrenar' })
+  }
+  events.emit(EV.UI_TOAST, {
+    texto: ajustado ? '🚩 Ahí no cabe la tropa: el estandarte se planta al lado' : '🚩 La tropa forma en el nuevo estandarte',
+    tipo: ajustado ? 'info' : 'bien'
+  })
+  return { ok: true, motivo: '', x: destino.x, z: destino.z, ajustado }
+}
+
+/** Orden de formación: infantería delante, asedio al fondo. */
+const ORDEN_FORMACION = ['lancero', 'espadachin', 'arquero', 'ballestero', 'monje', 'explorador', 'jinete', 'caballero', 'ariete', 'catapulta']
+
+/**
+ * Dónde se pone cada soldado. Devuelve casillas ENTERAS y libres: filas
+ * ordenadas detrás del estandarte y, si no caben, más filas a los lados. Nunca
+ * mete a nadie dentro de un edificio ni fuera del tablero.
+ *
+ * @param {Record<string,number>} [tropas] por defecto, la tropa que está en casa
+ * @param {{tope?:number}} [opciones] tope de figuras (el render pinta menos en móvil flojo)
+ * @returns {{reunion:{x,z}, estandarte:{x,z}, porFila:number, filas:number,
+ *            puestos:Array<{tipo:string,x:number,z:number,fila:number,col:number}>, sinSitio:number}}
+ */
+export function formacionReunion (tropas, opciones = {}) {
+  const p = puntoReunion()
+  const lista = tropas || tropasDisponibles()
+  const tope = Math.max(1, opciones.tope || 200)
+
+  const cola = []
+  const tipos = [...ORDEN_FORMACION, ...Object.keys(lista).filter(t => !ORDEN_FORMACION.includes(t))]
+  for (const tipo of tipos) {
+    const u = UNIDADES[tipo]
+    if (!u || u.espacio <= 0) continue            // los aldeanos no forman
+    const n = Math.max(0, Math.floor(lista[tipo] || 0))
+    for (let i = 0; i < n && cola.length < tope; i++) cola.push(tipo)
+  }
+  const vacio = { reunion: p, estandarte: { ...p }, porFila: 0, filas: 0, puestos: [], sinSitio: 0 }
+  if (!cola.length) return vacio
+
+  // la formación crece hacia donde hay tablero, no siempre al sur
+  const medio = (CONFIG.GRID - 1) / 2
+  const dir = p.z <= medio ? 1 : -1
+  const porFila = Math.min(8, Math.max(3, Math.ceil(Math.sqrt(cola.length * 1.4))))
+
+  const puestos = []
+  const usadas = new Set()
+  const marcar = (x, z) => usadas.add(z * CONFIG.GRID + x)
+  const librePara = (x, z, estricto) => !usadas.has(z * CONFIG.GRID + x) && casillaParaTropa(x, z, estricto)
+
+  let i = 0
+  // Dos pasadas: primero respetando el anillo de puertas de los aldeanos; si la
+  // aldea está tan apretada que no caben, se relaja antes que dejarlos flotando.
+  for (const estricto of [true, false]) {
+    for (let fila = 0; fila < CONFIG.GRID && i < cola.length; fila++) {
+      const z = p.z + dir * (fila + 1)
+      if (!dentro(p.x, z)) continue
+      for (let col = 0; col < porFila && i < cola.length; col++) {
+        const x = Math.round(p.x + (col - (porFila - 1) / 2))
+        if (!librePara(x, z, estricto)) continue
+        marcar(x, z)
+        puestos.push({ tipo: cola[i], x, z, fila, col })
+        i++
+      }
+    }
+    if (i >= cola.length) break
+    // ¿sigue sobrando gente? se abre en anillos alrededor del estandarte
+    for (let r = 1; r <= 16 && i < cola.length; r++) {
+      for (let dz = -r; dz <= r && i < cola.length; dz++) {
+        for (let dx = -r; dx <= r && i < cola.length; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+          const x = p.x + dx; const z = p.z + dz
+          if (!dentro(x, z) || !librePara(x, z, estricto)) continue
+          marcar(x, z)
+          puestos.push({ tipo: cola[i], x, z, fila: r, col: puestos.length })
+          i++
+        }
+      }
+    }
+    if (i >= cola.length) break
+  }
+
+  const filas = puestos.reduce((m, q) => Math.max(m, q.fila + 1), 0)
+  return { reunion: p, estandarte: { ...p }, porFila, filas, puestos, sinSitio: cola.length - i }
+}
+
 // -------------------------------------------------------------------- init
+/**
+ * Recoloca el estandarte si hace falta y avisa al render. Se llama cuando la
+ * aldea cambia: si te construyen encima del punto de reunión (o levantas por fin
+ * el cuartel), la tropa no puede quedarse plantada dentro de un edificio.
+ */
+function revisarReunion () {
+  const e = ej()
+  const antes = e.reunion ? { x: e.reunion.x, z: e.reunion.z } : null
+  const idAncla = anclaDeReunion()?.id || null
+  // El automático sigue al cuartel, pero SOLO se recalcula cuando cambia el
+  // edificio al que sigue (levantas el cuartel por fin, lo tiras…). Si no, el
+  // estandarte se quedaría bailando cada vez que pones una casa, y no hay nada
+  // peor que ir a buscar tu tropa y que haya cambiado de sitio sin avisar.
+  // El que ha puesto el jugador no se mueve nunca: solo lo corrige
+  // `puntoReunion()` si le construyen encima.
+  if (e.reunion && !e.reunion.fijada && e.reunion.ancla !== idAncla) {
+    const q = reunionPorDefecto()
+    e.reunion = { x: q.x, z: q.z, fijada: false, ancla: idAncla }
+  }
+  const ahora = puntoReunion()
+  if (!antes || antes.x !== ahora.x || antes.z !== ahora.z) {
+    events.emit(EV.REUNION_CAMBIADA, { x: ahora.x, z: ahora.z, ajustado: true })
+  }
+}
+
 export function init () {
   ej()
-  // Al cargar partida, cola y manutención se ponen al día solas: las dos miran
-  // la diferencia real con Date.now(), con el tope offline de CONFIG.
-  events.on(EV.STATE_LOADED, () => { ej(); procesarCola() })
-  events.on(EV.TICK, () => { procesarCola(); comer() })
+  puntoReunion()          // el estandarte existe desde el minuto uno y siempre en sitio válido
+  // Al cargar partida, cola, enfermería y manutención se ponen al día solas: las
+  // tres miran la diferencia real con Date.now(), con el tope offline de CONFIG.
+  events.on(EV.STATE_LOADED, () => { ensuciarSuelo(); ej(); procesarCola(); recuperarHeridos(); revisarReunion() })
+  events.on(EV.TICK, () => { procesarCola(); recuperarHeridos(); comer() })
+  // Tocar la aldea invalida el mapa de suelo y puede mover el estandarte.
+  for (const ev of [EV.BUILD_PLACED, EV.BUILD_COMPLETED, EV.BUILD_UPGRADED, EV.BUILD_DEMOLISHED, EV.TERRITORIO_DESBLOQUEADO]) {
+    events.on(ev, () => { ensuciarSuelo(); revisarReunion() })
+  }
 
   // El banco lleva la contabilidad del rato con la app cerrada y nos va cobrando
   // tramo a tramo, entre cosecha y cosecha. Marcamos el reloj en cada tramo para

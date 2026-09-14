@@ -3,12 +3,15 @@ import { CONFIG, PALETA } from '../core/config.js'
 import { events, EV } from '../core/events.js'
 import { game } from '../core/state.js'
 import { makeRng } from '../core/rng.js'
-import { gridAMundo } from '../core/grid.js'
+import {
+  gridAMundo, parcelaDe, rectParcela, centroParcela, parcelaEsMia, parcelaDisponible,
+  LADO_PARCELA, PARCELAS, idParcela
+} from '../core/grid.js'
 import { ctx, aEscena, onFrame } from './ctx.js'
 import { mat, M, G } from './mats.js'
 
 /**
- * EL VALLE. Isla-maqueta de 34x34 casillas flotando sobre el mar:
+ * EL VALLE. Isla-maqueta de 60x60 casillas flotando sobre el mar:
  * tablero LLANO donde se construye, lomas suaves alrededor, acantilado de
  * tierra y roca, playa, bosques, rocas y caminos. Todo generado con la semilla
  * de la partida, así que al recargar la aldea es SIEMPRE la misma.
@@ -19,12 +22,17 @@ import { mat, M, G } from './mats.js'
  *
  * Se construye una sola vez. Por frame solo se mueve un número: el reloj que
  * ondula el mar en el sombreador.
+ *
+ * EL TERRITORIO SE VE. El valle está repartido en parcelas (core/grid.js) y solo
+ * unas cuantas son tuyas. Lo que no lo es se pinta apagado, se llena de maleza y
+ * se cierra con una linde de mojones y estacas; al ganar una parcela la linde se
+ * abre, la maleza se retira y el verde vuelve, con la cámara mirando.
  */
 
 // ── Medidas del escenario ────────────────────────────────────────────────
-const MITAD = (CONFIG.GRID * CONFIG.CELDA) / 2   // 17: media anchura del tablero jugable
-const MEDIO_LADO = MITAD + 12                    // la isla se pasa del tablero: hierba de sobra + acantilado
-const R_ISLA = 25                                // radio (superelipse) donde empieza a caer el acantilado
+const MITAD = (CONFIG.GRID * CONFIG.CELDA) / 2   // 30: media anchura del tablero jugable
+const MEDIO_LADO = MITAD + 16                    // la isla se pasa del tablero: hierba de sobra + acantilado
+const R_ISLA = 42                                // radio (superelipse) donde empieza a caer el acantilado
 const ANCHO_ORILLA = 3                           // franja en la que el prado baja hasta la arena
 const ANCHO_PLAYA = 2                            // reborde de arena antes del tajo
 const ANCHO_ACANTILADO = 2.6
@@ -33,7 +41,7 @@ const NIVEL_MAR = -1.05                          // el mar deja el acantilado a 
 const CENTRO_LIBRE = 7.2                         // media anchura de la plaza central (≈14x14 casillas) que se deja despejada
 
 /**
- * LA MESETA DEL JUGADOR. Las 34x34 casillas donde se construye están LLANAS,
+ * LA MESETA DEL JUGADOR. Las 60x60 casillas del valle están LLANAS,
  * como en Clash of Clans: colocar edificios en pendiente hace que se apoyen
  * torcidos, que el dedo apunte a una casilla y toque otra, y que las murallas
  * no casen entre sí. El relieve se queda donde sí suma: el borde y los
@@ -43,8 +51,9 @@ const ALTURA_PLAZA = 0.3                         // cota única del tablero (a m
 const MARGEN_LLANO = 3                           // franja en la que la meseta se funde con las lomas de fuera
 
 // paso de la malla: fino dentro del tablero (1 cara por casilla, que es donde se
-// mira de cerca) y del doble fuera, donde solo se ve de lejos y en escorzo
-const PASO_FUERA = 2
+// mira de cerca) y mucho más grueso fuera, donde solo se ve de lejos y en
+// escorzo. Con el valle de 60x60 esto es lo que salva al triángulo de más.
+const PASO_FUERA = 4
 
 // ── Estado del módulo ────────────────────────────────────────────────────
 let ruidoBajo, ruidoAlto, ruidoCosta, ruidoPiedra, ruidoTono
@@ -57,6 +66,24 @@ const relojMar = { value: 0 }
 /** decoración por casilla del tablero: 'x|z' -> [{ malla, i }] para poder talar */
 const porCasilla = new Map()
 const casillasDespejadas = new Set()
+
+// ── Territorio: lo que hace falta para aclarar una parcela en caliente ───
+/** color real de cada cara del valle, sin apagar: Float32Array(caras*3) */
+let colBase = null
+let atribColor = null
+/** id de parcela -> índices de sus caras, y el trozo de búfer que ocupan */
+const carasDeParcela = new Map()
+const rangoDeParcela = new Map()
+/** id de parcela -> cuánto está apagada ahora mismo (1 = barbecho, 0 = tuya) */
+const opacoParcela = new Map()
+/** maleza y zarzas de cada parcela: 'id' -> [{ malla, i }], para retirarlas al conquistar */
+const malezaPorParcela = new Map()
+/** linde (mojones y estacas) y banderas de las parcelas que esperan dueño */
+let linde = null
+let banderas = null
+const banderaDe = new Map()
+/** animaciones vivas: { id, t, dur, maleza:[{malla,i,m}] } */
+const conquistas = []
 
 // ── Ruido de valor con semilla ───────────────────────────────────────────
 const suavizar = (t) => t * t * (3 - 2 * t)
@@ -169,7 +196,21 @@ const cTierra = new THREE.Color(PALETA.tierra)
 const cRoca = new THREE.Color(PALETA.roca)
 const cRocaOscura = new THREE.Color(PALETA.rocaOscura)
 const cCamino = new THREE.Color(PALETA.camino)
+const cBarbecho = new THREE.Color(PALETA.barbecho)
 const tmpColor = new THREE.Color()
+const tmpColor2 = new THREE.Color()
+
+/**
+ * El verde de lo que todavía no es tuyo: el mismo terreno, pero apagado y tirando
+ * a gris. Es a propósito el MISMO color de base: así se lee "esto es tierra que
+ * podría ser mía" y no "esto es otro bioma".
+ */
+function apagar (r, g, b, f, salida) {
+  salida.setRGB(r, g, b)
+  if (f <= 0) return salida
+  tmpColor2.copy(salida).lerp(cBarbecho, 0.7).multiplyScalar(0.78)
+  return salida.lerp(tmpColor2, f)
+}
 
 const acotar = (v) => (v < 0 ? 0 : v > 1 ? 1 : v)
 
@@ -244,23 +285,50 @@ function construirValle () {
       vertice(i + 1, j); vertice(i, j + 1); vertice(i + 1, j + 1)
     }
   }
+  // Color "de verdad" de cada cara (sin apagar) y a qué parcela pertenece: es lo
+  // que permite aclarar una parcela entera al conquistarla sin recalcular nada.
+  colBase = new Float32Array(caras * 3)
+  const deParcela = new Map()
+  const off = (CONFIG.GRID - 1) / 2
   for (let t = 0; t < caras; t++) {
     const b = t * 9
     const cx = (pos[b] + pos[b + 3] + pos[b + 6]) / 3
     const cy = (pos[b + 1] + pos[b + 4] + pos[b + 7]) / 3
     const cz = (pos[b + 2] + pos[b + 5] + pos[b + 8]) / 3
     colorDeCara(cx, cy, cz, tmpColor)
+    colBase[t * 3] = tmpColor.r
+    colBase[t * 3 + 1] = tmpColor.g
+    colBase[t * 3 + 2] = tmpColor.b
+
+    const p = parcelaDe(Math.round(cx / CONFIG.CELDA + off), Math.round(cz / CONFIG.CELDA + off))
+    let f = 0
+    if (p) {
+      let lote = deParcela.get(p.id)
+      if (!lote) deParcela.set(p.id, lote = [])
+      lote.push(t)
+      f = parcelaEsMia(game.state, p.id) ? 0 : 1
+      opacoParcela.set(p.id, f)
+    }
+    apagar(tmpColor.r, tmpColor.g, tmpColor.b, f, tmpColor)
     for (let k = 0; k < 3; k++) {
       col[b + k * 3] = tmpColor.r
       col[b + k * 3 + 1] = tmpColor.g
       col[b + k * 3 + 2] = tmpColor.b
     }
   }
+  // Índice por parcela + el trozo contiguo del búfer que la contiene: al animar
+  // una conquista se sube a la tarjeta ese pedazo y no el valle entero.
+  carasDeParcela.clear()
+  for (const [id, lista] of deParcela) {
+    carasDeParcela.set(id, Int32Array.from(lista))
+    rangoDeParcela.set(id, [lista[0] * 9, (lista[lista.length - 1] - lista[0] + 1) * 9])
+  }
 
   const plano = new THREE.BufferGeometry()
   plano.setAttribute('position', new THREE.BufferAttribute(pos, 3))
   plano.setAttribute('color', new THREE.BufferAttribute(col, 3))
   plano.computeVertexNormals()
+  atribColor = plano.getAttribute('color')
 
   // clon del material compartido: mats.js no expone colores por vértice
   const material = mat(PALETA.hierba).clone()
@@ -350,11 +418,22 @@ const PIEZAS = {
   ],
   flor: [
     { geo: () => G.esfera, matl: () => mat(PALETA.florBlanca), y: 0.16, s: [0.16, 0.16, 0.16] }
+  ],
+  // --- lo que cubre la tierra que aún no es tuya ---
+  zarza: [
+    { geo: () => G.esfera, matl: () => mat(PALETA.maleza), y: 0.22, s: [1, 0.85, 1] },
+    { geo: () => G.cono, matl: () => mat(PALETA.barbechoOscuro), y: 0.5, s: [0.55, 0.8, 0.55] }
+  ],
+  ruina: [
+    { geo: () => G.caja, matl: () => mat(PALETA.piedraOscura), y: 0.26, s: [1, 0.5, 0.4] },
+    { geo: () => G.caja, matl: () => mat(PALETA.linde), y: 0.6, x: 0.3, s: [0.45, 0.55, 0.34] }
   ]
 }
 
 /** Los que se talan al construir encima. La hierba y las flores no estorban. */
-const TALABLE = new Set(['pino', 'roble', 'roca', 'penasco', 'arbusto'])
+const TALABLE = new Set(['pino', 'roble', 'roca', 'penasco', 'arbusto', 'zarza', 'ruina'])
+/** Lo que se retira SOLO al conquistar la parcela: es la señal de "esto está en barbecho". */
+const MALEZA = new Set(['zarza', 'ruina'])
 
 const COLORES_FLOR = [PALETA.florBlanca, PALETA.florRoja, PALETA.florAmarilla, PALETA.florAzul]
 
@@ -434,12 +513,31 @@ function sembrar (rng) {
   }
 
   // --- 3. Relleno disperso por todo el valle ---
-  porLaIsla('pino', cuantos(26), () => rng.float(0.8, 1.25))
-  porLaIsla('roble', cuantos(38), () => rng.float(0.85, 1.35))
-  porLaIsla('roca', cuantos(34), () => rng.float(0.35, 0.85), true)
-  porLaIsla('arbusto', cuantos(95), () => rng.float(0.4, 0.85), true)
-  porLaIsla('hierba', cuantos(230), () => rng.float(0.5, 1.0))
-  porLaIsla('flor', cuantos(150), () => rng.float(0.7, 1.3))
+  // Las cuentas van con el tamaño de la isla: el valle de 60x60 es casi el triple
+  // de superficie que el tablero viejo y con las cifras de antes parecía pelado.
+  porLaIsla('pino', cuantos(60), () => rng.float(0.8, 1.25))
+  porLaIsla('roble', cuantos(80), () => rng.float(0.85, 1.35))
+  porLaIsla('roca', cuantos(70), () => rng.float(0.35, 0.85), true)
+  porLaIsla('arbusto', cuantos(180), () => rng.float(0.4, 0.85), true)
+  porLaIsla('hierba', cuantos(420), () => rng.float(0.5, 1.0))
+  porLaIsla('flor', cuantos(260), () => rng.float(0.7, 1.3))
+
+  // --- 4. Barbecho: lo que cubre las parcelas que todavía no son tuyas ---
+  // Zarzas, matojos y cuatro piedras de algo que hubo. Es la mitad del mensaje:
+  // se ve que ahí se PUEDE construir, pero que hoy no es tuyo.
+  for (let pz = 0; pz < PARCELAS; pz++) {
+    for (let px = 0; px < PARCELAS; px++) {
+      const id = idParcela(px, pz)
+      if (parcelaEsMia(game.state, id)) continue
+      const r = rectParcela(id)
+      if (!r) continue
+      const c = gridAMundo(r.x + (r.ancho - 1) / 2, r.z + (r.alto - 1) / 2)
+      const radio = (Math.max(r.ancho, r.alto) / 2) * CONFIG.CELDA
+      enDisco('zarza', c.x, c.z, radio, cuantos(Math.round(r.ancho * r.alto * 0.26)), () => rng.float(0.45, 1.0), true)
+      enDisco('pino', c.x, c.z, radio, cuantos(7), () => rng.float(0.8, 1.3))
+      enDisco('ruina', c.x, c.z, radio * 0.8, cuantos(3), () => rng.float(0.7, 1.5), true)
+    }
+  }
 
   return plantas
 }
@@ -503,6 +601,15 @@ function montarInstancias (plantas) {
         let lote = porCasilla.get(clave)
         if (!lote) porCasilla.set(clave, lote = [])
         for (const m of mallas) lote.push({ malla: m, i })
+        // la maleza además se indexa por parcela: al conquistarla se retira sola
+        if (MALEZA.has(tipo)) {
+          const par = parcelaDe(gx, gz)
+          if (par) {
+            let lm = malezaPorParcela.get(par.id)
+            if (!lm) malezaPorParcela.set(par.id, lm = [])
+            for (const m of mallas) lm.push({ malla: m, i })
+          }
+        }
       }
     }
 
@@ -519,20 +626,36 @@ function montarInstancias (plantas) {
 
 // ── Rejilla de construcción ──────────────────────────────────────────────
 
-function construirRejilla () {
+/**
+ * Solo se dibuja sobre TU terreno: la rejilla es la promesa de "aquí puedes
+ * poner algo", y enseñarla sobre el barbecho sería mentir. Se rehace al
+ * conquistar (son cuatro mil líneas: rehacerla cuesta menos que mantenerla).
+ */
+function puntosRejilla () {
   const puntos = []
   const y = (wx, wz) => alturaMundo(wx, wz) + 0.06
-  for (let i = 0; i <= CONFIG.GRID; i++) {
-    const w = -MITAD + i * CONFIG.CELDA
-    for (let j = 0; j < CONFIG.GRID; j++) {
-      const a = -MITAD + j * CONFIG.CELDA
-      const b = a + CONFIG.CELDA
-      puntos.push(w, y(w, a), a, w, y(w, b), b)   // líneas paralelas a Z
-      puntos.push(a, y(a, w), w, b, y(b, w), w)   // líneas paralelas a X
+  const mia = (x, z) => {
+    const p = parcelaDe(x, z)
+    return !!p && parcelaEsMia(game.state, p.id)
+  }
+  for (let z = 0; z < CONFIG.GRID; z++) {
+    for (let x = 0; x < CONFIG.GRID; x++) {
+      if (!mia(x, z)) continue
+      const a = gridAMundo(x, z)
+      const x0 = a.x - CONFIG.CELDA / 2; const x1 = a.x + CONFIG.CELDA / 2
+      const z0 = a.z - CONFIG.CELDA / 2; const z1 = a.z + CONFIG.CELDA / 2
+      puntos.push(x0, y(x0, z0), z0, x0, y(x0, z1), z1)   // lado oeste
+      puntos.push(x0, y(x0, z0), z0, x1, y(x1, z0), z0)   // lado norte
+      if (!mia(x + 1, z)) puntos.push(x1, y(x1, z0), z0, x1, y(x1, z1), z1)
+      if (!mia(x, z + 1)) puntos.push(x0, y(x0, z1), z1, x1, y(x1, z1), z1)
     }
   }
+  return puntos
+}
+
+function construirRejilla () {
   const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(puntos, 3))
+  g.setAttribute('position', new THREE.Float32BufferAttribute(puntosRejilla(), 3))
   // mats.js solo fabrica materiales de malla; las líneas necesitan el suyo
   const material = new THREE.LineBasicMaterial({
     color: PALETA.rejilla, transparent: true, opacity: 0, depthWrite: false
@@ -542,6 +665,210 @@ function construirRejilla () {
   lineas.visible = false
   lineas.renderOrder = 2
   return lineas
+}
+
+// ── La linde: dónde acaba tu reino ───────────────────────────────────────
+
+/**
+ * Mojón de piedra con su estaca, clavado en cada tramo de frontera. No es una
+ * muralla (eso lo construye el jugador): es la señal de "hasta aquí llega lo
+ * tuyo", que es justo lo que había que poder ver en el mapa de la ciudad.
+ */
+const MAX_LINDE = 520
+const _m4 = new THREE.Matrix4()
+const _v3 = new THREE.Vector3()
+const _q = new THREE.Quaternion()
+const _e = new THREE.Euler()
+const _esc = new THREE.Vector3()
+const _nada = new THREE.Matrix4().makeScale(0, 0, 0)
+
+function construirLinde () {
+  const g = new THREE.Group()
+  g.name = 'linde'
+  const piedras = new THREE.InstancedMesh(G.esfera, mat(PALETA.linde), MAX_LINDE)
+  const estacas = new THREE.InstancedMesh(G.cilindro6, mat(PALETA.tronco), MAX_LINDE)
+  for (const m of [piedras, estacas]) {
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    m.castShadow = true
+    m.receiveShadow = false
+    m.frustumCulled = false
+    g.add(m)
+  }
+  g.userData.piedras = piedras
+  g.userData.estacas = estacas
+  return g
+}
+
+/** Recorre la frontera y recoloca los mojones. Se llama al arrancar y al conquistar. */
+function actualizarLinde () {
+  if (!linde) return
+  const { piedras, estacas } = linde.userData
+  const mia = (x, z) => {
+    const p = parcelaDe(x, z)
+    return !!p && parcelaEsMia(game.state, p.id)
+  }
+  let n = 0
+  const poner = (wx, wz, giro) => {
+    if (n >= MAX_LINDE) return
+    const y = alturaMundo(wx, wz)
+    _e.set(0, giro, 0); _q.setFromEuler(_e)
+    _v3.set(wx, y + 0.16, wz); _esc.set(0.62, 0.42, 0.62)
+    _m4.compose(_v3, _q, _esc)
+    piedras.setMatrixAt(n, _m4)
+    _v3.set(wx, y + 0.52, wz); _esc.set(0.13, 1.05, 0.13)
+    _m4.compose(_v3, _q, _esc)
+    estacas.setMatrixAt(n, _m4)
+    n++
+  }
+
+  for (let z = 0; z < CONFIG.GRID; z++) {
+    for (let x = 0; x < CONFIG.GRID; x++) {
+      if (!mia(x, z)) continue
+      const c = gridAMundo(x, z)
+      // un mojón sí y otro no: la linde se lee igual y cuesta la mitad
+      if (!mia(x, z - 1) && (x & 1) === 0) poner(c.x, c.z - 0.5, 0)
+      if (!mia(x, z + 1) && (x & 1) === 0) poner(c.x, c.z + 0.5, 0)
+      if (!mia(x - 1, z) && (z & 1) === 0) poner(c.x - 0.5, c.z, Math.PI / 2)
+      if (!mia(x + 1, z) && (z & 1) === 0) poner(c.x + 0.5, c.z, Math.PI / 2)
+    }
+  }
+  for (let i = n; i < MAX_LINDE; i++) {
+    piedras.setMatrixAt(i, _nada)
+    estacas.setMatrixAt(i, _nada)
+  }
+  piedras.instanceMatrix.needsUpdate = true
+  estacas.instanceMatrix.needsUpdate = true
+}
+
+// ── Banderas: "esta parcela te está esperando" ───────────────────────────
+
+/** Una bandera clavada en el centro de la parcela que se puede reclamar. */
+function plantarBandera (id) {
+  if (!banderas || banderaDe.has(id)) return
+  const c = centroParcela(id)
+  if (!c) return
+  const w = gridAMundo(c.x, c.z)
+  const y = alturaMundo(w.x, w.z)
+  const g = new THREE.Group()
+  const palo = new THREE.Mesh(G.cilindro6, mat(PALETA.madera))
+  palo.position.set(0, 1.5, 0); palo.scale.set(0.14, 3, 0.14)
+  const tela = new THREE.Mesh(G.caja, mat(PALETA.estandarte))
+  tela.position.set(0.55, 2.55, 0); tela.scale.set(1.1, 0.72, 0.08)
+  const piedra = new THREE.Mesh(G.esfera, mat(PALETA.linde))
+  piedra.position.set(0, 0.16, 0); piedra.scale.set(0.9, 0.5, 0.9)
+  g.add(palo, tela, piedra)
+  g.position.set(w.x, y, w.z)
+  g.userData.tela = tela
+  banderas.add(g)
+  banderaDe.set(id, g)
+}
+
+function quitarBandera (id) {
+  const g = banderaDe.get(id)
+  if (!g) return
+  banderas.remove(g)
+  banderaDe.delete(id)
+}
+
+/** Pone una bandera en cada parcela que espera dueño y retira las que ya no. */
+function refrescarBanderas () {
+  if (!banderas) return
+  for (let pz = 0; pz < PARCELAS; pz++) {
+    for (let px = 0; px < PARCELAS; px++) {
+      const id = idParcela(px, pz)
+      if (parcelaDisponible(game.state, id)) plantarBandera(id)
+      else quitarBandera(id)
+    }
+  }
+}
+
+// ── Conquista: que se vea que has ganado algo ────────────────────────────
+
+/** Repinta una parcela con su grado de "barbecho" (1 apagada, 0 tuya). */
+function pintarParcela (id, f) {
+  const caras = carasDeParcela.get(id)
+  if (!caras || !atribColor || !colBase) return
+  const col = atribColor.array
+  for (let k = 0; k < caras.length; k++) {
+    const t = caras[k]
+    apagar(colBase[t * 3], colBase[t * 3 + 1], colBase[t * 3 + 2], f, tmpColor)
+    const b = t * 9
+    for (let v = 0; v < 3; v++) {
+      col[b + v * 3] = tmpColor.r
+      col[b + v * 3 + 1] = tmpColor.g
+      col[b + v * 3 + 2] = tmpColor.b
+    }
+  }
+  // se sube a la tarjeta SOLO el trozo de esta parcela, no el valle entero
+  const rango = rangoDeParcela.get(id)
+  if (rango && atribColor.addUpdateRange) {
+    atribColor.clearUpdateRanges()
+    atribColor.addUpdateRange(rango[0], rango[1])
+  } else if (rango && atribColor.updateRange) {
+    atribColor.updateRange.offset = rango[0]
+    atribColor.updateRange.count = rango[1]
+  }
+  atribColor.needsUpdate = true
+  opacoParcela.set(id, f)
+}
+
+/**
+ * El momento de ganar terreno: la maleza se retira desde el centro hacia fuera,
+ * el verde vuelve y la linde se abre. Dura poco más de un segundo, que es lo que
+ * aguanta la vista sin aburrirse.
+ */
+function conquistar (id, animado = true) {
+  quitarBandera(id)
+  const lote = malezaPorParcela.get(id) || []
+  const centro = centroParcela(id)
+  const cw = centro ? gridAMundo(centro.x, centro.z) : { x: 0, z: 0 }
+  const maleza = []
+  for (const { malla, i } of lote) {
+    const m = new THREE.Matrix4()
+    malla.getMatrixAt(i, m)
+    const d = Math.hypot(m.elements[12] - cw.x, m.elements[14] - cw.z)
+    maleza.push({ malla, i, m, retraso: Math.min(0.55, d / (LADO_PARCELA * 1.6)) })
+  }
+  if (!animado) {
+    for (const p of maleza) { p.malla.setMatrixAt(p.i, _nada); p.malla.instanceMatrix.needsUpdate = true }
+    pintarParcela(id, 0)
+    actualizarLinde()
+    rehacerRejilla()
+    return
+  }
+  conquistas.push({ id, t: 0, dur: 1.25, maleza })
+}
+
+function pasoConquistas (dt) {
+  if (!conquistas.length) return
+  for (let k = conquistas.length - 1; k >= 0; k--) {
+    const c = conquistas[k]
+    c.t += dt
+    const p = Math.min(1, c.t / c.dur)
+    pintarParcela(c.id, 1 - suavizar(p))
+    const tocadas = new Set()
+    for (const z of c.maleza) {
+      const avance = Math.min(1, Math.max(0, (p - z.retraso) / 0.45))
+      const s = 1 - suavizar(avance)
+      _m4.copy(z.m).scale(_v3.set(s, s, s))
+      z.malla.setMatrixAt(z.i, s > 0.01 ? _m4 : _nada)
+      tocadas.add(z.malla)
+    }
+    for (const m of tocadas) m.instanceMatrix.needsUpdate = true
+    if (p >= 1) {
+      conquistas.splice(k, 1)
+      actualizarLinde()
+      rehacerRejilla()
+    }
+  }
+}
+
+function rehacerRejilla () {
+  if (!rejilla) return
+  rejilla.geometry.dispose()
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(puntosRejilla(), 3))
+  rejilla.geometry = g
 }
 
 // ── API pública ──────────────────────────────────────────────────────────
@@ -625,6 +952,13 @@ export function init () {
   rejilla = construirRejilla()
   raiz.add(rejilla)
 
+  linde = construirLinde()
+  banderas = new THREE.Group()
+  banderas.name = 'banderas'
+  raiz.add(linde, banderas)
+  actualizarLinde()
+  refrescarBanderas()
+
   aEscena(raiz)
 
   // los edificios ya guardados en la partida también tienen su sitio despejado
@@ -637,10 +971,29 @@ export function init () {
     if (building) despejarZona(building.x, building.z, building.ancho ?? 2, building.alto ?? 2)
   })
 
+  // --- territorio ---
+  events.on(EV.TERRITORIO_DESBLOQUEADO, ({ parcela } = {}) => { if (parcela) conquistar(parcela, true) })
+  events.on(EV.TERRITORIO_DISPONIBLE, ({ parcela } = {}) => { if (parcela) plantarBandera(parcela) })
+  // otra partida cargada: se repinta lo que sea suyo sin rehacer el valle
+  events.on(EV.STATE_LOADED, () => {
+    for (const id of carasDeParcela.keys()) pintarParcela(id, parcelaEsMia(game.state, id) ? 0 : 1)
+    actualizarLinde()
+    rehacerRejilla()
+    refrescarBanderas()
+  })
+
   // lo único que se mueve por frame: el reloj del oleaje (un número) y, cuando
   // se está construyendo, el fundido de la rejilla. Ni un `new` aquí dentro.
   onFrame((dt, t) => {
     relojMar.value = t
+    pasoConquistas(dt)
+    // la tela de las banderas ondea: cuatro senos y ni un `new` por frame
+    if (banderaDe.size) {
+      for (const g of banderaDe.values()) {
+        const tela = g.userData.tela
+        if (tela) { tela.rotation.y = Math.sin(t * 2.2) * 0.22; tela.position.y = 2.55 + Math.sin(t * 3.1) * 0.04 }
+      }
+    }
     if (!rejilla) return
     const o = rejilla.material.opacity
     if (Math.abs(o - opacidadObjetivo) > 0.002) {

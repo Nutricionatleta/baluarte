@@ -14,7 +14,10 @@
 import { events, EV } from '../core/events.js'
 import { game } from '../core/state.js'
 import { CONFIG, ICONO } from '../core/config.js'
-import { dentro, huecoLibre } from '../core/grid.js'
+import {
+  dentro, huecoLibre, parcelaDe, coordsParcela, rectParcela,
+  parcelaDisponible, parcelaEsMia, fronteraDe, PARCELAS, NUCLEO
+} from '../core/grid.js'
 import { EDIFICIOS, def, AGE_NOMBRE, ORDEN_EDADES } from '../data/buildings.js'
 import {
   el, hoja, toast, confirmar, vaciar, formatoNumero, formatoTiempo,
@@ -45,6 +48,10 @@ const simCosteAcelerar = (id) => seguro(OBRA.costeAcelerar, 0, id)
 const simNivelDe = (t) => seguro(OBRA.nivelDe, nivelDeRespaldo(t), t)
 const simPlazasObra = () => seguro(OBRA.plazasDeObra, CONFIG.MAX_OBRAS_SIMULTANEAS)
 const simSegRestantes = (id) => seguro(OBRA.segundosRestantes, 0, id)
+// territorio: la interfaz solo PREGUNTA; reclamar va por evento (EV.TERRITORIO_RECLAMAR)
+const simParcelasDisponibles = () => seguro(OBRA.parcelasDisponibles, [])
+const simResumenTerritorio = () => seguro(OBRA.resumenTerritorio, null)
+const simCosteReclamar = (id) => seguro(OBRA.costeReclamar, null, id)
 
 function nivelDeRespaldo (tipo) {
   // Un edificio EN OBRAS conserva su nivel para los requisitos: solo deja de
@@ -75,6 +82,7 @@ const CATEGORIAS = [
 const SECCIONES = [
   { id: 'construir', texto: 'Construir', icono: '🔨' },
   { id: 'mejorar', texto: 'Mejorar', icono: '⬆️' },
+  { id: 'territorio', texto: 'Territorio', icono: '🚩' },
   { id: 'investigar', texto: 'Investigar', icono: '📜' }
 ]
 
@@ -134,8 +142,11 @@ function evaluar (tipo) {
   if (tengo >= tope) {
     return dictamen('tope', d.unico ? 'Ya tienes el tuyo' : `Ya tienes el máximo: ${tope}`)
   }
+  // Ni los constructores ocupados ni la caja vacía impiden ENCARGARLO: entra en
+  // la cola de espera y arranca solo. Se sigue diciendo, eso sí, para que nadie
+  // se lleve sorpresas, y para que la lista ordene delante lo que empieza ya.
   if ((s.obras?.length || 0) >= simPlazasObra()) {
-    return dictamen('obras', 'Constructores ocupados')
+    return dictamen('obras', 'Constructores ocupados: entra en la cola')
   }
   const c = soloCoste(d.coste(1))
   if (!alcanza(c)) return dictamen('recursos', `Te falta ${textoFalta(c)}`)
@@ -482,9 +493,14 @@ function pintarSeccion () {
   refrescos = []
   vaciar(cuerpo)
   arriba()
-  laHoja?.titulo(seccion === 'mejorar' ? '⬆️ Mejorar la aldea' : seccion === 'investigar' ? '📜 Universidad' : '🔨 El taller')
+  laHoja?.titulo(seccion === 'mejorar'
+    ? '⬆️ Mejorar la aldea'
+    : seccion === 'territorio'
+      ? '🚩 Tu territorio'
+      : seccion === 'investigar' ? '📜 Universidad' : '🔨 El taller')
   if (seccion === 'construir') pintarCatalogo(cuerpo)
   else if (seccion === 'mejorar') pintarMejoras(cuerpo)
+  else if (seccion === 'territorio') pintarTerritorio(cuerpo)
   else pintarInvestigacion(cuerpo)
 }
 
@@ -508,7 +524,9 @@ function pintarCatalogo (destino) {
     const pintarTxt = () => {
       const o = estado().obras || []
       const falta = o.length ? Math.min(...o.map(x => Math.max(0, (x.fin - Date.now()) / 1000))) : 0
-      const t = o.length ? `El primero queda libre en ${formatoTiempo(falta)}` : 'Ya hay hueco'
+      const espera = seguro(OBRA.obrasEnEspera, [])
+      const cola = espera.length ? ` · ${espera.length} encargo${espera.length > 1 ? 's' : ''} esperando turno` : ''
+      const t = (o.length ? `Encarga igual: entra en la cola y arranca en ${formatoTiempo(falta)}` : 'Ya hay hueco') + cola
       if (txt.textContent !== t) txt.textContent = t
     }
     pintarTxt(); refrescos.push(pintarTxt)
@@ -836,10 +854,21 @@ function irASeccion (id) {
 
 function pintarMejoras (destino) {
   const s = estado()
-  const enObra = s.buildings.filter(b => b.enObra || b.mejorando)
+  // Lo reservado (b.enEspera) no es una obra: es un encargo. Va en su lista.
+  const enObra = s.buildings.filter(b => (b.enObra || b.mejorando) && !b.enEspera)
   if (enObra.length) {
     destino.appendChild(el('div', { clase: 'titular', texto: '🔨 En obras' }))
     for (const b of enObra) destino.appendChild(tarjetaObra(b))
+    destino.appendChild(el('div', { clase: 'separador' }))
+  }
+
+  const espera = seguro(OBRA.obrasEnEspera, [])
+  if (espera.length) {
+    destino.appendChild(el('div', { clase: 'fila fila-sep' }, [
+      el('span', { clase: 'titular', texto: '⏳ En espera' }),
+      el('span', { clase: 'pequeño tenue', texto: `${espera.length} encargo${espera.length > 1 ? 's' : ''}` })
+    ]))
+    for (const e of espera) destino.appendChild(tarjetaEspera(e))
     destino.appendChild(el('div', { clase: 'separador' }))
   }
 
@@ -938,8 +967,11 @@ function tarjetaMejora (b, desbloquea = 0) {
   const aviso = el('div', { clase: 'pequeño no-alcanzable', estilo: { display: 'none', fontWeight: '800' } })
 
   boton.addEventListener('click', async () => {
+    const antes = simPuedeMejorar(b.id)
+    const aCola = antes && !antes.ok && (antes.causa === 'obras' || antes.causa === 'recursos')
     if (simMejorar(b.id)) {
-      toast(`${d.icono} ${d.nombre} sube a nivel ${siguiente}`, 'bien')
+      // Si ha entrado en la cola, la simulación ya ha avisado con su puesto.
+      if (!aCola) toast(`${d.icono} ${d.nombre} sube a nivel ${siguiente}`, 'bien')
       reconstruir()
     }
   })
@@ -957,17 +989,65 @@ function tarjetaMejora (b, desbloquea = 0) {
 
   let ultimo = ''
   const refrescar = () => {
-    const ev = simPuedeMejorar(b.id) || { ok: alcanza(coste), motivo: '' }
-    const clave = `${ev.ok}|${ev.motivo}`
+    const ev = simPuedeMejorar(b.id) || { ok: alcanza(coste), motivo: '', causa: '' }
+    // Manos ocupadas o caja floja: se puede dejar encargado igual, y el botón
+    // lo dice antes de que el dedo lo toque.
+    const aCola = !ev.ok && (ev.causa === 'obras' || ev.causa === 'recursos')
+    const clave = `${ev.ok}|${aCola}|${ev.motivo}`
     if (clave === ultimo) return
     ultimo = clave
-    boton.disabled = !ev.ok
+    boton.disabled = !ev.ok && !aCola
+    boton.textContent = ev.ok ? `Mejorar a nivel ${siguiente}` : aCola ? `Dejar encargado (nivel ${siguiente})` : `Mejorar a nivel ${siguiente}`
     caja.classList.toggle('no-alcanzable', !ev.ok && !alcanza(coste))
     aviso.style.display = ev.ok ? 'none' : 'block'
     aviso.textContent = ev.ok ? '' : ev.motivo
   }
   refrescar()
   refrescos.push(refrescar)
+  return caja
+}
+
+/**
+ * Encargo esperando turno: su puesto en la cola, lo que costará (todavía no se
+ * ha pagado nada), cuándo se calcula que entrará, y los dos botones que hacen
+ * falta: colarlo el primero o retirarlo.
+ */
+function tarjetaEspera (e) {
+  const caja = el('div', { clase: 'tarjeta tarjeta-fila' })
+  const estadoTxt = el('span', { clase: 'pequeño' })
+  const pintarEstado = () => {
+    const lista = seguro(OBRA.obrasEnEspera, [])
+    const yo = lista.find(x => x.id === e.id)
+    if (!yo) return
+    const t = yo.aviso
+      ? `⚠️ ${yo.aviso}`
+      : yo.segundosParaEmpezar > 0
+        ? `Empieza en ${formatoTiempo(yo.segundosParaEmpezar)} · dura ${formatoTiempo(yo.duracion)}`
+        : `Entra ya · dura ${formatoTiempo(yo.duracion)}`
+    if (estadoTxt.textContent !== t) estadoTxt.textContent = t
+  }
+  pintarEstado(); refrescos.push(pintarEstado)
+
+  caja.append(
+    el('div', { clase: 'tarjeta-cabeza' }, [
+      el('div', { clase: 'tarjeta-icono', texto: e.icono }),
+      el('div', { clase: 'tarjeta-cuerpo' }, [
+        el('div', { clase: 'tarjeta-nombre', texto: `${e.posicion}. ${e.nombre}${e.tipo === 'mejorar' ? ` a nivel ${e.nivel}` : ''}` }),
+        estadoTxt
+      ])
+    ]),
+    el('div', { clase: 'pequeño', html: costeHTML(e.coste) }),   // aún no se ha pagado: se cobra al empezar
+    el('div', { clase: 'fila' }, [
+      el('button', {
+        clase: 'btn btn-piedra crece', type: 'button', texto: '⬆ La primera',
+        onclick: () => { seguro(OBRA.moverEnCola, false, e.id, 0); reconstruir() }
+      }),
+      el('button', {
+        clase: 'btn btn-piedra crece', type: 'button', texto: '✕ Retirar',
+        onclick: () => { seguro(OBRA.cancelarEspera, false, e.id); reconstruir() }
+      })
+    ])
+  )
   return caja
 }
 
@@ -1013,6 +1093,233 @@ function tarjetaObra (b) {
   }
   refrescar()
   refrescos.push(refrescar)
+  return caja
+}
+
+/* ===========================================================================
+   3 bis. TERRITORIO — las parcelas que se conquistan
+   =========================================================================== */
+
+const MOTIVO_PARCELA = {
+  conquista: { icono: '⚔️', texto: 'La ganaste en el campo de batalla' },
+  exploracion: { icono: '🗺️', texto: 'La encontró un explorador' },
+  edad: { icono: '📜', texto: 'Te la trajo la edad nueva' },
+  inicio: { icono: '🏛️', texto: 'Es tierra de tus padres' }
+}
+
+/** Por qué está esperando esta parcela, con nombre propio si lo hay. */
+function porQueEstaAhi (p) {
+  const m = MOTIVO_PARCELA[p.motivo] || MOTIVO_PARCELA.conquista
+  const o = p.origen || null
+  if (p.motivo === 'conquista' && o && o.nombre) return { icono: m.icono, texto: `La ganaste en el campo a ${o.nombre}` }
+  if (p.motivo === 'edad' && o && o.age) return { icono: m.icono, texto: `Te la trajo la ${AGE_NOMBRE[o.age] || 'edad nueva'}` }
+  return m
+}
+
+// La rosa de los vientos, desde el este (ángulo 0) girando hacia el sur. Ocho
+// rumbos y no cuatro: con menos, dos lindes distintas se llamaban igual.
+const RUMBOS = ['este', 'sureste', 'sur', 'suroeste', 'oeste', 'noroeste', 'norte', 'nordeste']
+
+/** "la linde del nordeste": el jugador no piensa en coordenadas, piensa en rumbos. */
+function nombreParcela (id) {
+  const c = coordsParcela(id)
+  if (!c) return 'una linde del valle'
+  const m = (PARCELAS - 1) / 2
+  const vx = c.px - m; const vz = c.pz - m
+  if (!vx && !vz) return 'el corazón del valle'
+  const sector = Math.round(Math.atan2(vz, vx) / (Math.PI / 4))
+  return `la linde del ${RUMBOS[(sector + 8) % 8]}`
+}
+
+/** "a Sancho", pero "al alcaide Sancho": el nombre del rival ya trae su título. */
+const conA = (nombre) => /^el /i.test(nombre)
+  ? 'al ' + nombre.slice(3)
+  : /^los /i.test(nombre) ? 'a los ' + nombre.slice(4) : 'a ' + nombre
+
+/**
+ * El rival que está DEL LADO de esa parcela. El territorio se abre hacia donde
+ * empujas, así que decirle a quién hay que ganar convierte un candado en un plan.
+ * Solo se lee del estado: la interfaz no toca el mundo.
+ */
+function rivalHacia (id) {
+  const c = coordsParcela(id)
+  if (!c) return null
+  const m = (PARCELAS - 1) / 2
+  let vx = c.px - m; let vz = c.pz - m
+  const l = Math.hypot(vx, vz) || 1
+  vx /= l; vz /= l
+  const w = estado().world || {}
+  const casa = w.casa || { x: 8, y: 8 }
+  let mejor = null; let mejorPunto = 0.25      // tiene que apuntar de verdad hacia allí
+  for (const e of (w.enemigos || [])) {
+    if (!e || e.derrotado || e.vasallo || !e.descubierto) continue
+    const dx = (e.x ?? casa.x) - casa.x; const dy = (e.y ?? casa.y) - casa.y
+    const d = Math.hypot(dx, dy) || 1
+    const punto = (dx / d) * vx + (dy / d) * vz - d * 0.01
+    if (punto > mejorPunto) { mejorPunto = punto; mejor = e }
+  }
+  return mejor
+}
+
+/** Lo que hay que hacer para que esa parcela sea tuya, dicho en una frase. */
+function comoConseguirParcela (id) {
+  if (!id) return ''
+  const s = estado()
+  if (parcelaEsMia(s, id)) return ''
+  if (parcelaDisponible(s, id)) {
+    const c = simCosteReclamar(id)
+    return c
+      ? `Ya te la has ganado: plántale la bandera por ${textoCoste(c)} en la pestaña 🚩 Territorio.`
+      : 'Ya te la has ganado: plántale la bandera en la pestaña 🚩 Territorio.'
+  }
+  const pegada = fronteraDe(s).includes(id)
+  const rival = pegada ? rivalHacia(id) : null
+  if (rival) return `Gana ${conA(String(rival.nombre || "ese señor"))} para abrir esta linde.`
+  if (pegada) return 'Gana un asalto hacia ese lado, manda un explorador o avanza de edad: así se abren las lindes.'
+  return 'Está lejos de lo tuyo: el reino crece en mancha, linde a linde desde tu frontera.'
+}
+
+const textoCoste = (c) => RECURSOS.filter(r => (c?.[r] || 0) > 0).map(r => `${ICONO[r]} ${formatoNumero(c[r])}`).join(' ')
+
+function pintarTerritorio (destino) {
+  const res = simResumenTerritorio()
+  if (!res) {
+    destino.appendChild(el('p', { clase: 'tenue', texto: 'El reparto del valle todavía no está listo.' }))
+    return
+  }
+
+  // parcelasDisponibles() es la fuente; el resumen ya la trae masticada
+  const disponibles = (res.disponibles && res.disponibles.length) ? res.disponibles : simParcelasDisponibles()
+
+  // --- de un vistazo: cuánto reino tienes -------------------------------
+  const cabecera = el('div', { clase: 'panel', estilo: { padding: '12px' } })
+  cabecera.append(el('div', { clase: 'fila', estilo: { gap: '10px' } }, [
+    el('span', { estilo: { fontSize: '1.9em', lineHeight: '1' }, texto: '🚩' }),
+    el('div', { clase: 'crece' }, [
+      el('div', { estilo: { fontWeight: '800' }, texto: `${res.parcelas} parcelas · ${formatoNumero(res.casillas)} casillas tuyas` }),
+      el('div', { clase: 'pequeño tenue', texto: `El valle son ${PARCELAS * PARCELAS} parcelas de ${CONFIG.PARCELA}x${CONFIG.PARCELA}. Solo se construye en las tuyas.` })
+    ])
+  ]))
+  const tira = el('div', { clase: 'fila', estilo: { gap: '6px', flexWrap: 'wrap', marginTop: '8px' } })
+  tira.append(
+    chip('🚩', `${disponibles.length} sin reclamar`),
+    chip('🧭', `${res.frontera.length} lindes a la vista`),
+    chip('🏕️', `${res.puestos} de ${def('puesto_avanzado')?.max || 8} avanzadillas`)
+  )
+  cabecera.appendChild(tira)
+  destino.appendChild(cabecera)
+
+  // --- las que esperan bandera ------------------------------------------
+  destino.appendChild(el('div', { clase: 'titular', texto: '🚩 Esperando tu bandera' }))
+  if (!disponibles.length) {
+    const vacio = el('div', { clase: 'panel', estilo: { padding: '12px' } })
+    vacio.append(
+      el('div', { estilo: { fontWeight: '800' }, texto: 'Ahora mismo no hay ninguna parcela ganada' }),
+      el('div', { clase: 'pequeño tenue', estilo: { marginTop: '4px' }, texto: 'Hay tres maneras de que se abra una linde:' }),
+      el('ul', { clase: 'pequeño', estilo: { margin: '6px 0 0 18px', padding: '0' } }, [
+        el('li', { texto: '⚔️ Ganar un asalto: el terreno se abre del lado por el que has peleado.' }),
+        el('li', { texto: '🗺️ Mandar exploradores: uno de cada cuatro vuelve con tierra sin dueño.' }),
+        el('li', { texto: '📜 Avanzar de edad: cada edad nueva te regala una parcela.' })
+      ])
+    )
+    destino.appendChild(vacio)
+  }
+  for (const p of disponibles) destino.appendChild(tarjetaParcela(p))
+
+  // --- la frontera: por dónde puede crecer el reino ----------------------
+  const frontera = res.frontera.filter(id => !parcelaDisponible(estado(), id)).slice(0, 4)
+  if (frontera.length) {
+    destino.appendChild(el('div', { clase: 'titular', texto: '🧭 Lindes que puedes abrir' }))
+    const caja = el('div', { clase: 'panel', estilo: { padding: '10px 12px' } })
+    for (const id of frontera) {
+      caja.appendChild(el('div', { estilo: { marginBottom: '6px' } }, [
+        el('div', { clase: 'pequeño', estilo: { fontWeight: '800' }, texto: `🧭 ${nombreParcela(id)} · parcela ${id}` }),
+        el('div', { clase: 'pequeño tenue', texto: comoConseguirParcela(id) })
+      ]))
+    }
+    destino.appendChild(caja)
+  }
+
+  // --- avanzadillas ------------------------------------------------------
+  destino.appendChild(bloqueAvanzadillas(res))
+}
+
+/** Una parcela ganada: qué es, por qué es tuya, qué cuesta y el botón de plantar. */
+function tarjetaParcela (p) {
+  const c = p.coste || simCosteReclamar(p.parcela) || {}
+  const r = p.rect || rectParcela(p.parcela) || { ancho: CONFIG.PARCELA, alto: CONFIG.PARCELA }
+  const motivo = porQueEstaAhi(p)
+  const caja = el('div', { clase: 'panel', estilo: { padding: '12px', borderWidth: '2px', background: 'linear-gradient(180deg,#f3fbe8,#e2f0cd)' } })
+
+  caja.append(el('div', { clase: 'fila', estilo: { gap: '10px' } }, [
+    el('span', { estilo: { fontSize: '1.9em', lineHeight: '1' }, texto: '🚩' }),
+    el('div', { clase: 'crece' }, [
+      el('div', { estilo: { fontWeight: '800' }, texto: `Reclamar ${nombreParcela(p.parcela)}` }),
+      el('div', { clase: 'pequeño tenue', texto: `${r.ancho}x${r.alto} casillas de terreno nuevo · parcela ${p.parcela}` })
+    ])
+  ]))
+  caja.appendChild(el('div', { clase: 'pequeño', estilo: { marginTop: '6px' }, texto: `${motivo.icono} ${motivo.texto}` }))
+  caja.appendChild(el('div', { estilo: { marginTop: '6px' } }, [costeVivo(soloCoste(c))]))
+
+  const btn = el('button', {
+    clase: 'btn btn-oro', type: 'button', texto: 'Plantar la bandera',
+    estilo: { minHeight: '48px', width: '100%', marginTop: '8px' },
+    onclick: () => {
+      if (!alcanza(soloCoste(c))) { toast(`Te falta ${textoFalta(c)}`, 'mal'); return }
+      // la interfaz PIDE; sim/buildings.js cobra y abre la linde
+      events.emit(EV.TERRITORIO_RECLAMAR, { parcela: p.parcela })
+      cerrar()
+    }
+  })
+  const refrescar = () => {
+    const puede = alcanza(soloCoste(c))
+    btn.disabled = !puede
+    const t = puede ? 'Plantar la bandera' : `Te falta ${textoFalta(c)}`
+    if (btn.textContent !== t) btn.textContent = t
+  }
+  refrescar(); refrescos.push(refrescar)
+  caja.appendChild(btn)
+  // dónde cae, para que no se reclame a ciegas
+  caja.appendChild(el('button', {
+    clase: 'btn btn-fantasma', type: 'button', texto: 'Enseñármela en el valle',
+    estilo: { minHeight: '44px', width: '100%', marginTop: '6px' },
+    onclick: () => {
+      const cen = p.centro || { x: 0, z: 0 }
+      events.emit(EV.CAMERA_FOCUS, { x: cen.x, z: cen.z, zoom: 44 })
+      cerrar()
+    }
+  }))
+  return caja
+}
+
+/** Qué es una avanzadilla, dónde cabe y lo que cuesta tenerla. */
+function bloqueAvanzadillas (res) {
+  const d = def('puesto_avanzado')
+  const caja = el('div', { clase: 'panel', estilo: { padding: '12px', marginTop: '4px' } })
+  if (!d) return caja
+  const tope = d.max || 8
+  const tarifa = (CONFIG.TERRITORIO || {}).MANTENIMIENTO_MIN || { comida: 4, oro: 1 }
+  const soldada = RECURSOS.filter(r => (tarifa[r] || 0) > 0).map(r => `${tarifa[r]} ${ICONO[r]}`).join(' + ')
+  const puestas = res.puestos || 0
+
+  caja.append(el('div', { clase: 'fila', estilo: { gap: '10px' } }, [
+    el('span', { estilo: { fontSize: '1.9em', lineHeight: '1' }, texto: d.icono }),
+    el('div', { clase: 'crece' }, [
+      el('div', { estilo: { fontWeight: '800' }, texto: `${d.nombre} · ${puestas} de ${tope}` }),
+      el('div', { clase: 'pequeño tenue', texto: d.desc })
+    ])
+  ]))
+  caja.appendChild(el('ul', { clase: 'pequeño', estilo: { margin: '8px 0 0 18px', padding: '0' } }, [
+    el('li', { texto: 'Labra su comida, aloja a su gente y dispara a quien entre por la frontera.' }),
+    el('li', { texto: `Solo en tierra conquistada: fuera de las ${NUCLEO.length} parcelas del núcleo.` }),
+    el('li', { texto: `Una por parcela y ${tope} como mucho en todo el reino.` }),
+    el('li', { texto: `La soldada cuesta ${soldada} por minuto. Sin pagarla se queda desabastecida: sigue en pie, pero deja de valer.` })
+  ]))
+  caja.appendChild(el('button', {
+    clase: 'btn btn-piedra', type: 'button', texto: `${d.icono} Ver la avanzadilla en el taller`,
+    estilo: { minHeight: '48px', width: '100%', marginTop: '8px' },
+    onclick: () => { categoria = 'defensa'; if (laHoja && laHoja.navegar) laHoja.navegar('construir'); else { seccion = 'construir'; pintarSeccion() } }
+  }))
   return caja
 }
 
@@ -1293,6 +1600,9 @@ function moverFantasma (x, z) {
   puesta.x = x; puesta.z = z
   puesta.valido = v.ok
   puesta.motivo = v.motivo
+  puesta.causa = v.causa || ''
+  puesta.pista = v.pista || ''
+  puesta.parcela = v.parcela || null
   const d = def(puesta.tipo)
   events.emit(EV.BUILD_GHOST, {
     tipo: puesta.tipo, x, z, rot: puesta.rot, ancho: d.ancho, alto: d.alto,
@@ -1313,9 +1623,17 @@ function sitioLibre (tipo, x, z) {
   const d = def(tipo)
   if (!d) return { ok: false, motivo: 'Aquí no' }
   const v = simValidar(tipo, x, z)
-  if (v?.ok) return { ok: true, motivo: '' }
+  if (v?.ok) return { ok: true, motivo: '', causa: '' }
+  // El candado del territorio no puede quedarse en "todavía no es tuyo": lo útil
+  // es CÓMO se abre esa linde, que es justo lo que el jugador no sabe.
+  if (v && v.causa === 'territorio') {
+    const p = parcelaDe(x, z)
+    return { ok: false, causa: 'territorio', motivo: v.motivo, pista: comoConseguirParcela(p && p.id), parcela: p && p.id }
+  }
+  if (v && v.causa === 'tope') return { ok: false, causa: v.causa, motivo: v.motivo }
   if (!dentro(x, z) || !dentro(x + d.ancho - 1, z + d.alto - 1)) return { ok: false, motivo: 'Se sale del terreno' }
   if (!huecoLibre(estado(), x, z, d.ancho, d.alto)) return { ok: false, motivo: 'Aquí ya hay algo' }
+  if (v && !v.ok && v.causa === 'sitio') return { ok: false, causa: 'sitio', motivo: v.motivo }
   return { ok: true, motivo: '' }
 }
 
@@ -1371,12 +1689,17 @@ function construirAqui () {
   if (puesta.encadena) { encolar(puesta.x, puesta.z); return }   // los muros van por cola
 
   const ev = evaluar(puesta.tipo)
-  if (!ev.ok) { toast(ev.motivo, 'mal'); return }
+  // Manos ocupadas o caja floja no son un "no": es un "ahora no", y para eso
+  // está la cola. Cualquier otro motivo (edad, requisitos, tope) sí frena.
+  const aCola = !ev.ok && (ev.causa === 'obras' || ev.causa === 'recursos')
+  if (!ev.ok && !aCola) { toast(ev.motivo, 'mal'); return }
 
   const b = simColocar(puesta.tipo, puesta.x, puesta.z, puesta.rot)
   if (!b) return
   puesta.puestos++
-  toast(`${def(puesta.tipo).icono} ${ANIMOS[Math.floor(Math.random() * ANIMOS.length)]}`, 'bien')
+  // Si ha entrado en la cola, el aviso ya lo ha dado la simulación con su puesto
+  // y su motivo: repetirlo aquí sería gritar dos veces lo mismo.
+  if (!aCola) toast(`${def(puesta.tipo).icono} ${ANIMOS[Math.floor(Math.random() * ANIMOS.length)]}`, 'bien')
   salirDeColocacion(true)
 }
 
@@ -1453,8 +1776,19 @@ function crearBarra () {
   pista.append(pistaTxt, listo)
   caja.appendChild(pista)
 
+  // el candado del territorio, con el plan para abrirlo y un atajo al mapa de lindes
+  const aviso = el('div', { clase: 'pequeño', estilo: { display: 'none', gap: '8px', alignItems: 'center', marginTop: '8px' } })
+  const avisoTxt = el('span', { clase: 'crece' })
+  const avisoBtn = el('button', {
+    clase: 'btn btn-fantasma', type: 'button', texto: '🚩 Territorio',
+    estilo: { minHeight: '44px', flex: 'none' },
+    onclick: () => { salirDeColocacion(true); abrir('territorio') }
+  })
+  aviso.append(avisoTxt, avisoBtn)
+  caja.appendChild(aviso)
+
   raiz.appendChild(caja)
-  barra = { caja, estadoTxt, casillaTxt, confirmarBtn, pistaTxt, costeTxt, costeUno, firmaCoste: null }
+  barra = { caja, estadoTxt, casillaTxt, confirmarBtn, pistaTxt, costeTxt, costeUno, firmaCoste: null, aviso, avisoTxt }
   refrescarBarra()
 }
 
@@ -1467,18 +1801,21 @@ function refrescarBarra () {
   if (!barra || !puesta) return
   const sinSitio = puesta.x == null
   const ev = evaluar(puesta.tipo)
-  const enEspera = ev.causa === 'obras' && puesta.encadena     // los muros esperan en cola; lo demás, no
+  // Todo lo que solo falla por manos o por caja se puede dejar encargado.
+  const enEspera = !ev.ok && (ev.causa === 'obras' || ev.causa === 'recursos')
   const puedeYa = puesta.valido && (ev.ok || enEspera)
 
   const texto = sinSitio
     ? '👆 Toca la aldea para colocarlo'
     : !puesta.valido
-        ? `⛔ ${puesta.motivo}`
+        ? `${puesta.causa === 'territorio' ? '🔒' : '⛔'} ${puesta.motivo}`
         : ev.ok
           ? '✅ Aquí cabe'
           : ev.causa === 'obras'
-            ? (enEspera ? '⏳ Entra en cola: los constructores están liados' : '⏳ Constructores ocupados: termina o acelera una obra')
-            : `⛔ ${ev.motivo}`
+            ? '⏳ Constructores liados: queda encargado y entra solo'
+            : ev.causa === 'recursos'
+              ? `⏳ ${ev.motivo}: queda encargado y empieza al tenerlo`
+              : `⛔ ${ev.motivo}`
   if (barra.estadoTxt.textContent !== texto) barra.estadoTxt.textContent = texto
   barra.estadoTxt.style.color = sinSitio ? '' : (puesta.valido && ev.ok) ? 'var(--verde-oscuro)' : puedeYa ? 'var(--madera)' : 'var(--rojo)'
 
@@ -1489,8 +1826,17 @@ function refrescarBarra () {
   const casilla = sinSitio ? '' : `Casilla ${puesta.x}, ${puesta.z}${puesta.rot ? ` · girado ${puesta.rot * 90}°` : ''}`
   if (barra.casillaTxt.textContent !== casilla) barra.casillaTxt.textContent = casilla
 
+  // tierra que no es tuya: se dice cómo se consigue, no solo que no se puede
+  if (barra.aviso) {
+    const hayPista = !sinSitio && puesta.causa === 'territorio' && !!puesta.pista
+    barra.aviso.style.display = hayPista ? 'flex' : 'none'
+    if (hayPista && barra.avisoTxt.textContent !== puesta.pista) barra.avisoTxt.textContent = puesta.pista
+  }
+
   barra.confirmarBtn.disabled = !puedeYa
-  const txtBoton = puesta.encadena ? (puesta.cola.length ? 'Añadir tramo' : 'Poner tramo') : 'Construir aquí'
+  const txtBoton = puesta.encadena
+    ? (puesta.cola.length ? 'Añadir tramo' : 'Poner tramo')
+    : enEspera ? 'Dejar encargado' : 'Construir aquí'
   if (barra.confirmarBtn.textContent !== txtBoton) barra.confirmarBtn.textContent = txtBoton
 
   if (puesta.encadena && barra.pistaTxt) {
@@ -1516,6 +1862,7 @@ export function init () {
     if (!cual) { cerrar(); return }
     if (cual === 'construir' || cual === 'taller') { salirDeColocacion(true); abrir(p?.datos?.vista || 'construir') }
     else if (cual === 'mejorar' || cual === 'mejoras') { salirDeColocacion(true); abrir('mejorar') }
+    else if (cual === 'territorio' || cual === 'parcelas') { salirDeColocacion(true); abrir('territorio') }
     else if (cual === 'investigar' || cual === 'investigacion') { salirDeColocacion(true); abrir('investigar') }
     else cerrar()                             // manda otro panel: quítate de en medio
   })
@@ -1541,7 +1888,8 @@ export function init () {
 
   // cambios de fondo: aquí sí hay que repintar la lista entera
   for (const ev of [EV.BUILD_COMPLETED, EV.BUILD_UPGRADED, EV.BUILD_DEMOLISHED, EV.BUILD_PLACED,
-    EV.TECH_RESEARCHED, EV.AGE_ADVANCED, EV.LEVEL_UP]) {
+    EV.TECH_RESEARCHED, EV.AGE_ADVANCED, EV.LEVEL_UP,
+    EV.TERRITORIO_DISPONIBLE, EV.TERRITORIO_DESBLOQUEADO]) {
     events.on(ev, () => reconstruir())
   }
 

@@ -71,14 +71,92 @@ const geo = (clave, crear) => {
 export const G = {
   get caja () { return geo('caja', () => new THREE.BoxGeometry(1, 1, 1)) },
   get cono () { return geo('cono', () => new THREE.ConeGeometry(0.5, 1, 4)) },          // pirámide: tejado
+  /**
+   * Pirámide de base CUADRADA y alineada con los ejes (el cono de 4 lados nace
+   * girado 45°). Así se puede escalar en X y en Z por separado y sale un tejado
+   * a cuatro aguas de verdad; girando el objeto en vez de la geometría salía un
+   * rombo escorado, porque la escala se aplica antes que el giro.
+   */
+  get piramide () {
+    return geo('piramide', () => {
+      const g = new THREE.ConeGeometry(0.5, 1, 4)
+      g.rotateY(Math.PI / 4)
+      return g
+    })
+  },
   get cono6 () { return geo('cono6', () => new THREE.ConeGeometry(0.5, 1, 6)) },
   get cono8 () { return geo('cono8', () => new THREE.ConeGeometry(0.5, 1, 8)) },
   get cilindro () { return geo('cil', () => new THREE.CylinderGeometry(0.5, 0.5, 1, 8)) },
   get cilindro6 () { return geo('cil6', () => new THREE.CylinderGeometry(0.5, 0.5, 1, 6)) },
+  /** Torreones, pozos y chimeneas: con 12 caras el cilindro ya se lee redondo. */
+  get cilindro12 () { return geo('cil12', () => new THREE.CylinderGeometry(0.5, 0.5, 1, 12)) },
+  /** Fuste que se estrecha: molinos y torres con entasis. */
+  get fuste12 () { return geo('fus12', () => new THREE.CylinderGeometry(0.42, 0.5, 1, 12)) },
   get tronco () { return geo('troncoG', () => new THREE.CylinderGeometry(0.35, 0.5, 1, 6)) },
   get esfera () { return geo('esf', () => new THREE.IcosahedronGeometry(0.5, 0)) },     // roca low-poly
   get esfera1 () { return geo('esf1', () => new THREE.IcosahedronGeometry(0.5, 1)) },
-  get plano () { return geo('plano', () => new THREE.PlaneGeometry(1, 1)) }
+  get plano () { return geo('plano', () => new THREE.PlaneGeometry(1, 1)) },
+  /**
+   * Medio cilindro tumbado: vale a la vez de ARCO DE MEDIO PUNTO (puertas y
+   * ventanas) y de BÓVEDA DE CAÑÓN (el tejado del almacén). Unidad: 1 de luz,
+   * 0.5 de flecha, 1 de grosor; el arranque del arco está en y=0.
+   */
+  get arco () {
+    return geo('arco', () => {
+      const g = new THREE.CylinderGeometry(0.5, 0.5, 1, 10, 1, false, 0, Math.PI)
+      g.rotateZ(Math.PI / 2)      // la media luna queda mirando hacia arriba
+      g.rotateY(Math.PI / 2)      // y el eje del cilindro pasa a ser Z (el grosor)
+      return g
+    })
+  },
+  /** Media esfera facetada: cúpulas de cobre y remates de torre. */
+  get cupula () { return geo('cupula', () => new THREE.SphereGeometry(0.5, 10, 4, 0, Math.PI * 2, 0, Math.PI / 2)) }
+}
+
+/**
+ * CAJA CON LOS CANTOS VERTICALES ACHAFLANADOS.
+ *
+ * Es el cambio que más se nota a simple vista: un edificio hecho de cajas
+ * peladas se ve tosco, y el mismo edificio con las cuatro aristas cortadas se
+ * ve "modelado" sin perder ni una cara plana. Cuesta 28 triángulos en vez de
+ * 12, así que se reserva para los VOLÚMENES GRANDES (muros, zócalos, torres);
+ * los detallitos siguen con `G.caja`.
+ *
+ * La geometría se genera al tamaño real (no se escala) para que el chaflán
+ * mida lo mismo en los tres ejes, y se cachea por tamaño: como los modelos se
+ * montan una vez por tipo+nivel, la caché se llena enseguida y no crece más.
+ */
+const cacheChaflan = new Map()
+
+export function geoCajaCh (sx, sy, sz, ch = 0.08) {
+  const c = Math.max(0.02, Math.min(ch, sx * 0.32, sz * 0.32))
+  const k = `${sx.toFixed(2)}|${sy.toFixed(2)}|${sz.toFixed(2)}|${c.toFixed(3)}`
+  const hecha = cacheChaflan.get(k)
+  if (hecha) return hecha
+  // Cada tamaño genera su geometría, y los tamaños cambian con el nivel. Como
+  // los modelos ya se cachean por tipo+nivel, la caché se estabiliza sola; el
+  // tope es solo un seguro para que un móvil no acumule memoria sin límite.
+  if (cacheChaflan.size > 700) {
+    for (const g of cacheChaflan.values()) g.dispose?.()
+    cacheChaflan.clear()
+  }
+  const hx = sx / 2; const hz = sz / 2
+  const s = new THREE.Shape()
+  s.moveTo(-hx + c, -hz)
+  s.lineTo(hx - c, -hz)
+  s.lineTo(hx, -hz + c)
+  s.lineTo(hx, hz - c)
+  s.lineTo(hx - c, hz)
+  s.lineTo(-hx + c, hz)
+  s.lineTo(-hx, hz - c)
+  s.lineTo(-hx, -hz + c)
+  s.closePath()
+  const g = new THREE.ExtrudeGeometry(s, { depth: sy, bevelEnabled: false, curveSegments: 1, steps: 1 })
+  g.rotateX(-Math.PI / 2)      // la extrusión sale en Z; la queremos en Y
+  g.translate(0, -sy / 2, 0)   // centrada en el origen, como el resto de geometrías
+  g.computeVertexNormals()
+  cacheChaflan.set(k, g)
+  return g
 }
 
 /**

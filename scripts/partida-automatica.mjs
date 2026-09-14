@@ -127,6 +127,7 @@ const Ciencia = await import('../src/sim/research.js')
 const Combate = await import(urlCombate)
 const Mapa = await import('../src/world/map.js')
 const Enemigos = await import('../src/world/enemies.js')
+const Imperio = await import('../src/world/imperio.js')
 const Expediciones = await import('../src/world/expeditions.js')
 const Encargos = await import('../src/sim/quests.js')
 
@@ -144,6 +145,9 @@ const M = {
   segundosJugados: 0,
   segundosAytoEnObra: 0,
   asaltos: [],
+  conquistas: [],       // { cuando, dia, plaza, total }
+  perdidas: [],         // plazas que te han quitado
+  imperio: [],          // foto del imperio al cerrar cada sesión
   defensas: [],
   toasts: 0,
   rendimiento: { ticks: 0, ms: 0, picoMs: 0, ticksLlenos: 0, msLlenos: 0 },
@@ -326,7 +330,8 @@ async function arrancar () {
   const secuencia = [
     ['sim/resources', Recursos], ['sim/buildings', Edificios], ['sim/villagers', Aldeanos],
     ['sim/army', Ejercito], ['sim/research', Ciencia], ['sim/combat', Combate],
-    ['world/map', Mapa], ['world/enemies', Enemigos], ['world/expeditions', Expediciones],
+    ['world/map', Mapa], ['world/enemies', Enemigos], ['world/imperio', Imperio],
+    ['world/expeditions', Expediciones],
     ['sim/quests', Encargos]
   ]
   for (const [nombre, mod] of secuencia) {
@@ -496,10 +501,12 @@ let cursorDeseo = 0
 // constructores están liados deja encargado lo siguiente y se va. Se le permiten
 // hasta CUPO_COLA encargos esperando, que es lo que cabe en una cabeza.
 // Si la versión del juego no tiene cola (medición "antes"), esto no hace nada.
-const CUPO_COLA = 6
+const CUPO_COLA = 18
 const hayCola = typeof Edificios.encolar === 'function'
 const enEspera = () => (hayCola ? Edificios.obrasEnEspera().length : 0)
-const aceptable = (chk) => chk.ok || (hayCola && chk.causa === 'obras')
+// Con cola se encarga también lo que hoy no se puede pagar: el coste se cobra al
+// empezar la obra, así que dejarlo apuntado es justo lo que haría el jugador.
+const aceptable = (chk) => chk.ok || (hayCola && (chk.causa === 'obras' || chk.causa === 'recursos'))
 
 function fasesConstruccion () {
   const reserva = ahorroEdad()
@@ -529,11 +536,11 @@ function fasesConstruccion () {
     if (cuenta(w.tipo) < w.cantidad) {
       const coste = d.coste(1)
       const chk = Edificios.puedeConstruir(w.tipo)
+      // el recurso que faltaba se anota igual, aunque el encargo entre en cola
+      if (chk.causa === 'recursos') for (const r of Object.keys(Recursos.faltaPara(coste))) faltas[r] = (faltas[r] || 0) + 1
       if (aceptable(chk) && permiteGasto(coste, reserva)) {
         const p = (w.tipo === 'muralla' || w.tipo === 'puerta') ? huecoMuralla(w.tipo) : buscarHueco(w.tipo)
         if (p && Edificios.colocar(w.tipo, p.x, p.z)) hecho = true
-      } else if (!chk.ok && chk.motivo.startsWith('Te falta')) {
-        for (const r of Object.keys(Recursos.faltaPara(coste))) faltas[r] = (faltas[r] || 0) + 1
       }
     }
     if (!hecho) {
@@ -543,10 +550,8 @@ function fasesConstruccion () {
       for (const b of candidatos) {
         const coste = d.coste(b.nivel + 1)
         const chk = Edificios.puedeMejorar(b.id)
-        if (!aceptable(chk)) {
-          if (chk.motivo.startsWith('Te falta')) for (const r of Object.keys(Recursos.faltaPara(coste))) faltas[r] = (faltas[r] || 0) + 1
-          continue
-        }
+        if (chk.causa === 'recursos') for (const r of Object.keys(Recursos.faltaPara(coste))) faltas[r] = (faltas[r] || 0) + 1
+        if (!aceptable(chk)) continue
         if (!permiteGasto(coste, reserva)) continue
         if (Edificios.mejorar(b.id)) { hecho = true; break }
       }
@@ -669,6 +674,48 @@ function baseDeCombate (enemigo) {
   }
 }
 
+events.on(EV.PLAZA_CONQUISTADA, (p) => {
+  M.conquistas.push({ cuando: etiquetaMomento(), dia: diaJuego(), plaza: p.plaza.nombre, x: p.x, y: p.y, total: p.total })
+})
+events.on(EV.PLAZA_PERDIDA, (p) => {
+  M.perdidas.push({ cuando: etiquetaMomento(), dia: diaJuego(), plaza: p.plaza.nombre, señor: p.nombreSeñor })
+})
+
+/**
+ * Lo que haría un jugador con su imperio: reinvertir en las plazas (mejorarlas)
+ * y dejar tropa de guarnición en la que peor pinta tenga.
+ */
+let ultimoImperio = 0
+function faseImperio () {
+  if (VT - ultimoImperio < 15 * 60000) return
+  ultimoImperio = VT
+  const mias = Imperio.plazas()
+  if (!mias.length) return
+
+  // 1) mejorar la plaza más barata que se pueda pagar: es la reinversión obvia
+  const mejorables = mias
+    .map(p => ({ p, coste: Imperio.costeMejora(p.x, p.y) }))
+    .filter(m => m.coste && Recursos.puedePagar(m.coste))
+    .sort((a, b) => (a.p.nivel - b.p.nivel))
+  if (mejorables.length) {
+    const r = Imperio.mejorarPlaza(mejorables[0].p.x, mejorables[0].p.y)
+    if (r.ok) actuo()
+  }
+
+  // 2) guarnecer la plaza más floja con la tropa que sobra en casa
+  const tropas = Ejercito.tropasDisponibles()
+  const total = Object.values(tropas).reduce((a, b) => a + b, 0)
+  if (total >= 10) {
+    const floja = mias.slice().sort((a, b) => Imperio.poderPlaza(a) - Imperio.poderPlaza(b))[0]
+    const envio = {}
+    for (const [t, n] of Object.entries(tropas)) {
+      const cede = Math.floor(n * 0.10)
+      if (cede > 0) envio[t] = cede
+    }
+    if (Object.keys(envio).length && Imperio.reforzarPlaza(floja.x, floja.y, envio).ok) actuo()
+  }
+}
+
 let ultimoAsalto = 0
 function faseAsalto () {
   if (VT - ultimoAsalto < 25 * 60000) return        // no se asalta cada dos minutos
@@ -678,8 +725,10 @@ function faseAsalto () {
   const poder = Ejercito.poderMilitar()
   const opciones = Enemigos.emparejar(Enemigos.poderJugadorActual())
   if (!opciones.length) return
-  // como un jugador: el cómodo si voy justo, el igualado si voy sobrado
-  const elegido = opciones.find(o => o.etiqueta === 'igualado') || opciones[0]
+  // como un jugador: primero se remata al vasallo (su plaza pasa a ser tuya),
+  // y si no hay ninguno a tiro, el igualado o lo que haya.
+  const elegido = opciones.find(o => o.paso === 'conquistar' && o.ratio <= 1.15) ||
+    opciones.find(o => o.etiqueta === 'igualado') || opciones[0]
   const base = baseDeCombate(elegido.enemigo)
   if (!base.buildings.length) return
   const antes = { ...game.state.recursos }
@@ -695,6 +744,11 @@ function faseAsalto () {
     poderJugador: poder, poderRival: elegido.enemigo.poder,
     enviadas: total, victoria: r.victoria, estrellas: r.estrellas,
     pct: r.porcentajeDestruido, bajas, supervivientes: r.supervivientes,
+    // `bajas` son ya los MUERTOS de verdad; el resto de los que cayeron en el
+    // campo vuelven heridos y se curan solos en el cuartel (ver sim/army.js).
+    cayeron: r.cayeron || bajas, heridos: r.heridos || 0,
+    enfermeria: Object.values(game.state.ejercito?.heridos || {}).reduce((a, b) => a + b, 0),
+    segundosCuracion: Math.max(0, Math.round(((game.state.ejercito?.curacion?.fin || 0) - VT) / 1000)),
     botin: { ...r.botin }, duracion: r.duracion,
     ganancia: RECURSOS.reduce((a, k) => a + (game.state.recursos[k] - antes[k]), 0),
     costeReentreno: costeDeTropas(r.bajas),
@@ -733,6 +787,7 @@ function decidir () {
     faseEjercito()
     faseExpedicion()
     faseAsalto()
+    faseImperio()
     // reclamar encargos cumplidos (es lo primero que hace cualquiera)
     for (const q of Encargos.activas()) if (q.listo) { Encargos.reclamar(q.id); actuo() }
   } catch (e) {
@@ -791,6 +846,13 @@ async function jugarPartida () {
       horaActual += ses.minutos / 60
       save.guardar()
 
+      const resImp = Imperio.resumenImperio()
+      M.imperio.push({
+        dia, sesion: s + 1, plazas: resImp.plazas, nivelMedio: resImp.nivelMedio,
+        produccionImperio: resImp.produccionTotal, produccionAldea: resImp.produccionAldea,
+        pctSobreAldea: resImp.porcentajeSobreAldea, vasallos: resImp.vasallos,
+        alAlcance: resImp.alAlcance, fueraDeAlcance: resImp.fueraDeAlcance, puesto: resImp.puesto
+      })
       M.sesiones.push({
         dia, sesion: s + 1, horas: +horasJuego().toFixed(2),
         edad: game.state.age, ayto: aytoNivel(),
@@ -1087,6 +1149,33 @@ function resumenFinal () {
       minutosJugandoConElAytoEnAndamios: +(M.segundosAytoEnObra / 60).toFixed(1),
       pctDelTiempoJugado: +(M.segundosAytoEnObra / Math.max(1, M.segundosJugados) * 100).toFixed(1)
     },
+    imperio: (() => {
+      const r = Imperio.resumenImperio()
+      const comarcas = Enemigos.todosLosRivales().length
+      return {
+        plazasConquistadas: r.plazas,
+        conquistasTotales: r.conquistadas,
+        plazasPerdidas: r.perdidas,
+        nivelMedioPlazas: r.nivelMedio,
+        vasallosQuePagan: r.vasallos,
+        produccionImperioMin: r.produccion,
+        produccionImperioTotal: r.produccionTotal,
+        produccionAldeaTotal: r.produccionAldea,
+        pctImperioSobreAldea: r.porcentajeSobreAldea,
+        tributoDiaTotal: r.tributoDiaTotal,
+        guarnicionTotal: r.guarnicion,
+        objetivosAlAlcance: r.alAlcance,
+        objetivosFueraDeAlcance: r.fueraDeAlcance,
+        // ¿se agota el mapa? comarcas con señor frente a las que ya son tuyas
+        comarcasDelValle: comarcas,
+        pctDelValleConquistado: comarcas ? Math.round((r.plazas / comarcas) * 100) : 0,
+        puestoEnLaTablaDePoder: r.puesto,
+        tablaDePoder: r.señores.map(t => `${t.eresTu ? '★ ' : ''}${t.nombre}: ${t.plazas} plazas, poder ${t.poder}`),
+        porSesion: M.imperio.filter((_, i) => i % 9 === 0),
+        conquistasPorDia: M.conquistas.map(c => `d${c.dia} ${c.plaza}`),
+        quitadas: M.perdidas.map(c => `d${c.dia} ${c.plaza} (${c.señor || 'nadie'})`)
+      }
+    })(),
     eventos: informeEventos(),
     toasts: M.toasts,
     fallos: FALLOS.length,
@@ -1106,7 +1195,7 @@ try {
   invariantesLentos()
 
   const resumen = resumenFinal()
-  const salida = { resumen, ticksLentos: M.ticksLentos.sort((a,b)=>b.ms-a.ms).slice(0,15), hitos: M.hitos, sesiones: M.sesiones, asaltos: M.asaltos, laboratorio: M.laboratorio, saveLoad: M.saveLoad, offline: M.offline, offline10h: M.offline10h, fallos: FALLOS, auditoria: M.auditoriaFinal }
+  const salida = { resumen, ticksLentos: M.ticksLentos.sort((a,b)=>b.ms-a.ms).slice(0,15), hitos: M.hitos, sesiones: M.sesiones, asaltos: M.asaltos, imperio: M.imperio, conquistas: M.conquistas, perdidas: M.perdidas, laboratorio: M.laboratorio, saveLoad: M.saveLoad, offline: M.offline, offline10h: M.offline10h, fallos: FALLOS, auditoria: M.auditoriaFinal }
   writeFileSync(SALIDA_JSON, JSON.stringify(salida, null, 1))
 
   console.log('\n───────────────────── RESUMEN ─────────────────────')

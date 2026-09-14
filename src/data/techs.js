@@ -461,7 +461,7 @@ export const EDADES = {
     nombre: 'Edad de los Castillos',
     icono: '🏰',
     requiere: {
-      ayuntamiento: 8, mercado: 5, herreria: 5, mina_oro: 4, almacen: 6, cuartel: 5, arqueria: 3, torre_vigia: 4,
+      ayuntamiento: 9, mercado: 5, herreria: 5, mina_oro: 4, almacen: 6, cuartel: 5, arqueria: 3, torre_vigia: 4,
       tech: ['carretillas', 'arado_pesado', 'cantero_mayor', 'polea_grua', 'armadura_escamada']
     },
     coste: { madera: 60000, piedra: 50000, comida: 18000, oro: 7000 },

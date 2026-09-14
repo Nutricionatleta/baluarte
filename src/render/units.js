@@ -1536,26 +1536,40 @@ function repasarVisibles (forzar = false) {
 
 const guarnicion = []
 const banderas = []
+let estandarte = null                 // el poste con el paño, en el punto de reunión
+let reunion = { x: 0, z: 0 }          // casilla del estandarte, según sim/army.js
+let moviendoEstandarte = false        // esperando a que el jugador diga dónde
+let modArmy = null                    // sim/army.js, cargado de forma tolerante
 const ORDEN_FORMACION = ['lancero', 'espadachin', 'arquero', 'ballestero', 'monje', 'explorador', 'jinete', 'caballero', 'ariete', 'catapulta']
 const TOPE_GUARNICION = { bajo: 18, medio: 34, alto: 48 }
 
-/** Poste con paño: marca dónde acampa la tropa y de quién es. */
-function crearEstandarteTropa (bando) {
+/**
+ * EL ESTANDARTE DE BATALLA. No es un adorno: es el mando con el que el jugador
+ * mueve su ejército por la aldea, así que tiene que verse desde lejos y cantar
+ * que se puede tocar. Debajo lleva su casilla marcada, como el fantasma de obra.
+ */
+function crearEstandarteBatalla () {
   const g = new THREE.Group()
-  g.add(pieza(G.cilindro6, mat(PALETA.madera), { y: 0.55, sx: 0.05, sy: 1.1, sz: 0.05 }))
-  g.add(pieza(G.cono8, mat(PALETA.oro), { y: 1.16, sx: 0.09, sy: 0.14, sz: 0.09 }))
-  const pano = pieza(G.caja, mat(bando === 'enemigo' ? PALETA.enemigo : PALETA.estandarte),
-    { x: 0.16, y: 0.88, sx: 0.32, sy: 0.4, sz: 0.02 })
+  g.name = 'estandarte-batalla'
+  const huella = pieza(G.caja, mat(PALETA.estandarte, { transparente: 0.5 }),
+    { y: 0.03, sx: 0.94, sy: 0.05, sz: 0.94, sombra: false })
+  huella.name = 'huella'
+  g.add(huella)
+  g.add(pieza(G.cilindro, mat(PALETA.piedraOscura), { y: 0.1, sx: 0.44, sy: 0.2, sz: 0.44 }))
+  g.add(pieza(G.cilindro6, mat(PALETA.madera), { y: 0.95, sx: 0.075, sy: 1.7, sz: 0.075 }))
+  g.add(pieza(G.cono8, mat(PALETA.oro), { y: 1.86, sx: 0.14, sy: 0.24, sz: 0.14 }))
+  const pano = pieza(G.caja, mat(PALETA.estandarte), { x: 0.3, y: 1.42, sx: 0.6, sy: 0.62, sz: 0.03 })
   pano.name = 'pano'
   g.add(pano)
-  g.add(pieza(G.caja, mat(PALETA.oro), { x: 0.16, y: 0.88, z: 0.015, sx: 0.1, sy: 0.22, sz: 0.01 }))
-  banderas.push({ malla: pano, fase: Math.random() * TAU })
+  g.add(pieza(G.caja, mat(PALETA.oro), { x: 0.3, y: 1.42, z: 0.022, sx: 0.2, sy: 0.34, sz: 0.012 }))
+  banderas.push({ malla: pano, fase: 0 })
   return g
 }
 
 function limpiarGuarnicion () {
   for (const f of guarnicion) olvidar(f)
   guarnicion.length = 0
+  estandarte = null
   if (raizTropa) {
     for (let i = raizTropa.children.length - 1; i >= 0; i--) {
       const h = raizTropa.children[i]
@@ -1565,62 +1579,52 @@ function limpiarGuarnicion () {
   banderas.length = 0
 }
 
-/** Dónde forma la tropa: delante del cuartel, y si no hay, del ayuntamiento. */
-function plazaDeArmas () {
-  const bs = game.state.buildings || []
-  const cuartel = bs.find(b => b.tipo === 'cuartel' && !b.enObra) ||
-    bs.find(b => ['castillo', 'establo', 'arqueria', 'taller_asedio'].includes(b.tipo) && !b.enObra) ||
-    bs.find(b => b.tipo === 'ayuntamiento')
-  if (!cuartel) return { x: (CONFIG.GRID - 1) / 2, z: (CONFIG.GRID - 1) / 2 + 3 }
-  const c = centroDe(cuartel)
-  const fondo = (cuartel.alto ?? 2) / 2
-  const z = c.z + fondo + 1.4
-  return { x: c.x, z: z < CONFIG.GRID - 2 ? z : c.z - fondo - 1.4 }
-}
-
 /**
  * Coloca la tropa entrenada formando junto al cuartel, con estandarte.
  * @param {{[tipo:string]: number}} [tropas] por defecto, las del estado.
  */
 export function mostrarGuarnicion (tropas) {
   if (!ctx.listo) { cuandoListo(() => mostrarGuarnicion(tropas)); return }
-  const lista = tropas || (game.state.ejercito && game.state.ejercito.tropas) || {}
   limpiarGuarnicion()
-
-  const plaza = plazaDeArmas()
   const tope = TOPE_GUARNICION[ctx.calidad] || TOPE_GUARNICION.medio
-  // se forma por tipos, en el orden de siempre: infantería delante, asedio detrás
-  const cola = []
-  for (const tipo of ORDEN_FORMACION) {
-    const n = Math.max(0, Math.floor(lista[tipo] || 0))
-    for (let i = 0; i < n && cola.length < tope; i++) cola.push(tipo)
-  }
-  if (!cola.length) return
 
-  const porFila = Math.min(6, Math.max(3, Math.ceil(Math.sqrt(cola.length))))
-  const pasoX = 0.78
-  const pasoZ = 0.78
-  for (let i = 0; i < cola.length; i++) {
-    const tipo = cola[i]
-    const fila = Math.floor(i / porFila)
-    const col = i % porFila
-    const enFila = Math.min(porFila, cola.length - fila * porFila)
-    const gx = plaza.x + (col - (enFila - 1) / 2) * pasoX
-    const gz = plaza.z + fila * pasoZ
-    const fig = crearUnidad(tipo, { bando: 'jugador', semilla: i * 37 + 11 })
+  // DÓNDE se planta cada soldado ya NO lo decide el render. sim/army.js lleva el
+  // mapa del suelo (edificios y puertas de aldeanos) y devuelve casillas enteras
+  // y libres: por decidirlo aquí a ojo, la tropa aparecía dentro del cuartel y
+  // encima de la casilla por la que entran y salen los aldeanos.
+  const plan = modArmy && typeof modArmy.formacionReunion === 'function'
+    ? modArmy.formacionReunion(tropas, { tope })
+    : null
+  if (!plan) return
+  reunion = { x: plan.reunion.x, z: plan.reunion.z }
+
+  for (let i = 0; i < plan.puestos.length; i++) {
+    const q = plan.puestos[i]
+    const fig = crearUnidad(q.tipo, { bando: 'jugador', semilla: i * 37 + 11 })
     const f = animar(fig, { estado: 'parado' })
     f.siempreVisible = true
-    const w = gridAMundo(gx, gz)
-    plantar(f, w.x, sueloEn(gx, gz), w.z, 0.02 * ((i % 3) - 1))
+    const w = gridAMundo(q.x, q.z)
+    plantar(f, w.x, sueloEn(q.x, q.z), w.z, 0.02 * ((i % 3) - 1))
     ;(raizTropa || ctx.raizAldea).add(fig)
     guarnicion.push(f)
   }
-  // estandarte a un lado de la formación
-  const wE = gridAMundo(plaza.x - (porFila / 2) * pasoX - 0.5, plaza.z)
-  const est = crearEstandarteTropa('jugador')
-  est.position.set(wE.x, sueloEn(plaza.x, plaza.z), wE.z)
-  ;(raizTropa || ctx.raizAldea).add(est)
+
+  // el estandarte va SIEMPRE, aunque no haya tropa: es el mando del ejército
+  const e = plan.estandarte || plan.reunion
+  const wE = gridAMundo(e.x, e.z)
+  estandarte = crearEstandarteBatalla()
+  estandarte.position.set(wE.x, sueloEn(e.x, e.z), wE.z)
+  ;(raizTropa || ctx.raizAldea).add(estandarte)
+  marcarEstandarte(moviendoEstandarte)
   aplicarTope()
+}
+
+/** El estandarte late en dorado mientras espera a que le digas dónde formar. */
+function marcarEstandarte (encendido) {
+  const huella = estandarte && estandarte.getObjectByName('huella')
+  if (!huella) return
+  huella.material = mat(encendido ? PALETA.oro : PALETA.estandarte, { transparente: encendido ? 0.75 : 0.5 })
+  huella.scale.set(encendido ? 1.5 : 0.94, 0.05, encendido ? 1.5 : 0.94)
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1766,19 +1770,70 @@ function avanzarBatalla (dt, t) {
     }
   }
 
-  // los caídos se desploman y se hunden
-  for (const f of batalla.actores) {
-    if (f.estado !== 'cayendo') continue
-    f.tCaida += dt
-    const k = Math.min(1, f.tCaida / 0.7)
-    f.raiz.rotation.z = k * 1.5
-    f.raiz.rotation.y = f.ang
-    f.salto = -k * 0.12
-    f.raiz.position.y = f.y + f.salto
-    if (f.tCaida > 2.4) f.raiz.visible = false
-  }
-
   if (bt > batalla.fin) limpiarBatalla()
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  ACTORES: figuras que otro módulo dirige (el campo de batalla en 3D)
+// ════════════════════════════════════════════════════════════════════════
+
+/**
+ * Una figura no la mueve siempre este módulo. En la batalla en 3D quien decide
+ * a dónde va cada soldado es render/battle.js, que conoce la crónica; aquí solo
+ * se presta el muñeco con sus animaciones y su desplome.
+ *
+ * @param {string} tipo unidad del catálogo
+ * @param {{bando?:'jugador'|'enemigo', semilla?:number, padre?:THREE.Object3D}} [o]
+ * @returns {{raiz:THREE.Group, x:number, y:number, z:number, viva:boolean,
+ *            plantar:Function, ir:Function, mirar:Function, estado:Function,
+ *            caer:Function, quitar:Function}}
+ */
+export function crearActor (tipo, o = {}) {
+  const fig = crearUnidad(tipo, { bando: o.bando, semilla: o.semilla })
+  const f = animar(fig, { estado: 'parado' })
+  f.siempreVisible = true          // el tope de figuras es para la aldea, no para la batalla
+  f.esActor = true
+  ;(o.padre || raizBatalla || ctx.raizAldea || ctx.scene).add(fig)
+  actores.push(f)
+  const mando = {
+    raiz: fig,
+    get x () { return f.x },
+    get y () { return f.y },
+    get z () { return f.z },
+    get viva () { return f.estado !== 'cayendo' },
+    get andando () { return f.tl < 1 },
+    plantar: (x, y, z, ang = 0) => plantar(f, x, y, z, ang),
+    ir: (x, y, z, dur) => { if (f.estado !== 'cayendo') caminarA(f, x, y, z, dur) },
+    mirar: (ang) => { f.angObj = ang },
+    estado: (e) => { if (f.estado !== 'cayendo') f.estado = e },
+    caer: () => { if (f.estado === 'cayendo') return; f.estado = 'cayendo'; f.tCaida = 0; f.tl = 1 },
+    quitar: () => {
+      const i = actores.indexOf(f)
+      if (i >= 0) actores.splice(i, 1)
+      olvidar(f)
+    }
+  }
+  return mando
+}
+
+const actores = []
+
+/** Recoge el escenario: se llama al salir de la batalla. */
+export function limpiarActores () {
+  for (const f of actores.splice(0)) olvidar(f)
+}
+
+/** El desplome del caído: vale para la escaramuza vieja y para los actores. */
+function desplomar (f, dt) {
+  f.tCaida = (f.tCaida || 0) + dt
+  const k = Math.min(1, f.tCaida / 0.7)
+  f.raiz.rotation.z = k * 1.5
+  f.raiz.rotation.y = f.ang
+  f.salto = -k * 0.12
+  f.raiz.position.y = f.y + f.salto
+  // el cadáver se queda un rato en el campo: parte de entender la batalla es
+  // ver dónde se amontonan los muertos
+  if (f.tCaida > 6) f.raiz.visible = false
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1792,6 +1847,7 @@ function frame (dt, t) {
   for (let i = 0; i < vivos.length; i++) {
     const f = vivos[i]
     if (f.oculto) continue          // fuera de cámara: ni se anima ni se dibuja
+    if (f.estado === 'cayendo') { desplomar(f, dt); continue }
     mover(f, dt)
     if (f.tEstado > 0) {
       f.tEstado -= dt
@@ -1870,10 +1926,37 @@ export function init () {
       if (typeof terreno.alturaEn === 'function') alturaTerreno = terreno.alturaEn
     } catch (e) { /* sin terreno: cota cero */ }
 
+    // sim/army.js decide dónde forma la tropa. Se pide con import() tolerante
+    // (los módulos se hablan por el bus): si no estuviera, no se pinta formación
+    // y el juego sigue, que es mejor que plantar soldados dentro de una casa.
+    try {
+      const army = await import('../sim/army.js')
+      if (typeof army.formacionReunion === 'function') modArmy = army
+    } catch (e) { console.warn('[units] sin sim/army: la tropa no forma', e) }
+
     for (const v of game.state.villagers || []) nacerAldeano(v)
     mostrarGuarnicion()
     onFrame(frame)
     ctx.unidades = API
+  })
+
+  // el estandarte se ha movido (lo mueve el jugador o le construyen encima)
+  events.on(EV.REUNION_CAMBIADA, () => mostrarGuarnicion())
+
+  // Mover el ejército: se toca el estandarte y luego la casilla de destino. Va
+  // por GRID_TAP porque el dedo lo gestiona scene.js; aquí solo se escucha.
+  events.on(EV.GRID_TAP, (p) => {
+    if (!p || !estandarte) return
+    if (!moviendoEstandarte) {
+      if (Math.max(Math.abs(p.x - reunion.x), Math.abs(p.z - reunion.z)) > 1) return
+      moviendoEstandarte = true
+      marcarEstandarte(true)
+      events.emit(EV.UI_TOAST, { texto: '🚩 Toca dónde quieres que forme tu tropa', tipo: 'info' })
+      return
+    }
+    moviendoEstandarte = false
+    marcarEstandarte(false)
+    if (modArmy && typeof modArmy.fijarReunion === 'function') modArmy.fijarReunion(p.x, p.z)
   })
 
   events.on(EV.VILLAGER_SPAWNED, (p) => {
@@ -1940,17 +2023,11 @@ export function init () {
     mostrarGuarnicion()
   })
 
-  // si la crónica del asalto trae sucesos, se cuenta en 3D
-  events.on(EV.RAID_RESOLVED, (p) => {
-    const log = p && p.log
-    if (Array.isArray(log) && log.length && typeof log[0] === 'object') reproducirBatalla(log, p.enemyBase)
-  })
-  events.on(EV.DEFENSE_RESOLVED, (p) => {
-    const log = p && p.log
-    if (Array.isArray(log) && log.length && typeof log[0] === 'object') reproducirBatalla(log, null)
-  })
+  // La batalla ya NO se cuenta aquí con muñecos de adorno: render/battle.js monta
+  // la base de verdad y dirige a los actores con la crónica en la mano.
+  // `reproducirBatalla` se queda como red de seguridad para quien la llame a mano.
 }
 
 /** API también en `ctx.unidades`, para que otros módulos de render la usen. */
-const API = { crearUnidad, mostrarGuarnicion, reproducirBatalla }
+const API = { crearUnidad, mostrarGuarnicion, reproducirBatalla, crearActor, limpiarActores }
 export default API

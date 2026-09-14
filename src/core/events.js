@@ -63,20 +63,33 @@ export const EV = {
   // --- ejército y combate ---
   UNIT_TRAINED: 'unit:trained',          // { tipo, cantidad }
   RAID_STARTED: 'raid:started',          // { enemyBase, ejercito }
-  RAID_RESOLVED: 'raid:resolved',        // { victoria, botin, bajas, log }
+  RAID_RESOLVED: 'raid:resolved',        // { victoria, botin, bajas (los MUERTOS), heridos (nº), heridosTropas, caidos, log }
   ATTACK_INCOMING: 'attack:incoming',    // { enemigo, llegaEn }
-  DEFENSE_RESOLVED: 'defense:resolved',  // { victoria, perdidas, log }
+  DEFENSE_RESOLVED: 'defense:resolved',  // { victoria, perdidas, log, heridos, heridosTropas, muertos }
   RAID_REQUESTED: 'raid:requested',      // { base, tropas, ladoEntrada, semilla } la UI pide asalto
   BATTLE_EVENT: 'battle:event',          // { suceso, resultado } cada paso de la crónica, en vivo
   BUILDINGS_DAMAGED: 'build:damaged',    // { daños:[{ id, hp, destruido }] } tras defender tu aldea
   SHIELD_STARTED: 'shield:started',      // { hasta, horas } escudo de protección tras una derrota
   DEFENSE_SCORED: 'defense:scored',      // { puntuacion, nota, consejos } lo fuerte que es tu aldea
+  TROPAS_HERIDAS: 'tropa:heridas',       // { tropas:{lancero:3}, total, fin } vuelven malheridos: están en la enfermería del cuartel
+  TROPAS_CURADAS: 'tropa:curadas',       // { tropas, total, motivo:'tiempo'|'recursos'|'gemas' } salen de la enfermería y vuelven a filas
+  REUNION_CAMBIADA: 'tropa:reunion',     // { x, z, ajustado } el estandarte de batalla se mueve: el render recoloca la formación
 
   // --- mundo y exploración ---
   SCOUT_SENT: 'scout:sent',              // { expedicion }
   SCOUT_RETURNED: 'scout:returned',      // { expedicion, hallazgo }
   WORLD_REVEALED: 'world:revealed',      // { tiles }
   WORLD_EVENT: 'world:event',            // { tipo, x, y, texto, caduca } pasa algo ahí fuera: caravana, bandidos, hallazgo…
+
+  // --- imperio (el mapa del mundo se conquista a manchas) ---
+  PLAZA_CONQUISTADA: 'imperio:plaza',      // { x, y, plaza, color, señorPrevio, eraDe, total, produccion, texto } esa comarca ya es tuya: el mapa 3D la pinta de tu color
+  PLAZA_PERDIDA: 'imperio:perdida',        // { x, y, plaza, señor, nombreSeñor, color, total, texto } te la han quitado: vuelve a la bandera del otro
+  IMPERIO_CAMBIADO: 'imperio:cambiado',    // { motivo, color, plazas:[{x,y,nivel,nombre,estado}], rivales:[{x,y,señor,color}], colores:{'x,y':color}, resumen } repinta las banderas del mapa
+
+  // --- territorio (el tablero crece por parcelas) ---
+  TERRITORIO_DESBLOQUEADO: 'territorio:desbloqueado', // { parcela, motivo:'conquista'|'exploracion'|'edad'|'inicio', origen, rect, centro } ya es tuyo: se abre la linde y la cámara lo enseña
+  TERRITORIO_DISPONIBLE: 'territorio:disponible',     // { parcela, motivo, origen, coste, rect, centro } hay una parcela esperando a que plantes la bandera
+  TERRITORIO_RECLAMAR: 'territorio:reclamar',         // { parcela } la interfaz pide quedarse con una parcela disponible
 
   // --- progresión ---
   AGE_ADVANCED: 'age:advanced',          // { age, anterior }

@@ -17,7 +17,7 @@ import { UNIDADES } from '../data/units.js'
  * Lo que sí manda este fichero es la VIDA: quién nace, dónde trabaja, por dónde
  * camina, cuándo se va a dormir y cuánto le baja el ánimo cuando no hay qué comer.
  *
- * Rendimiento: hasta 67 aldeanos a 4 ticks/s. Nada de recorrer `buildings` por
+ * Rendimiento: hasta 88 aldeanos a 4 ticks/s (el tope del Ayuntamiento al 14). Nada de recorrer `buildings` por
  * aldeano: todo lo que se consulta a menudo (rejilla de estorbos, puertas, casas,
  * obras, índice por id) vive en cachés que solo se rehacen cuando cambia la aldea.
  * Los temporizadores y las manías de cada uno van en `memoria`, fuera del guardado.
@@ -26,8 +26,18 @@ import { UNIDADES } from '../data/units.js'
 // --------------------------------------------------------------- constantes
 const VEL = UNIDADES.aldeano.velocidad          // casillas por segundo (1.6)
 const COSTE_BASE = UNIDADES.aldeano.coste.comida
-const SUBIDA_COSTE = 1.15                       // cada aldeano nuevo cuesta un 15 % más
-const CAMAS_AYUNTAMIENTO = 3                    // los fundadores duermen en el propio ayuntamiento
+/**
+ * COSTE DE CONTRATAR. Antes subía un 15 % por cabeza: el aldeano 30 costaba
+ * 3.300 de comida y el 46 más que el granero entero, así que el tope de
+ * población era decorativo y la aldea se quedaba a medias para siempre.
+ * Ahora sube en línea recta y con techo: el freno del juego es el TOPE DE
+ * POBLACIÓN (Ayuntamiento y camas), nunca el precio.
+ *   1.º 50 · 11.º 170 · 21.º 290 · del 38.º en adelante, 500 y ahí se queda.
+ */
+const COSTE_POR_CABEZA = 12
+const COSTE_TOPE = 500
+/** Camas del propio Ayuntamiento: crece con él, así no hace falta un barrio de chozas. */
+const camasAyuntamiento = (n = 1) => 4 + Math.max(1, n)
 const PLAZAS_OBRA = 3                           // martillos que caben en un andamio
 const SEG_POR_DIA = 480                         // ciclo de 8 min, el mismo que usa render/fx
 const MOMENTO_INICIAL = 0.36                    // arranca a media mañana, como el sol de fx
@@ -36,13 +46,22 @@ const NOCHE_HASTA = 0.22
 const HAMBRE_PARA_BAJON = 15                    // segundos con la despensa a 0
 const PENALIZA_HAMBRE = 0.75                    // la comida deja de ser decorativa
 const LLEGADA = 0.16                            // a esta distancia se da por llegado
+/** Espejo de MINIMO_SIN_ALDEANOS en sim/resources.js: sin nadie, el edificio rinde el 25 %. */
+const MINIMO_SIN_ALDEANOS = 0.25
+/** Cada cuántos ticks se mira si hay edificios trabajando solos (4 ticks = 1 s). */
+const REVISION_SIN_ATENDER = 240
+/** Y como poco cuánto se tarda en volver a decirlo: un aviso útil, no una matraca. */
+const ESPERA_AVISO_SIN_ATENDER = 4
 
 const JOB_POR_TIPO = {
   serreria: 'leñador',
   cantera: 'cantero',
   granja: 'granjero',
   mina_oro: 'minero',
-  campamento_explorador: 'explorador'
+  campamento_explorador: 'explorador',
+  // La avanzadilla cultiva lo suyo. Sin esta línea, el aldeano asignado se
+  // quedaba 'parado' y el reparto automático lo reasignaba en bucle.
+  puesto_avanzado: 'granjero'
 }
 const RECURSO_POR_JOB = { leñador: 'madera', cantero: 'piedra', granjero: 'comida', minero: 'oro' }
 const TIPO_POR_RECURSO = { madera: 'serreria', piedra: 'cantera', comida: 'granja', oro: 'mina_oro' }
@@ -67,6 +86,8 @@ let factor = 1
 let ultimaMaxima = -1
 let sembrado = false
 let pulso = 0
+let avisosSinAtender = 0
+let ultimosVacios = 0
 
 // ----------------------------------------------------------------- arranque
 export function init () {
@@ -79,6 +100,7 @@ export function init () {
   events.on(EV.STATE_LOADED, () => {
     sucio = true; yacimientos = null; memoria.clear()
     sembrado = false; ultimaMaxima = -1; hambre = 0
+    avisosSinAtender = 0; ultimosVacios = 0
     sanear()
   })
   sanear()
@@ -110,6 +132,10 @@ function sincronizarTrabajadores () {
     if (b) b.trabajadores.push(v.id)
     else { v.buildingId = null; v.job = 'parado' }
   }
+  // Orden estable: se reconstruye en el orden de `villagers`, que cambia al
+  // recargar, y eso hacía que guardar y volver a cargar diera un estado
+  // distinto (el banco de pruebas lo cazaba como diferencia intermitente).
+  for (const b of s.buildings) if (b.trabajadores.length > 1) b.trabajadores.sort()
 }
 
 // -------------------------------------------------------- cachés de la aldea
@@ -260,15 +286,51 @@ export function poblacion () {
   // siguen puestas. Antes, subir el Ayuntamiento dejaba el censo a 0 camas.
   const enPie = ayuntamiento && (ayuntamiento.nivel || 0) > 0
   if (!enPie) return { actual, maxima: 0 }
-  const tope = def('ayuntamiento').poblacionMax(ayuntamiento.nivel || 1)
+  const nivelAyto = ayuntamiento.nivel || 1
+  const tope = def('ayuntamiento').poblacionMax(nivelAyto)
   const dCasa = def('casa')
-  let camas = CAMAS_AYUNTAMIENTO
+  let camas = camasAyuntamiento(nivelAyto)
   for (const c of casas) camas += dCasa.aloja(c.nivel || 1)
-  return { actual, maxima: Math.min(tope, camas) }
+
+  // Las avanzadillas son poblados con su propia gente, así que suman camas
+  // FUERA del tope del ayuntamiento: si contaran dentro, conquistar territorio
+  // no serviría de nada. Traen también sus propias plazas de trabajo (menos que
+  // camas), así que el colchón de gente libre se mantiene.
+  const dPuesto = def('puesto_avanzado')
+  let extra = 0
+  if (dPuesto && typeof dPuesto.aloja === 'function') {
+    for (const b of game.state.buildings) {
+      if (b.tipo !== 'puesto_avanzado' || b.enObra || !(b.nivel > 0)) continue
+      extra += dPuesto.aloja(b.nivel) || 0
+    }
+  }
+  return { actual, maxima: Math.min(tope, camas) + extra }
 }
 
-/** Lo que cuesta el siguiente aldeano: 50 de comida el primero, +15 % cada uno. */
-export const costeContratar = () => Math.round(COSTE_BASE * Math.pow(SUBIDA_COSTE, game.state.villagers.length))
+/**
+ * Plazas de trabajo que hay hoy en la aldea, para poder comparar de un vistazo
+ * "cuánta gente cabe" con "cuánta gente hace falta". Las obras no cuentan: son
+ * martillos de paso, no plantilla.
+ * @returns {{plazas:number, ocupadas:number, libres:number, sinAtender:number}}
+ */
+export function plazasDeLaAldea () {
+  alDia()
+  let plazas = 0, ocupadas = 0, sinAtender = 0
+  for (const b of game.state.buildings || []) {
+    if (b.enObra) continue
+    const n = plazasDe(b)
+    if (n <= 0) continue
+    const gente = trabajadoresDe(b.id).length
+    plazas += n
+    ocupadas += Math.min(n, gente)
+    if (gente === 0) sinAtender++
+  }
+  return { plazas, ocupadas, libres: Math.max(0, plazas - ocupadas), sinAtender }
+}
+
+/** Lo que cuesta el siguiente aldeano: recto y con techo (ver COSTE_POR_CABEZA). */
+export const costeContratar = () =>
+  Math.min(COSTE_TOPE, Math.round(COSTE_BASE + COSTE_POR_CABEZA * game.state.villagers.length))
 
 /** Contrata un aldeano si hay cama y comida. @returns {any|null} el aldeano nuevo */
 export function contratar () {
@@ -277,7 +339,13 @@ export function contratar () {
   if (!p.maxima) { avisar('Sin ayuntamiento no hay a quién llamar', 'mal'); return null }
   if (p.actual >= p.maxima) { avisar('No quedan camas: construye o mejora una casa', 'mal'); return null }
   if (!cobrar({ comida: costeContratar() })) return null
-  return crearAldeano()
+  const v = crearAldeano()
+  // Si hay un edificio SIN NADIE, el recién llegado va derecho: contratar para
+  // dejarlo en la plaza mirando las nubes no arregla nada, y es justo el caso
+  // que el jugador no ve hasta que lleva media hora produciendo al 25 %.
+  const vacio = masVacioConHueco(v)
+  if (vacio) asignar(v.id, vacio.id)
+  return v
 }
 
 /** Pone a un aldeano a trabajar en un edificio con plazas libres. */
@@ -343,8 +411,63 @@ export function resumenTrabajos () {
 }
 
 /**
- * El botón de "repartir solos". Manda a los parados donde más duele: primero un
- * martillo a cada obra parada, después al recurso más escaso (y si no hay comida,
+ * LOS EDIFICIOS QUE ESTÁN TRABAJANDO SOLOS. Para que la interfaz lo enseñe en
+ * vez de que el jugador lo descubra dos horas tarde: cada edificio productivo
+ * con plazas libres y CUÁNTO se está perdiendo por minuto por tenerlo así.
+ *
+ * La pérdida es una estimación honrada del catálogo (nivel + ánimo): no lleva
+ * el aura del molino, ni las tecnologías, ni el bono de edad, porque eso solo
+ * lo sabe sim/resources.js y este módulo no lo importa. Va corta, nunca larga.
+ *
+ * @param {boolean} [soloVacios] true = solo los que no tienen a NADIE
+ * @returns {Array<{id:string,tipo:string,nombre:string,icono:string,nivel:number,
+ *   plazas:number,ocupadas:number,libres:number,vacio:boolean,recurso:string,
+ *   perdidaPorMinuto:number,x:number,z:number}>} de más sangrante a menos
+ */
+export function edificiosSinAtender (soloVacios = false) {
+  alDia()
+  const animo = game.state.animo?.factor ?? 1
+  const fuera = []
+  for (const b of game.state.buildings || []) {
+    if (b.enObra) continue
+    const d = def(b.tipo)
+    if (!d || !d.produce || typeof d.plazas !== 'function') continue
+    const nivel = b.nivel || 1
+    const plazas = Math.max(0, d.plazas(nivel))
+    if (plazas <= 0) continue
+    const ocupadas = Math.min(plazas, trabajadoresDe(b.id).length)
+    const libres = plazas - ocupadas
+    if (libres <= 0) continue
+    if (soloVacios && ocupadas > 0) continue
+    // la misma faena que aplica sim/resources.js: 25 % sin nadie, 100 % a tope
+    const base = b.arruinado ? 0 : d.porMinuto(nivel) * animo
+    const faena = MINIMO_SIN_ALDEANOS + (1 - MINIMO_SIN_ALDEANOS) * (ocupadas / plazas)
+    const c = centroDe(b)
+    fuera.push({
+      id: b.id,
+      tipo: b.tipo,
+      nombre: d.nombre,
+      icono: d.icono,
+      nivel,
+      plazas,
+      ocupadas,
+      libres,
+      vacio: ocupadas === 0,
+      recurso: d.produce,
+      perdidaPorMinuto: Math.round(base * (1 - faena) * 10) / 10,
+      x: c.x,
+      z: c.z
+    })
+  }
+  fuera.sort((a, b) => b.perdidaPorMinuto - a.perdidaPorMinuto)
+  return fuera
+}
+
+/**
+ * El botón de "repartir solos". Manda a los parados donde más duele, por este
+ * orden: un martillo a cada obra parada, luego los edificios que están
+ * trabajando SIN NADIE (que rinden al 25 %: es lo que más recursos cuesta) y,
+ * cuando ya no queda ninguno vacío, al recurso más escaso (y si no hay comida,
  * a la granja antes que a nada, que sin pan no se pica piedra).
  */
 export function asignarAutomatico () {
@@ -353,7 +476,7 @@ export function asignarAutomatico () {
   const parados = game.state.villagers.filter(v => v.job === 'parado')
   if (!parados.length) return 0
   for (const v of parados) {
-    const b = obraNecesitada(v) || edificioMasNecesario(v)
+    const b = obraNecesitada(v) || masVacioConHueco(v) || edificioMasNecesario(v)
     if (!b) break
     if (asignar(v.id, b.id)) puestos++
   }
@@ -416,6 +539,24 @@ function edificioMasNecesario (v) {
   return null
 }
 
+/**
+ * El edificio productivo que está SIN NADIE y más producción pierde por ello.
+ * Un edificio vacío rinde el 25 %: llenar su primera plaza vale mucho más que
+ * poner el cuarto leñador en la serrería que ya va llena.
+ */
+function masVacioConHueco (v) {
+  let mejor = null, mejorNota = -1
+  for (const f of edificiosSinAtender(true)) {
+    const b = edificio(f.id) || getBuilding(f.id)
+    if (!b) continue
+    const c = centroDe(b)
+    // a igualdad de sangría, el que pille más cerca: nadie cruza la aldea por gusto
+    const nota = f.perdidaPorMinuto * 10 - dist(v.x, v.z, c.x, c.z)
+    if (nota > mejorNota) { mejorNota = nota; mejor = b }
+  }
+  return mejor
+}
+
 function masCercaConHueco (tipo, v) {
   let mejor = null, md = Infinity
   for (const b of game.state.buildings) {
@@ -466,6 +607,29 @@ function sembrarPrimeros () {
   asignarAutomatico()
 }
 
+/**
+ * Un edificio produciendo solo no se ve: no cambia de color, no hace ruido y se
+ * lleva el 75 % de lo que debería entrar. Aquí se vigila cada minuto y se avisa
+ * UNA vez por tanda (la lista fina la sirve `edificiosSinAtender()` a la
+ * interfaz). Si hay gente parada, el aviso ofrece la solución en vez del susto.
+ */
+function vigilarSinAtender () {
+  const vacios = edificiosSinAtender(true)
+  if (!vacios.length) { avisosSinAtender = 0; ultimosVacios = 0; return }
+  if (avisosSinAtender > 0 && vacios.length <= ultimosVacios) { avisosSinAtender--; return }
+  ultimosVacios = vacios.length
+  avisosSinAtender = ESPERA_AVISO_SIN_ATENDER
+  const perdida = Math.round(vacios.reduce((a, f) => a + f.perdidaPorMinuto, 0) * 60)
+  const parados = game.state.villagers.filter(v => v.job === 'parado').length
+  const que = vacios.length === 1
+    ? `${vacios[0].icono} La ${vacios[0].nombre.toLowerCase()} trabaja sin nadie`
+    : `${vacios.length} edificios trabajan sin nadie`
+  const cola = parados > 0
+    ? ` (${parados} aldeano${parados > 1 ? 's' : ''} sin oficio: repártelos)`
+    : ' (contrata aldeanos o quita gente de otro sitio)'
+  avisar(`${que}: se pierden ${perdida}/h${cola}`, 'mal')
+}
+
 /** Cuando sube el tope (casa nueva o ayuntamiento mejorado), se avisa. */
 function vigilarPoblacion () {
   const p = poblacion()
@@ -485,6 +649,7 @@ function alTick ({ dt }) {
   actualizarAnimo(dt)
   sembrarPrimeros()
   if ((pulso & 7) === 0) vigilarPoblacion()
+  if (pulso % REVISION_SIN_ATENDER === 0) vigilarSinAtender()
 
   const noche = esDeNoche()
   const lista = game.state.villagers

@@ -63,11 +63,53 @@ function obra (base, factor = 3.1, tope = 8 * HORA) {
 /** Vida del edificio. Crece más lento que el coste: mejorar no te hace inmune. */
 const vida = (base, factor = 1.32) => (n = 1) => Math.round(base * Math.pow(factor, Math.max(0, n - 1)))
 
-/** Producción por minuto. Factor ~1.5: ocho niveles multiplican por ~17, no por 100. */
+/**
+ * Producción por minuto. Factor ~1.5: ocho niveles multiplican por ~17, no por 100.
+ *
+ * Sep-2026, al cuadrar plazas y población: un edificio de nivel 1 pasó a tener
+ * UNA plaza, así que ahora se llena con un aldeano y rinde el 100 % donde antes
+ * se quedaba en el 40-60 %. Eso por sí solo casi duplicaba lo que entra por hora
+ * y adelantaba la Edad Imperial cuatro días. Como el ritmo pausado es lo que
+ * gusta del juego, las cuatro curvas de recursos se han bajado un punto (−10 %
+ * en el nivel 1, −28 % en el 12): el jugador sigue ganando bastante —sus
+ * edificios ya no trabajan a medias— pero la partida dura lo mismo.
+ */
 const porMin = (base, factor = 1.52) => (n = 1) => Math.round(base * Math.pow(factor, Math.max(0, n - 1)) * 10) / 10
 
-/** Puestos de trabajo: suben despacio, si no sobrarían aldeanos sin oficio. */
-const plazasEscalonadas = (base = 2) => (n = 1) => base + Math.floor(n / 2)
+/**
+ * PUESTOS DE TRABAJO frente a ALDEANOS — la cuenta que cuadra la aldea (sep-2026).
+ *
+ * Lo que arregla esto: se podían levantar 3 serrerías, 3 canteras y 3 granjas
+ * (18 plazas con la fórmula vieja) teniendo camas para 7 aldeanos. Media aldea
+ * trabajaba al 25 % y el jugador no se enteraba hasta mucho después.
+ *
+ * REGLA DURA: en CADA nivel de Ayuntamiento el tope de población tiene que
+ * cubrir TODAS las plazas que el juego deja construir en ese momento, y sobrar
+ * gente. La cuenta es cerrada porque ningún edificio pasa de nivel del
+ * Ayuntamiento (sim/buildings.js) y los de recursos tienen tope de unidades
+ * (`max`): 4 serrerías + 4 canteras + 5 granjas (13 desde la Edad Oscura) y
+ * 3 minas de oro desde la Feudal (16 en total), más el campamento aparte.
+ *
+ *   Edad       Ayto    Edificios   Plazas de recursos   Batidores   TOTAL   Población   Sobran
+ *   Oscura      1-3        13         13 x 1 = 13           2         15        24        +9
+ *   Feudal      3-8        16         16 x 3 = 48           3         51        62       +11
+ *   Castillos   9-10       16         16 x 3 = 48           3         51        66       +15
+ *   Imperial   11-14       16         16 x 4 = 64           3         67        88       +21
+ *
+ * Los niveles intermedios también salen: ayto 4 → 34 plazas con 40 de tope;
+ * ayto 7 → 35 con 46; ayto 11 → 51 con 68. Nunca falta gente.
+ *
+ * Y la gente que sobra no está de adorno: son los MARTILLOS. Las obras admiten
+ * 3 constructores cada una y el Ayuntamiento del 9 en adelante abre 6 obras a
+ * la vez, o sea hasta 18 aldeanos en andamios. Por eso el colchón crece con el
+ * Ayuntamiento (+9 en la Oscura, +21 en la Imperial) en vez de quedarse fijo.
+ *
+ * Un nivel 1 con UNA plaza no produce menos: la faena de sim/resources.js es
+ * relativa (25 % sin nadie, 100 % a plazas llenas), así que llenarla con un solo
+ * aldeano es exactamente lo que se pedía —más recursos por hora— sin tocar ni
+ * un reloj de obra.
+ */
+const plazasDeTrabajo = (n = 1) => 1 + Math.floor(n / 4)
 
 export const EDIFICIOS = {
   // ---------------------------------------------------------------- centro
@@ -94,7 +136,13 @@ export const EDIFICIOS = {
     // muerta: el ahorro para la Edad Feudal pide 50 de oro y no entran nunca.
     produce: 'oro',
     porMinuto: porMin(1.5, 1.32),
-    poblacionMax: (n = 1) => Math.round(5 * Math.pow(1.45, n - 1)),
+    // TOPE DE POBLACIÓN. Ya no es una geométrica que se dispara al final y deja
+    // la Edad Oscura con 5 camas: sigue paso a paso a las plazas de trabajo
+    // (ver la tabla de `plazasDeTrabajo`). El escalón gordo cae en los niveles
+    // 4, 8 y 12, que es justo donde los edificios de recursos ganan una plaza,
+    // así que el tope y la faena suben el MISMO día.
+    //   1→20  2→22  3→24 | 4→40  5→42  6→44  7→46 | 8→62 ... 11→68 | 12→84 ... 14→88
+    poblacionMax: (n = 1) => 20 + 14 * Math.floor(n / 4) + 2 * (Math.max(1, n) - 1),
     // Plazas de obra: 1 al empezar y 6 en el imperio. Ya no son el cuello de
     // botella (lo que no cabe espera en la cola), pero cada plaza nueva sigue
     // siendo de las mejoras que más se notan: la aldea crece por varios sitios.
@@ -115,7 +163,10 @@ export const EDIFICIOS = {
     tiempo: obra(8, 3.4, 2 * HORA),
     hp: vida(260),
     requiere: { ayuntamiento: 1 },
-    aloja: (n = 1) => 2 + n
+    // Una cama más por casa que antes (4 a nivel 1): con el tope de población
+    // al día, la casa es el grifo que lo abre, y no apetece llenar la aldea de
+    // chozas para llegar a fin de mes.
+    aloja: (n = 1) => 3 + n
   },
 
   // -------------------------------------------------------------- recursos
@@ -126,15 +177,17 @@ export const EDIFICIOS = {
     ancho: 3,
     alto: 3,
     maxNivel: 12,
-    max: 5,
+    // 4 y no 5: con 4 serrerías + 4 canteras + 5 granjas + 3 minas la cuenta de
+    // plazas frente a población cuadra en las cuatro edades (ver plazasDeTrabajo).
+    max: 4,
     age: 'oscura',
     desc: 'Aquí el bosque se convierte en vigas. Y en ampollas.',
     coste: coste(70, 55, 20, 0, 1.85),
     tiempo: obra(15, 3.1, 6 * HORA),
     hp: vida(420),
     produce: 'madera',
-    porMinuto: porMin(15, 1.46),
-    plazas: plazasEscalonadas(2)
+    porMinuto: porMin(13.5, 1.43),
+    plazas: plazasDeTrabajo
   },
 
   cantera: {
@@ -144,7 +197,7 @@ export const EDIFICIOS = {
     ancho: 3,
     alto: 3,
     maxNivel: 12,
-    max: 5,
+    max: 4,
     age: 'oscura',
     // La piedra es el cuello de botella del juego: rinde ~2/3 de la serrería.
     desc: 'Picar roca es lento y aburrido, pero las murallas no salen del huerto.',
@@ -152,8 +205,8 @@ export const EDIFICIOS = {
     tiempo: obra(18, 3.1, 6 * HORA),
     hp: vida(460),
     produce: 'piedra',
-    porMinuto: porMin(7, 1.44),
-    plazas: plazasEscalonadas(2)
+    porMinuto: porMin(9.5, 1.41),
+    plazas: plazasDeTrabajo
   },
 
   granja: {
@@ -163,15 +216,17 @@ export const EDIFICIOS = {
     ancho: 3,
     alto: 3,
     maxNivel: 12,
-    max: 8,
+    // 5 granjas: una más que serrerías y canteras, porque la comida paga además
+    // a los aldeanos nuevos y la manutención de la tropa.
+    max: 5,
     age: 'oscura',
     desc: 'Trigo, nabos y un espantapájaros con más carisma que el alcalde.',
     coste: coste(50, 20, 40, 0, 1.8),
     tiempo: obra(12, 3.0, 5 * HORA),
     hp: vida(340),
     produce: 'comida',
-    porMinuto: porMin(12, 1.45),
-    plazas: plazasEscalonadas(2)
+    porMinuto: porMin(10.8, 1.42),
+    plazas: plazasDeTrabajo
   },
 
   mina_oro: {
@@ -181,7 +236,7 @@ export const EDIFICIOS = {
     ancho: 3,
     alto: 3,
     maxNivel: 12,
-    max: 4,
+    max: 3,
     age: 'feudal',
     // El oro es el recurso de lujo: paga tropa cara y tecnología. Nunca sobra.
     desc: 'Un filón, tres picos y la certeza de que nunca tendrás suficiente.',
@@ -190,8 +245,8 @@ export const EDIFICIOS = {
     hp: vida(500),
     requiere: { ayuntamiento: 3 },
     produce: 'oro',
-    porMinuto: porMin(2.6, 1.42),
-    plazas: plazasEscalonadas(1)
+    porMinuto: porMin(2.35, 1.39),
+    plazas: plazasDeTrabajo
   },
 
   molino: {
@@ -419,7 +474,9 @@ export const EDIFICIOS = {
     tiempo: obra(12, 3.2, 3 * HORA),
     hp: vida(300),
     requiere: { ayuntamiento: 2 },
-    exploradores: (n = 1) => 1 + Math.floor(n / 2),
+    // De 1 a 3 batidores (antes 5): son plazas que compiten con la serrería por
+    // los mismos aldeanos, y salir a explorar no puede dejar la aldea a medias.
+    exploradores: (n = 1) => 1 + Math.floor(n / 3),
     alcance: (n = 1) => 6 + 3 * n
   },
 
@@ -548,6 +605,49 @@ export const EDIFICIOS = {
     coste: coste(15, 0, 0, 5),
     tiempo: obra(5, 1, 60),
     hp: vida(80)
+  },
+
+  // --------------------------------------------------------- territorio
+  /**
+   * LA AVANZADILLA. Solo se levanta en tierra conquistada (fuera del núcleo) y
+   * una por parcela: sim/buildings.js lo comprueba. Es un poblado pequeño con
+   * su torre y su empalizada: labra su propio terreno, aloja a su gente,
+   * dispara a quien entre por ahí y avisa antes de que lleguen. A cambio hay
+   * que pagarle la soldada cada minuto (CONFIG.TERRITORIO.MANTENIMIENTO_MIN);
+   * si no, se queda desabastecida y deja de valer.
+   */
+  puesto_avanzado: {
+    nombre: 'Puesto avanzado',
+    icono: '🏕️',
+    categoria: 'defensa',
+    ancho: 3,
+    alto: 3,
+    maxNivel: 8,
+    // Tope global DURO: ocho. Uno por parcela conquistada y no más, porque cada
+    // uno trae camas y plazas y la cuenta de la aldea tiene que seguir cuadrando
+    // (ver `plazasDeTrabajo`): 8 puestos suman de +32 a +64 camas y solo de +8 a
+    // +24 plazas, así que el colchón de gente crece, nunca se estrecha.
+    max: 8,
+    age: 'oscura',
+    desc: 'Un poblado pequeño en tierra ganada: torre, empalizada y gente que avisa.',
+    coste: coste(140, 170, 90, 35, 1.8),
+    tiempo: obra(40, 2.7, 3 * HORA),
+    hp: vida(900, 1.34),
+    requiere: { ayuntamiento: 3, torre_vigia: 1 },
+    // Se cultiva lo suyo: poca comida, pero llega sola desde el otro lado del valle.
+    produce: 'comida',
+    porMinuto: porMin(2.4, 1.45),
+    // Su gente vive allí: mismo campo `aloja` que la casa, para que el censo de
+    // sim/villagers.js lo cuente igual (4 camas a nivel 1, 8 al 8).
+    aloja: (n = 1) => 4 + Math.floor(n / 2),
+    // …y tiene dónde trabajar: 1 plaza al principio, 3 en los niveles altos.
+    // Siempre menos plazas que camas: el puesto se paga su propia gente.
+    plazas: (n = 1) => 1 + Math.floor(n / 3),
+    // Dispara como una torre floja: no sustituye a la muralla, pero al que entra
+    // por la frontera se le hace notar.
+    dano: (n = 1) => Math.round(28 * Math.pow(1.36, n - 1)),
+    radio: (n = 1) => Math.round((5 + 0.4 * n) * 10) / 10,
+    cadencia: 0.5
   }
 }
 

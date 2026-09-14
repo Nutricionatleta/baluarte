@@ -288,6 +288,35 @@ Defenderse **sí sirve**: es lo único del sistema de combate que se comporta co
 
 ## 7. Rendimiento
 
+### 7.0 — El campo de batalla acotado al territorio (14-sep-2026)
+
+Con el valle de 60x60, el motor de batalla seguía peleando en el tablero ENTERO:
+la hueste entraba por el borde del valle y se pasaba media batalla cruzando hierba
+de nadie, y el BFS del campo de flujo recorría 3.600 casillas casi todas vacías.
+Ahora la batalla ocurre dentro de una CAJA: `limitesDelTerritorio(state)` para tu
+aldea y la rejilla propia (24x24) para la base enemiga, recortada además a lo que
+está en juego. Mapa de estorbos, campos de flujo, punto de entrada y el recuento
+del recinto de `calcularDefensa()` van en coordenadas locales de esa caja.
+
+Mismo banco (`node scripts/partida-automatica.mjs`, 30 días, misma máquina, sin
+nada más corriendo). **0 fallos** después.
+
+| Medida | Antes (valle 60x60) | Después (caja) |
+|---|---|---|
+| **Defensa de tu aldea** (119 edificios, 5 repeticiones) | **485,9 ms** | **119,5 ms** |
+| Defensa peor caso: 119 edificios + 160 de guarnición vs 149 atacantes | 237,6 ms | **75,1 ms** |
+| **Batalla grande atacando** (159 unidades) | **3.599 ms** | **45,7 ms** |
+| Laboratorio: las 9 composiciones contra la misma base | 886 – 2.490 ms | **43 – 346 ms** |
+| `calcularDefensa()` | 4,08 ms | 3,31 ms |
+| `generarBase()` de un rival | 21,0 ms | 9,9 ms |
+| ms por tick, media | 0,531 ms | 0,440 ms |
+| Pico de un tick | 296,6 ms | 183,7 ms |
+
+El motor sigue siendo determinista (misma semilla = misma batalla, comprobado dos
+veces seguidas). Lo que sí cambia es el **resultado** de las batallas, y a propósito:
+la hueste ya no pierde 20-40 segundos de los 240 andando por el valle, así que llega
+entera y pelea antes. No se ha tocado ni un número de equilibrio (heridos, bajas, daños).
+
 Medido en Node (sin render 3D), Node 24, portátil.
 
 | Medida | Valor | Presupuesto |

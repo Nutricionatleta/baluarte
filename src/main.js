@@ -45,6 +45,7 @@ function precargar () {
     combat: import('./sim/combat.js'),
     map: import('./world/map.js'),
     enemies: import('./world/enemies.js'),
+    imperio: import('./world/imperio.js'),
     expeditions: import('./world/expeditions.js'),
     scene: import('./render/scene.js'),
     terrain: import('./render/terrain.js'),
@@ -57,6 +58,7 @@ function precargar () {
     buildPanel: import('./ui/build-panel.js'),
     armyPanel: import('./ui/army-panel.js'),
     worldPanel: import('./ui/world-panel.js'),
+    questPanel: import('./ui/quest-panel.js'),
     audio: import('./ui/audio.js'),
     tutorial: import('./ui/tutorial.js')
   }
@@ -85,6 +87,7 @@ async function arrancar () {
     // --- el mundo de ahí fuera ---
     ['Trazando el mapa…',      () => usar('world/map',        m.map)],
     ['Avistando enemigos…',    () => usar('world/enemies',    m.enemies)],
+    ['Contando comarcas…',     () => usar('world/imperio',    m.imperio)],
     ['Ensillando monturas…',   () => usar('world/expeditions',m.expeditions)],
 
     // --- lo que se ve ---
@@ -93,6 +96,7 @@ async function arrancar () {
     ['Levantando muros…',      () => usar('render/buildings', m.rbuildings)],
     ['Despertando aldeanos…',  () => usar('render/units',     m.units)],
     ['Encendiendo el sol…',    () => usar('render/fx',        m.fx)],
+    ['Trazando el campo…',     () => usar('render/battle',    () => import('./render/battle.js'))],
 
     // --- interfaz: styles.js va primero, los paneles usan sus componentes ---
     ['Cortando pergamino…',    () => usar('ui/styles',        m.styles)],
@@ -101,6 +105,7 @@ async function arrancar () {
     ['Abriendo el taller…',    () => usar('ui/build-panel',   m.buildPanel)],
     ['Formando la tropa…',     () => usar('ui/army-panel',    m.armyPanel)],
     ['Desplegando el mapa…',   () => usar('ui/world-panel',   m.worldPanel)],
+    ['Sellando encargos…',     () => usar('ui/quest-panel',   m.questPanel)],
     ['Templando instrumentos…',() => usar('ui/audio',         m.audio)],
     ['Llamando al mayordomo…', () => usar('ui/tutorial',      m.tutorial)]
   ]

@@ -131,19 +131,54 @@ button.pastilla:active { transform: translateY(2px); box-shadow: none; }
 .hud-mas { min-width: 48px; min-height: 48px; padding: 0; font-size: 1.3em; border-radius: var(--r-max); }
 
 /* los avisos flotantes de styles.js nacen arriba del todo: ahí está la barra de
-   recursos, así que se bajan justo por debajo para que no la tapen */
-#hud > .capa-toast { top: calc(var(--seg-arriba) + var(--alto-top) + 6px); }
+   recursos, así que se bajan justo por debajo para que no la tapen. Con alarma
+   en pantalla bajan otro escalón: la tira roja manda sobre el resto. Y se
+   estrechan y se pegan a la izquierda: a la derecha vive el botón de
+   constructores y un aviso ancho se lo comía. */
+#hud > .capa-toast {
+  top: calc(var(--seg-arriba) + var(--alto-top) + 6px);
+  left: calc(var(--seg-izq) + 8px); transform: none;
+  width: min(66vw, 300px);
+  align-items: flex-start;
+}
+#hud.alarmado > .capa-toast { top: calc(var(--seg-arriba) + var(--alto-top) + 56px); }
 
-/* ---------- columna de obras (derecha) ---------- */
-.hud-obras {
+/* ---------- lo que está en marcha, en pastillas (derecha) ----------
+   Antes aquí había una columna de tarjetas de obra, una por edificio, y se
+   comía media pantalla. Ahora es un botón de constructores (con los libres a
+   la vista) y, como mucho, dos pastillas más: tropa y ciencia. El detalle de
+   quién hace qué se abre al tocar, que es donde de verdad se mira. */
+.hud-tareas {
   position: fixed; z-index: 15;
   top: calc(var(--seg-arriba) + var(--alto-top) + 4px); right: calc(var(--seg-der) + 8px);
-  width: 150px; max-height: 46vh;
-  display: flex; flex-direction: column; gap: 6px;
-  overflow: hidden;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
 }
-/* con alarma en pantalla, las obras se apartan: nada debe tapar el aviso */
-#hud.alarmado .hud-obras { top: calc(var(--seg-arriba) + var(--alto-top) + 82px); }
+/* con alarma en pantalla, las pastillas se apartan: nada debe tapar el aviso */
+#hud.alarmado .hud-tareas { top: calc(var(--seg-arriba) + var(--alto-top) + 56px); }
+.mini {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 48px; padding: 0 12px;
+  font-family: inherit; font-size: .82em; font-weight: 800; line-height: 1.1;
+  color: var(--tinta); white-space: nowrap;
+  background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
+  border: 3px solid var(--madera); border-radius: var(--r-max);
+  box-shadow: 0 4px 0 var(--madera-oscura), var(--brillo);
+}
+.mini:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--madera-oscura); }
+.mini > i { flex: none; font-style: normal; font-size: 1.3em; }
+.mini > b { font-variant-numeric: tabular-nums; }
+.mini > small { font-size: .82em; font-weight: 800; color: var(--tinta-suave); font-variant-numeric: tabular-nums; }
+/* constructores libres = hay que darles faena: se pinta en verde y llama */
+.mini.libre { border-color: var(--verde-oscuro); background-image: linear-gradient(180deg, #eaf8e2, #cfeec2); box-shadow: 0 4px 0 var(--verde-oscuro), var(--brillo); }
+.mini.libre > b { color: var(--verde-oscuro); }
+
+/* ---------- hoja de constructores ---------- */
+.constructor-libre {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 2px dashed rgba(74, 143, 60, .7); border-radius: var(--r-m);
+  background: rgba(111, 184, 92, .14);
+}
+.constructor-libre > i { font-style: normal; font-size: 1.6em; line-height: 1; }
 .obra {
   padding: 6px 8px 8px;
   background-image: linear-gradient(180deg, var(--pergamino-claro), var(--pergamino));
@@ -157,22 +192,32 @@ button.pastilla:active { transform: translateY(2px); box-shadow: none; }
 .obra-pie { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
 .obra-pie .barra-progreso { flex: 1; height: 12px; }
 .btn-gema { min-width: 48px; min-height: 48px; padding: 0 6px; font-size: .78em; line-height: 1.1; }
-.obra-mas { align-self: flex-end; }
 
-/* ---------- alarma de ataque ---------- */
+
+/* ---------- alarma de ataque ----------
+   Una TIRA estrecha pegada bajo la barra de recursos, no un cartel. Cuenta
+   atrás en pequeño y, debajo, en una línea, qué se puede hacer: el jugador
+   se quedaba mirando el aviso sin saber qué tocar. Toda la tira es botón. */
 .hud-alarma {
   position: fixed; z-index: 40;
   top: calc(var(--seg-arriba) + var(--alto-top) + 4px); left: calc(var(--seg-izq) + 8px); right: calc(var(--seg-der) + 8px);
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 14px;
+  display: flex; align-items: center; gap: 9px;
+  min-height: 46px; padding: 5px 10px;
+  font-family: inherit; text-align: left;
   color: #fff3ec; font-weight: 800;
   background-image: linear-gradient(180deg, var(--rojo-claro), var(--rojo));
-  border: 3px solid var(--rojo-oscuro); border-radius: var(--r-g);
-  box-shadow: var(--sombra-flotante);
-  animation: pop var(--medio) var(--curva) both, latido 1.1s var(--curva) infinite;
+  border: 2px solid var(--rojo-oscuro); border-radius: var(--r-max);
+  box-shadow: var(--sombra-suave);
+  animation: pop var(--medio) var(--curva) both;
 }
-.hud-alarma .icono-gr { animation: tiembla 1.1s ease-in-out infinite; }
-.hud-alarma b { font-size: 1.25em; font-variant-numeric: tabular-nums; }
+.hud-alarma > i { flex: none; font-style: normal; font-size: 1.35em; line-height: 1; animation: tiembla 1.6s ease-in-out infinite; }
+.hud-alarma .alarma-txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0; }
+.hud-alarma .alarma-tit { font-size: .82em; line-height: 1.15; }
+/* el consejo es lo que salva al jugador: una línea, sin partir palabras */
+.hud-alarma .alarma-que { font-size: .72em; font-weight: 700; line-height: 1.2; opacity: .92; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hud-alarma b { flex: none; font-size: .92em; font-variant-numeric: tabular-nums; }
+.hud-alarma em { flex: none; font-style: normal; font-size: 1.1em; opacity: .8; }
+.hud-alarma:active { transform: translateY(1px); }
 
 /* ---------- celebración ---------- */
 .hud-fiesta { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; pointer-events: none; }
@@ -850,30 +895,26 @@ function pintarAvisoAlmacen (nodo, e, r) {
 
 /* ----------------------------------------------------------------- obras --- */
 
-const MAX_TARJETAS = 3
-
-function montarObras () {
-  nodos.obras = el('div', { clase: 'hud-obras' })
-  raiz().appendChild(nodos.obras)
-}
-
 /**
- * Todo lo que está corriendo con un reloj encima, en un formato único:
- * { clave, icono, nombre, restante, pct, gemas, acelerar }
+ * Los constructores del Ayuntamiento: cuántos hay, en qué anda cada uno y
+ * cuántos están de brazos cruzados. Una obra ocupa a un constructor; las
+ * plazas las da `plazasDeObra()`.
  */
-function tareasEnCurso () {
-  const lista = []
+function constructores () {
+  const plazas = Math.max(1, Number(pedir('edificios', 'plazasDeObra', 1)) || 1)
   const ahora = Date.now()
+  const obras = []
 
   for (const o of game.state.obras || []) {
     const b = (game.state.buildings || []).find(x => x.id === o.buildingId)
     const d = b ? defEdificio(b.tipo) : null
     const total = Math.max(1, (o.fin - (o.inicio || o.fin)) / 1000)
     const restante = Math.max(0, (o.fin - ahora) / 1000)
-    lista.push({
+    obras.push({
       clave: `obra-${o.id}`,
+      buildingId: o.buildingId,
       icono: d?.icono || '🔨',
-      nombre: `${d?.nombre || 'Obra'}${o.tipo === 'mejorar' ? ` ${(b?.nivel || 0) + 1}` : ''}`,
+      nombre: `${d?.nombre || 'Obra'}${o.tipo === 'mejorar' ? ` → ${(b?.nivel || 0) + 1}` : ''}`,
       restante,
       pct: Math.min(100, (1 - restante / total) * 100),
       gemas: pedir('edificios', 'costeAcelerar', 0, o.buildingId),
@@ -881,40 +922,54 @@ function tareasEnCurso () {
       alTocar: () => events.emit(EV.UI_SELECT, { kind: 'building', id: o.buildingId })
     })
   }
+  obras.sort((a, b) => a.restante - b.restante)
 
+  const ocupados = Math.min(plazas, obras.length)
+  return {
+    plazas,
+    obras,
+    ocupados,
+    libres: Math.max(0, plazas - ocupados),
+    espera: pedir('edificios', 'obrasEnEspera', [])
+  }
+}
+
+/** Pastilla compacta de la columna derecha. Devuelve el nodo con sus piezas. */
+function pastillaMini (icono, alTocar, etiqueta) {
+  const cifra = el('b', { texto: '' })
+  const nota = el('small', { texto: '' })
+  const nodo = el('button', {
+    clase: 'mini', type: 'button', 'aria-label': etiqueta, onclick: alTocar
+  }, [el('i', { texto: icono }), cifra, nota])
+  nodo._cifra = cifra
+  nodo._nota = nota
+  return nodo
+}
+
+function montarObras () {
+  nodos.constructores = pastillaMini('🔨', abrirConstructores, 'Constructores')
+  nodos.miniTropa = pastillaMini('⚔️', () => events.emit(EV.UI_PANEL, { panel: 'ejercito' }), 'Tropa en entrenamiento')
+  nodos.miniCiencia = pastillaMini('📜', () => events.emit(EV.UI_PANEL, { panel: 'investigar' }), 'Investigación en curso')
+  nodos.miniTropa.style.display = 'none'
+  nodos.miniCiencia.style.display = 'none'
+  nodos.obras = el('div', { clase: 'hud-tareas' }, [nodos.constructores, nodos.miniTropa, nodos.miniCiencia])
+  raiz().appendChild(nodos.obras)
+}
+
+/** Lo que entrena el cuartel ahora mismo, o null. */
+function tropaEnCola () {
   const cola = game.state.ejercito?.cola || []
-  if (cola.length) {
-    const ultimo = cola[cola.length - 1]
-    const primero = cola[0]
-    const total = Math.max(1, (primero.fin - (primero.inicio || primero.fin)) / 1000)
-    const restante = Math.max(0, (primero.fin - ahora) / 1000)
-    lista.push({
-      clave: 'tropa',
-      icono: '⚔️',
-      nombre: `Tropa ×${cola.length}`,
-      restante: Math.max(0, (ultimo.fin - ahora) / 1000),
-      pct: Math.min(100, (1 - restante / total) * 100),
-      gemas: Math.max(1, Math.ceil(((ultimo.fin - ahora) / 1000) / CONFIG.SEG_POR_GEMA)),
-      acelerar: () => pedir('ejercito', 'acelerarEntrenamiento', null),
-      alTocar: () => events.emit(EV.UI_PANEL, { panel: 'ejercito' })
-    })
-  }
+  if (!cola.length) return null
+  const ahora = Date.now()
+  const ultimo = cola[cola.length - 1]
+  return { cuantos: cola.length, restante: Math.max(0, (ultimo.fin - ahora) / 1000) }
+}
 
+/** La investigación en curso, o null. Panel: 'investigar' (así lo llama build-panel). */
+function cienciaEnCurso () {
   const inv = pedir('ciencia', 'progresoInvestigacion', null)
-  if (inv) {
-    lista.push({
-      clave: 'ciencia',
-      icono: inv.icono || '📜',
-      nombre: inv.nombre,
-      restante: inv.restante,
-      pct: Math.min(100, (inv.pct || 0) * 100),
-      gemas: inv.gemas,
-      acelerar: () => pedir('ciencia', 'acelerar', null, 'investigacion'),
-      alTocar: () => events.emit(EV.UI_PANEL, { panel: 'ciencia' })
-    })
-  }
-
-  return lista
+  if (!inv) return null
+  return { nombre: inv.nombre, restante: inv.restante || 0 }
 }
 
 function tarjetaObra (t) {
@@ -927,12 +982,16 @@ function tarjetaObra (t) {
       tiempo
     ]),
     el('div', { clase: 'obra-pie' }, [
-      barra.nodo,
-      el('button', {
-        clase: 'btn btn-oro btn-gema', type: 'button', 'aria-label': 'Acelerar con gemas',
-        html: `${ICONO.gemas}<br>${t.gemas}`,
-        onclick: () => { t.acelerar(); pintarObras(); pintarRecursos() }
-      })
+      // Lo que espera turno no se acelera con gemas: todavía no ha empezado.
+      // En su sitio va el motivo, que es lo que el jugador necesita saber.
+      t.acelerar ? barra.nodo : el('span', { clase: 'tenue', texto: t.nota || 'Esperando turno' }),
+      t.acelerar
+        ? el('button', {
+          clase: 'btn btn-oro btn-gema', type: 'button', 'aria-label': 'Acelerar con gemas',
+          html: `${ICONO.gemas}<br>${t.gemas}`,
+          onclick: () => { t.acelerar(); pintarObras(); pintarRecursos() }
+        })
+        : el('button', { clase: 'btn btn-piedra', type: 'button', texto: 'Ver', onclick: t.alTocar })
     ])
   ])
   caja._fijar = barra.fijar
@@ -947,8 +1006,13 @@ function actualizarTarjeta (nodo, t) {
   const txt = formatoTiempo(t.restante)
   if (nodo._tiempo && nodo._tiempo.textContent !== txt) nodo._tiempo.textContent = txt
   const boton = nodo.querySelector('.btn-gema')
-  const html = `${ICONO.gemas}<br>${t.gemas}`
-  if (boton && boton.innerHTML !== html) boton.innerHTML = html
+  if (boton) {
+    const html = `${ICONO.gemas}<br>${t.gemas}`
+    if (boton.innerHTML !== html) boton.innerHTML = html
+  } else {
+    const nota = nodo.querySelector('.obra-pie .tenue')
+    if (nota && t.nota && nota.textContent !== t.nota) nota.textContent = t.nota
+  }
 }
 
 /** Deja el contenedor con estas tareas, reconstruyendo solo si la lista cambió. */
@@ -964,27 +1028,161 @@ function sincronizarTareas (cont, tareas, extra = null) {
   if (extra) cont.appendChild(extra())
 }
 
-function pintarObras () {
-  if (!nodos.obras) return
-  const tareas = tareasEnCurso()
-  const visibles = tareas.slice(0, MAX_TARJETAS)
-  const sobran = tareas.length - visibles.length
-  sincronizarTareas(nodos.obras, visibles, sobran > 0
-    ? () => el('button', { clase: 'btn btn-piedra obra-mas', type: 'button', texto: `+${sobran} más`, onclick: abrirTodasLasTareas })
-    : null)
+/** Refresca una pastilla mini sin reconstruirla (el dedo puede estar encima). */
+function fijarMini (nodo, visible, cifra, nota, etiqueta) {
+  if (!nodo) return
+  nodo.style.display = visible ? '' : 'none'
+  if (!visible) return
+  if (nodo._cifra.textContent !== cifra) nodo._cifra.textContent = cifra
+  if (nodo._nota.textContent !== nota) nodo._nota.textContent = nota
+  if (etiqueta) nodo.setAttribute('aria-label', etiqueta)
 }
 
-function abrirTodasLasTareas () {
-  const cuerpo = el('div', { clase: 'col' })
-  const vacio = el('p', { clase: 'tenue', texto: 'No hay nada en marcha. Buen momento para empezar una obra.' })
-  const panel = hoja({ titulo: 'En marcha', contenido: cuerpo, alCerrar: () => refrescadores.delete(pintar) })
-  const pintar = () => {
-    const tareas = tareasEnCurso()
-    sincronizarTareas(cuerpo, tareas)
-    if (!tareas.length && !cuerpo.contains(vacio)) cuerpo.appendChild(vacio)
+function pintarObras () {
+  if (!nodos.obras) return
+
+  const c = constructores()
+  const proxima = c.obras[0]
+  const enCola = c.espera.length ? ` · ${c.espera.length} en cola` : ''
+  fijarMini(
+    nodos.constructores, true,
+    c.libres > 0 ? `${c.libres} libre${c.libres === 1 ? '' : 's'}` : `${c.ocupados}/${c.plazas}`,
+    c.libres > 0 ? `de ${c.plazas}` : (proxima ? formatoTiempo(proxima.restante) : ''),
+    `Constructores: ${c.ocupados} de ${c.plazas} trabajando${enCola}. Ver en qué anda cada uno`
+  )
+  nodos.constructores.classList.toggle('libre', c.libres > 0)
+
+  const t = tropaEnCola()
+  fijarMini(nodos.miniTropa, !!t, t ? `×${t.cuantos}` : '', t ? formatoTiempo(t.restante) : '',
+    t ? `${t.cuantos} en el patio de armas. Ver el ejército` : '')
+
+  const ci = cienciaEnCurso()
+  fijarMini(nodos.miniCiencia, !!ci, ci ? formatoTiempo(ci.restante) : '', '',
+    ci ? `Investigando ${ci.nombre}. Ver la universidad` : '')
+}
+
+/**
+ * Una fila de la cola de espera: su puesto, lo que dura, cuándo se calcula que
+ * entrará y los dos botones que hacen falta — subirla del todo o retirarla.
+ */
+function filaEspera (e, repintar) {
+  const cuando = e.aviso
+    ? `⚠️ ${e.aviso}`
+    : e.segundosParaEmpezar > 0 ? `Empieza en ${formatoTiempo(e.segundosParaEmpezar)}` : 'Entra ya'
+  const nota = el('span', { clase: 'tenue', texto: cuando })
+  const caja = el('div', { clase: 'obra', datos: { clave: 'esp-' + e.id } }, [
+    el('div', {
+      clase: 'obra-cab',
+      onclick: () => events.emit(EV.UI_SELECT, { kind: 'building', id: e.buildingId })
+    }, [
+      el('i', { texto: e.icono, estilo: { fontStyle: 'normal' } }),
+      el('span', { texto: `${e.posicion}. ${e.nombre}${e.tipo === 'mejorar' ? ` → ${e.nivel}` : ''}` }),
+      el('em', { texto: formatoTiempo(e.duracion) })
+    ]),
+    el('div', { clase: 'obra-pie' }, [
+      nota,
+      el('button', {
+        clase: 'btn btn-piedra', type: 'button', texto: '⬆', 'aria-label': 'Ponerla la primera',
+        onclick: () => { pedir('edificios', 'moverEnCola', false, e.id, 0); repintar() }
+      }),
+      el('button', {
+        clase: 'btn btn-piedra', type: 'button', texto: '✕', 'aria-label': 'Retirar el encargo',
+        onclick: () => { pedir('edificios', 'cancelarEspera', false, e.id); repintar() }
+      })
+    ])
+  ])
+  caja._nota = nota
+  return caja
+}
+
+/** Deja el contenedor con estas filas; solo reconstruye si cambió la lista. */
+function sincronizarEspera (cont, lista, repintar) {
+  const previas = new Map([...cont.children].filter(n => n.dataset.clave).map(n => [n.dataset.clave, n]))
+  const mismas = lista.length === previas.size && lista.every(e => previas.has('esp-' + e.id))
+  if (mismas) {
+    for (const e of lista) {
+      const nodo = previas.get('esp-' + e.id)
+      const txt = e.aviso
+        ? `⚠️ ${e.aviso}`
+        : e.segundosParaEmpezar > 0 ? `Empieza en ${formatoTiempo(e.segundosParaEmpezar)}` : 'Entra ya'
+      if (nodo._nota && nodo._nota.textContent !== txt) nodo._nota.textContent = txt
+    }
+    return
   }
+  vaciar(cont)
+  for (const e of lista) cont.appendChild(filaEspera(e, repintar))
+}
+
+/**
+ * La hoja de constructores: en qué anda cada uno, cuánto le queda, el botón de
+ * acelerar con gemas, los que están libres esperando encargo y la cola.
+ * Es el sitio único donde se mira la duración de las obras: antes estaba
+ * repartida en una tarjeta por edificio y se comía la aldea.
+ */
+let hojaConstructores = null
+
+function abrirConstructores () {
+  if (hojaConstructores) { hojaConstructores.cerrar(); return hojaConstructores }
+
+  const resumen = el('div', { clase: 'aviso' })
+  const enMarcha = el('div', { clase: 'col' })
+  const libres = el('div', { clase: 'col' })
+  const titEspera = el('div', { clase: 'titular', texto: '⏳ Esperando turno' })
+  const enEspera = el('div', { clase: 'col' })
+  const cuerpo = el('div', { clase: 'col' }, [resumen, enMarcha, libres, titEspera, enEspera])
+
+  const panel = hoja({
+    titulo: '🔨 Tus constructores',
+    contenido: cuerpo,
+    alCerrar: () => { refrescadores.delete(pintar); hojaConstructores = null }
+  })
+
+  const pintar = () => {
+    const c = constructores()
+
+    const clase = c.libres > 0 ? 'aviso aviso-bien' : 'aviso aviso-info'
+    const texto = c.libres > 0
+      ? (c.plazas === 1
+          ? 'Tu constructor está sin faena. Dale una obra.'
+          : `${c.libres} de ${c.plazas} constructores sin faena. Dales una obra.`)
+      : (c.plazas === 1
+          ? 'Tu único constructor está ocupado. Amplía el Ayuntamiento para tener más.'
+          : `Los ${c.plazas} constructores están ocupados. Amplía el Ayuntamiento para tener más.`)
+    if (resumen.dataset.texto !== texto) {
+      resumen.dataset.texto = texto
+      resumen.className = clase
+      vaciar(resumen)
+      resumen.append(el('i', { texto: c.libres > 0 ? '🙋' : '🔨' }), el('span', { texto }))
+    }
+
+    sincronizarTareas(enMarcha, c.obras)
+
+    // los libres: uno por fila, con su botón para mandarles algo
+    const quiero = c.libres
+    if (libres.children.length !== quiero) {
+      vaciar(libres)
+      for (let i = 0; i < quiero; i++) {
+        libres.appendChild(el('div', { clase: 'constructor-libre' }, [
+          el('i', { texto: '🙋' }),
+          el('div', { clase: 'crece' }, [
+            el('b', { texto: 'Constructor libre' }),
+            el('div', { clase: 'tenue pequeño', texto: 'Esperando encargo' })
+          ]),
+          el('button', {
+            clase: 'btn btn-oro', type: 'button', texto: '🔨 Construir',
+            onclick: () => { panel.cerrar(); events.emit(EV.UI_PANEL, { panel: 'construir' }) }
+          })
+        ]))
+      }
+    }
+
+    titEspera.style.display = c.espera.length ? '' : 'none'
+    sincronizarEspera(enEspera, c.espera, pintar)
+  }
+
   pintar()
   refrescadores.add(pintar)
+  hojaConstructores = panel
   return panel
 }
 
@@ -1063,7 +1261,13 @@ function consejoAhora () {
   const hambre = CONFIG.RECURSOS.find(r => eco[r].neto < 0)
   if (hambre) return { texto, icono: '📉', urgente: true, boton: 'Revisar', accion: () => abrirEconomia(hambre) }
 
+  // Sin obras Y sin cola: ahí sí no hay nada en marcha. Con encargos esperando,
+  // el mayordomo no manda construir más: manda mirar por qué no arrancan.
   if (!(s.obras || []).length) {
+    const espera = pedir('edificios', 'obrasEnEspera', [])
+    if (espera.length) {
+      return { texto, icono: '⏳', urgente: !!espera.find(e => e.aviso), boton: 'Ver cola', accion: abrirConstructores }
+    }
     return { texto, icono: '🔨', urgente: false, boton: 'Construir', accion: () => events.emit(EV.UI_PANEL, { panel: 'construir' }) }
   }
 
@@ -1417,21 +1621,45 @@ function carteDeBienvenida ({ segundos = 0, textos = [], recursos = {} } = {}) {
 function pintarAlarma () {
   if (!alarma) return
   const restante = Math.max(0, (alarma.cuando - Date.now()) / 1000)
-  alarma.reloj.textContent = formatoTiempo(restante)
+  const txt = restante > 0 ? formatoTiempo(restante) : '¡ya!'
+  if (alarma.reloj.textContent !== txt) alarma.reloj.textContent = txt
   if (restante <= 0 && Date.now() - alarma.cuando > 4000) quitarAlarma()
+}
+
+/**
+ * Qué puede hacer el jugador AHORA con el aviso encima. Sin esta línea el
+ * cartel solo asusta: se mira el reloj y no se sabe qué tocar.
+ */
+function queHacerConElAtaque () {
+  const s = game.state
+  const muros = (s.buildings || []).filter(b => b.tipo === 'muralla' && !b.enObra).length
+  const torres = (s.buildings || []).filter(b => !b.enObra && (b.tipo === 'torre_vigia' || b.tipo === 'torre_ballesta')).length
+  const tropas = Object.values(s.ejercito?.tropas || {}).reduce((a, n) => a + (n || 0), 0)
+  const roto = (s.buildings || []).some(b => b.arruinado || (b.hpMax && b.hp < b.hpMax * 0.8))
+
+  if (roto) return 'Repara lo dañado y entrena lanceros'
+  if (tropas < 6) return 'Entrena lanceros en el cuartel, ya'
+  if (muros < 12) return 'Refuerza la muralla o entrena lanceros'
+  if (torres < 2) return 'Alza otra torre vigía antes de que lleguen'
+  return 'Revisa tu defensa y reparte la tropa'
 }
 
 function mostrarAlarma ({ enemigo, llegaEn = 0 } = {}) {
   quitarAlarma()
   const reloj = el('b', { texto: formatoTiempo(llegaEn) })
-  const nodo = el('div', { clase: 'hud-alarma', onclick: () => events.emit(EV.UI_PANEL, { panel: 'ejercito' }) }, [
-    el('span', { clase: 'icono-gr', texto: '⚔️' }),
-    el('div', { clase: 'col', estilo: { gap: '0' } }, [
-      el('div', { texto: '¡TE ATACAN!' }),
-      el('div', { clase: 'pequeño', texto: enemigo?.nombre || 'Fuerzas enemigas se acercan' })
+  // toda la tira es un botón de 46 px: se toca sin apuntar
+  const nodo = el('button', {
+    clase: 'hud-alarma', type: 'button',
+    'aria-label': `Te atacan. ${queHacerConElAtaque()}. Ver la defensa`,
+    onclick: () => events.emit(EV.UI_PANEL, { panel: 'ejercito', datos: { solapa: 'defensa' } })
+  }, [
+    el('i', { texto: '⚔️' }),
+    el('div', { clase: 'alarma-txt' }, [
+      el('div', { clase: 'alarma-tit', texto: `Te atacan · ${enemigo?.nombre || 'bandidos'}` }),
+      el('div', { clase: 'alarma-que', texto: queHacerConElAtaque() })
     ]),
-    el('span', { clase: 'crece' }),
-    reloj
+    reloj,
+    el('em', { texto: '›' })
   ])
   raiz().appendChild(nodo)
   raiz().classList.add('alarmado')

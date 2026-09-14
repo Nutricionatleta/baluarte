@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { PALETA } from '../core/config.js'
+import { CONFIG, PALETA } from '../core/config.js'
 import { events, EV } from '../core/events.js'
 import { game } from '../core/state.js'
 import { makeRng } from '../core/rng.js'
@@ -30,7 +30,7 @@ const LADO_LOSETA = 0.92          // el hueco entre losetas es lo que las hace l
 const SUELO_MAR = 0.20            // el mar asoma por fuera de la mesa, nunca por dentro
 const ALTO_MESA = 0.30            // cara de la mesa: por debajo no hay nada que ver
 const ALTO_MARCADOR = 0.7        // a cuánto flota la ficha sobre la loseta
-const RADIO_MAR = 46              // media anchura del mar (en unidades de casilla)
+const RADIO_MAR = 80              // media anchura del mar (en unidades de casilla)
 const MAX_EXPEDICIONES = 6
 const PUNTOS_CAMINO = 20
 const SEG_ANILLO = 128            // trozos del anillo de alcance (se usan los que hagan falta)
@@ -56,8 +56,8 @@ const expediciones = new Map()    // expedicionId -> { figura, ranura, destino, 
 let mar = null, marBase = null, frameMar = 0
 let nubes = null, sombrasNube = null, datosNube = []
 let gaviotas = null, datosGaviota = []
-let anillo = null, radioAnillo = 0
-let marcoSel = null, marcoHover = null
+let anillo = null, radioAnillo = 0, rotuloAlcance = null
+let marcoSel = null, marcoHover = null, rotuloSel = null
 let seleccion = null
 let aldea = null, estandarte = null
 
@@ -159,6 +159,38 @@ export function init () {
     if (ctx.camara?.vista === 'mundo' || ctx.raizMundo?.visible) { enVista = true; entrar() }
   })
   onFrame(porFrame)
+  onFrame(ajustarNieblaDistancia)     // este va SIEMPRE, también mirando la aldea
+}
+
+// ══ NIEBLA DE DISTANCIA ══════════════════════════════════════════════════
+/**
+ * La niebla de distancia (`scene.fog`) la pone render/scene.js para que el borde
+ * del tablero no se vea cortado. El problema es que al alejar la cámara para ver
+ * la aldea entera, esa misma niebla se come el pueblo: lo que debía difuminar el
+ * horizonte acaba tapando lo que quieres mirar.
+ *
+ * Aquí se apaga conforme la cámara se aleja: de cerca difumina el fondo, de lejos
+ * desaparece y la aldea se ve entera y limpia. En el mapa del mundo queda un velo
+ * mínimo, lo justo para que el mar no termine en una raya recta contra el cielo.
+ *
+ * Vive en este fichero porque scene.js tiene otro dueño; solo BAJA la densidad
+ * que puso la escena, nunca la sube, así que si allí se toca, esto no estorba.
+ */
+const ZOOM_NIEBLA_LLENA = 34      // más cerca que esto, la niebla trabaja entera
+const ZOOM_NIEBLA_NADA = 78       // más lejos que esto, no queda niebla
+const VELO_MUNDO = 0.22           // en la maqueta del valle se deja este resto
+let densidadBase = -1
+
+function ajustarNieblaDistancia () {
+  const f = ctx.scene?.fog
+  if (!f || typeof f.density !== 'number') return
+  if (densidadBase < 0) densidadBase = f.density || 0.011       // la que puso la escena
+  const d = ctx.camara?.distancia
+  if (!Number.isFinite(d)) return
+  const k = (d - ZOOM_NIEBLA_LLENA) / (ZOOM_NIEBLA_NADA - ZOOM_NIEBLA_LLENA)
+  const resto = ctx.camara?.vista === 'mundo' ? VELO_MUNDO : 0
+  const objetivo = densidadBase * Math.max(resto, 1 - Math.min(1, Math.max(0, k)))
+  if (Math.abs(f.density - objetivo) > 1e-5) f.density = objetivo
 }
 
 /**
@@ -187,7 +219,25 @@ function entrar () {
     lista.forEach((k, i) => abrirNiebla(k, i * 0.05))
   }
   if (seleccion) marcar(marcoSel, seleccion)   // se vuelve con la casilla aún elegida
+  encuadrarMesa()
   sincronizar()
+}
+
+/**
+ * La cámara de la aldea se aleja mucho más que antes (el valle ya es de 60x60),
+ * y con ese zoom la maqueta del mundo queda como una mota en mitad del mar: no
+ * se lee un cartel ni de milagro. Al entrar se encuadra la mesa, respetando el
+ * zoom que el jugador dejó puesto la última vez que estuvo aquí.
+ */
+const ZOOM_MESA = 24
+const ZOOM_MESA_MIN = 18
+const ZOOM_MESA_MAX = 66
+let zoomMundo = 0
+
+function encuadrarMesa () {
+  const centro = (CONFIG.GRID - 1) / 2       // el (0,0) del mundo 3D, en casillas
+  const z = zoomMundo || ZOOM_MESA
+  events.emit(EV.CAMERA_FOCUS, { x: centro, z: centro, zoom: z })
 }
 
 // ══ CONSTRUCCIÓN ═════════════════════════════════════════════════════════
@@ -230,8 +280,9 @@ function derribar () {
   porTile.clear(); decoPorTile.clear(); nieblaPorTile.clear()
   marcadores.clear(); basesEnemigas.clear(); señales.clear(); expediciones.clear()
   animaciones.length = 0
-  nubarrones = mar = marBase = nubes = sombrasNube = gaviotas = anillo = null
-  marcoSel = marcoHover = aldea = estandarte = null
+  carteleria.clear()
+  nubarrones = mar = marBase = nubes = sombrasNube = gaviotas = anillo = rotuloAlcance = null
+  marcoSel = marcoHover = rotuloSel = aldea = estandarte = null
   seleccion = null
   radioAnillo = 0
   construido = false
@@ -268,7 +319,7 @@ function construirLosetas (w) {
       const tinte = new THREE.Color().setScalar(1).multiplyScalar(rng.float(0.9, 1.1))
       const visto = descubierto(t.x, t.y)
       malla.setColorAt(i, visto ? tinte : penumbra(tinte, _col))
-      porTile.set(clave(t.x, t.y), { malla, i, h, tinte, visto, x: t.x, y: t.y, bioma: t.bioma })
+      porTile.set(clave(t.x, t.y), { malla, i, h, tinte, visto, x: t.x, y: t.y, bioma: t.bioma, nombre: t.nombre })
     })
     malla.instanceMatrix.needsUpdate = true
     if (malla.instanceColor) malla.instanceColor.needsUpdate = true
@@ -510,6 +561,14 @@ function construirAldea (w) {
   estandarte.position.set(-0.05, 0.52, -0.05)
   aldea.add(estandarte)
   raiz.add(aldea)
+
+  // "de aquí salen y aquí vuelven": el punto de referencia de todo el tablero
+  // el cartel va una casilla POR DELANTE de la aldea (hacia la cámara): encima
+  // se amontonaría con los de los vecinos, que siempre caen pegados al centro
+  const rotulo = new THREE.Group()
+  rotulo.position.set(local(c.x), h, local(c.y) + 1.15)
+  raiz.add(rotulo)
+  ponerCartel(rotulo, '🏰 Tu aldea', 'azul', 0.55, 2.0)
 }
 
 function casita (x, z, ry) {
@@ -528,6 +587,11 @@ function construirMarcas () {
   marcoSel.userData.ignorarPicking = marcoHover.userData.ignorarPicking = true
   marcoHover.scale.setScalar(0.94)
   raiz.add(marcoSel, marcoHover)
+
+  // el nombre de la comarca elegida, encima de ella: el mapa deja de ser "casillas"
+  rotuloSel = new THREE.Group()
+  rotuloSel.visible = false
+  raiz.add(rotuloSel)
 
   // el alcance se dibuja a trocitos apoyados en el relieve: así se ve por dónde
   // pasa aunque cruce una sierra, en vez de flotar cortando montañas
@@ -736,39 +800,162 @@ function figuraExplorador () {
 }
 
 // ── carteles de texto (la única textura del juego, dibujada por código) ──
-const _carteles = new Map()
 /**
- * Un número de nivel en 3D con cubitos no se lee en un móvil; un cartel que
- * siempre mira a cámara, sí. Se dibuja en un canvas: cero archivos de arte.
+ * Un mapa de iconos no se entiende: el jugador necesita LEER qué es cada cosa
+ * sin tocarla. Cada chisme del tablero lleva su cartelito de dos renglones
+ * (qué es arriba, qué tiene abajo) que siempre mira a cámara.
+ *
+ * Los textos están escritos a propósito con palabras FIJAS ("piedra a mansalva"
+ * en vez de "piedra 213"): además de leerse mejor, evita que cada recolección
+ * fabrique una textura nueva. El material se comparte por texto.
  */
-function cartel (texto) {
-  if (!_carteles.has(texto)) _carteles.set(texto, materialCartel(texto))
-  const s = new THREE.Sprite(_carteles.get(texto))
+const _carteles = new Map()
+
+const TONO_CARTEL = {
+  oro: { borde: '#ffc107', fondo: 'rgba(26,35,64,0.88)', tinta: '#fdf3d8' },
+  rojo: { borde: '#ff8a80', fondo: 'rgba(66,18,14,0.9)', tinta: '#ffe6e1' },
+  azul: { borde: '#8ad8ff', fondo: 'rgba(16,40,68,0.9)', tinta: '#e8f7ff' },
+  verde: { borde: '#9ce07a', fondo: 'rgba(22,50,22,0.9)', tinta: '#eeffe4' },
+  gris: { borde: '#a9b4bf', fondo: 'rgba(38,42,48,0.82)', tinta: '#dfe4e9' }
+}
+
+/** @param {string|Array<string>} lineas una o dos; la primera manda en tamaño. */
+function cartel (lineas, tono = 'oro', ancho = 1.15) {
+  const txt = (Array.isArray(lineas) ? lineas : [lineas]).filter(Boolean).map(String)
+  if (!txt.length) return null
+  const k = `${tono}|${txt.join('\n')}`
+  let material = _carteles.get(k)
+  if (!material) { material = materialCartel(txt, tono); _carteles.set(k, material) }
+  const s = new THREE.Sprite(material)
   s.userData.ignorarPicking = true
+  const caja = material.userData.caja
+  s.scale.set(ancho, ancho * caja.alto / caja.ancho, 1)
   return s
 }
 
-function materialCartel (texto) {
+function materialCartel (lineas, tono) {
+  const t = TONO_CARTEL[tono] || TONO_CARTEL.oro
+  const dos = lineas.length > 1
   const lienzo = document.createElement('canvas')
-  lienzo.width = 256; lienzo.height = 88
+  lienzo.width = 256
+  lienzo.height = dos ? 128 : 88
   const c = lienzo.getContext('2d')
-  c.font = 'bold 46px system-ui, sans-serif'
   c.textAlign = 'center'
   c.textBaseline = 'middle'
-  const ancho = Math.min(248, c.measureText(texto).width + 34)
-  c.fillStyle = 'rgba(26,35,64,0.86)'
+
+  // el texto se encoge hasta caber: un nombre largo cortado no dice nada
+  const cabe = (px, texto) => { c.font = `bold ${px}px system-ui, sans-serif`; return c.measureText(texto).width }
+  let px1 = dos ? 40 : 46
+  while (px1 > 22 && cabe(px1, lineas[0]) > 210) px1 -= 2
+  let px2 = dos ? 32 : 0
+  while (dos && px2 > 18 && cabe(px2, lineas[1]) > 210) px2 -= 2
+
+  const ancho = Math.min(250, Math.max(cabe(px1, lineas[0]), dos ? cabe(px2, lineas[1]) : 0) + 36)
+  const alto = dos ? 112 : 68
+  const x0 = (256 - ancho) / 2
+  const y0 = (lienzo.height - alto) / 2
+
+  c.fillStyle = t.fondo
   c.beginPath()
-  if (c.roundRect) c.roundRect((256 - ancho) / 2, 10, ancho, 68, 18)
-  else c.rect((256 - ancho) / 2, 10, ancho, 68)
+  if (c.roundRect) c.roundRect(x0, y0, ancho, alto, 20)
+  else c.rect(x0, y0, ancho, alto)
   c.fill()
-  c.strokeStyle = '#ffc107'; c.lineWidth = 4; c.stroke()
-  c.fillStyle = '#f5eede'
-  c.fillText(texto, 128, 45)
+  c.strokeStyle = t.borde; c.lineWidth = 5; c.stroke()
+
+  c.fillStyle = t.tinta
+  c.font = `bold ${px1}px system-ui, sans-serif`
+  c.fillText(lineas[0], 128, dos ? y0 + 34 : lienzo.height / 2)
+  if (dos) {
+    c.fillStyle = t.borde
+    c.font = `bold ${px2}px system-ui, sans-serif`
+    c.fillText(lineas[1], 128, y0 + 78)
+  }
+
   const textura = new THREE.CanvasTexture(lienzo)
   textura.colorSpace = THREE.SRGBColorSpace
   // única excepción a "los materiales solo salen de mats.js": un sprite no puede
-  // ser Lambert, y un número legible en un móvil vale más que la regla
-  return new THREE.SpriteMaterial({ map: textura, transparent: true, depthWrite: false })
+  // ser Lambert, y un texto legible en un móvil vale más que la regla
+  const m = new THREE.SpriteMaterial({ map: textura, transparent: true, depthWrite: false })
+  m.userData.caja = { ancho, alto }
+  return m
+}
+
+/**
+ * Cuelga (o cambia) el cartel de un grupo del tablero. Solo redibuja si el texto
+ * ha cambiado de verdad: un cartel nuevo son una textura y una subida a la GPU.
+ */
+function ponerCartel (g, lineas, tono = 'oro', y = 0.7, ancho = 1.4, secundario = false) {
+  const txt = (Array.isArray(lineas) ? lineas : [lineas]).filter(Boolean).join('\n')
+  const k = `${tono}|${txt}`
+  if (g.userData.cartelClave === k) {
+    if (g.userData.cartel) g.userData.cartel.position.y = y
+    return
+  }
+  g.userData.cartelClave = k
+  if (g.userData.cartel) { carteleria.delete(g.userData.cartel); g.remove(g.userData.cartel); g.userData.cartel = null }
+  const s = cartel(lineas, tono, ancho)
+  if (!s) return
+  s.position.y = y
+  // los fijos (tu aldea, la casilla elegida) se dibujan por encima de los demás
+  s.renderOrder = secundario ? 5 : 7
+  g.add(s)
+  g.userData.cartel = s
+  // "secundario" = se esconde al alejar la cámara; si no, el tablero es una sopa
+  // de letras. Tu aldea y la casilla elegida se quedan siempre.
+  if (secundario) { carteleria.add(s); s.visible = carteleriaVisible }
+}
+
+/** Los carteles que estorban cuando se mira el valle entero desde arriba. */
+const carteleria = new Set()
+let carteleriaVisible = true
+const ZOOM_SIN_CARTELES = 44      // más lejos que esto, solo iconos
+
+function repasarCarteleria () {
+  const d = ctx.camara?.distancia
+  if (!Number.isFinite(d)) return
+  const debe = d < ZOOM_SIN_CARTELES
+  if (debe === carteleriaVisible) return
+  carteleriaVisible = debe
+  for (const s of carteleria) s.visible = debe
+}
+
+/**
+ * En un cartel de tablero caben unos quince caracteres legibles. Los topónimos
+ * se recortan enteros ("Encinar Quemado del Rey" -> "Encinar Quemado…"), pero de
+ * un rival se queda el NOMBRE PROPIO: si no, tres vecinos se llaman "El alcaide"
+ * y el mapa vuelve a no decir nada.
+ */
+function nombreLugar (s = '', tope = 17) {
+  const t = String(s).trim()
+  return t.length <= tope ? t : `${t.slice(0, tope - 1).trimEnd()}…`
+}
+
+function nombreRival (s = '', tope = 14) {
+  const p = String(s).trim().split(/\s+/).filter(Boolean)
+  // la primera palabra con mayúscula que no abre la frase suele ser el nombre
+  const propio = p.find((w, i) => i > 0 && /^[A-ZÁÉÍÓÚÜÑ]/.test(w))
+  return nombreLugar(propio || p.slice(0, 2).join(' '), tope)
+}
+
+/** Cuánto queda en un yacimiento, dicho con palabras en vez de con una cifra. */
+function cuantoQueda (n) {
+  if (!n || n.agotado || n.restante <= 0) return 'agotado'
+  const base = Math.max(1, TIPOS_NODO[n.tipo]?.base || 1)
+  const f = n.restante / base
+  return f > 0.66 ? 'a mansalva' : f > 0.3 ? 'de sobra' : 'ya queda poco'
+}
+
+const PALABRA_RECURSO = {
+  madera: '🪵 madera', piedra: '🪨 piedra', comida: '🌾 grano',
+  oro: '🪙 oro', gemas: '💎 reliquias', varios: '🎒 de todo'
+}
+
+/** A qué ha salido el muñequito que cruza el valle, dicho en dos palabras. */
+const ETIQUETA_MISION = {
+  explorar: '🧭 explorando',
+  recolectar: '🎒 a por carga',
+  espiar: '👁️ espiando',
+  saquear: '🗡️ de saqueo'
 }
 
 // ══ SINCRONIZACIÓN CON EL ESTADO ═════════════════════════════════════════
@@ -804,6 +991,15 @@ function sincronizar () {
       apagar(g, apagado)
       g.position.y = g.userData.base - (apagado ? 0.18 : 0)
     }
+    // el cartel dice DÓNDE estás y QUÉ hay: sin él, el tablero es un montón de fichas
+    const comarca = porTile.get(clave(n.x, n.y))?.nombre || n.nombre || 'Tierra sin nombre'
+    const queda = cuantoQueda(n)
+    const linea2 = !n.recurso ? '💀 nada que llevarse'
+      : apagado ? `${PALABRA_RECURSO[n.recurso] || n.recurso} agotada`
+        : `${PALABRA_RECURSO[n.recurso] || n.recurso} ${queda}`
+    // los carteles vecinos se pisarían: se alternan dos alturas en tablero de ajedrez
+    ponerCartel(g, [nombreLugar(comarca), linea2], apagado ? 'gris' : 'oro',
+      0.95 + (n.y % 3) * 0.62, 2.7, true)
   }
   for (const [id, g] of marcadores) {
     if (vivos.has(id)) continue
@@ -822,7 +1018,12 @@ function sincronizar () {
       const t = porTile.get(clave(e.x, e.y))
       g.position.set(local(e.x), t ? t.h : 0.4, local(e.y))
       raiz.add(g)
-      reg = { grupo: g, cartel: null }
+      // el rótulo va aparte del castillo: cuando una base cae se aplasta, y el
+      // cartel colgado de ella se aplastaría con ella
+      const rotulo = new THREE.Group()
+      rotulo.position.copy(g.position)
+      raiz.add(rotulo)
+      reg = { grupo: g, rotulo }
       basesEnemigas.set(e.id, reg)
       brotar(g)
     }
@@ -830,15 +1031,12 @@ function sincronizar () {
     // e.amenaza es la etiqueta de texto del rival; las calaveras salen del nivel
     const calaveras = Math.max(1, Math.min(4, Math.ceil(nivel / 3.5)))
     const caido = !!e.derrotado
-    const texto = caido ? 'En ruinas' : `Nv.${nivel} ${'💀'.repeat(calaveras)}`
-    if (reg.texto !== texto) {
-      reg.texto = texto
-      if (reg.cartel) reg.grupo.remove(reg.cartel)
-      reg.cartel = cartel(texto)
-      reg.cartel.scale.set(0.72, 0.25, 1)
-      reg.cartel.position.y = 1.12
-      reg.grupo.add(reg.cartel)
-    }
+    // quién es y cómo de gordo: un rival sin nombre ni nivel no invita a nada
+    const estado = caido ? 'en ruinas · volverá'
+      : e.vasallo ? '🤝 vasallo tuyo'
+        : `Nv.${nivel} ${'💀'.repeat(calaveras)}`
+    ponerCartel(reg.rotulo, [nombreRival(e.nombre || 'Rival'), estado],
+      caido ? 'gris' : e.vasallo ? 'verde' : 'rojo', 1.35 + (e.y % 3) * 0.62, 2.7, true)
     if (reg.caido !== caido) {
       reg.caido = caido
       apagar(reg.grupo, caido)          // derrotada = piedra gris y desplomada
@@ -848,7 +1046,9 @@ function sincronizar () {
   }
   for (const [id, reg] of basesEnemigas) {
     if (enemigosVivos.has(id)) continue
-    raiz.remove(reg.grupo); basesEnemigas.delete(id)
+    raiz.remove(reg.grupo)
+    if (reg.rotulo) raiz.remove(reg.rotulo)
+    basesEnemigas.delete(id)
   }
 
   // --- sucesos del mundo ---
@@ -910,7 +1110,12 @@ function sincronizarExpediciones () {
     libres.delete(ranura)
     const figura = figuraExplorador()
     raiz.add(figura)
-    const reg = { figura, ranura, x: d.x, y: d.y, sale: ex.sale, vuelve: ex.vuelve }
+    // quién es y a qué va: el muñequito andando por el mapa deja de ser un misterio
+    const rotulo = new THREE.Group()
+    raiz.add(rotulo)
+    ponerCartel(rotulo, [nombreLugar(ex.aldeanoNombre || 'Explorador', 15),
+      `${ETIQUETA_MISION[ex.mision] || 'de expedición'}`], 'oro', 0.75, 2.5, true)
+    const reg = { figura, rotulo, ranura, x: d.x, y: d.y, sale: ex.sale, vuelve: ex.vuelve }
     expediciones.set(ex.id, reg)
     pintarCamino(reg)
     brotar(figura)
@@ -918,6 +1123,7 @@ function sincronizarExpediciones () {
   for (const [id, reg] of expediciones) {
     if (vivas.has(id)) continue
     raiz.remove(reg.figura)
+    if (reg.rotulo) raiz.remove(reg.rotulo)
     borrarCamino(reg.ranura)
     expediciones.delete(id)
   }
@@ -953,6 +1159,7 @@ function celebrarVuelta (reg) {
   const c = casa()
   const t = porTile.get(clave(c.x, c.y))
   const h = (t ? t.h : 0.4)
+  if (reg.rotulo) reg.rotulo.visible = false
   animaciones.push({
     t: 0,
     dur: 0.6,
@@ -976,9 +1183,11 @@ function sincronizarAlcance () {
 
   const c = casa()
   const n = Math.min(SEG_ANILLO, Math.max(24, Math.round(2 * Math.PI * r / 0.34)))
-  const visible = r > 0 && r < 12
+  // se enseña siempre que no abarque el valle entero: es la línea que contesta
+  // "¿por qué no puedo mandar a nadie ahí?" sin que el jugador tenga que probar
+  const visible = r > 0 && r < 16
   for (let i = 0; i < SEG_ANILLO; i++) {
-    if (!visible || i >= n || i % 2 === 1) { ponerInstancia(anillo, i, 0, -99, 0, 0, 0, 0, 0); continue }
+    if (!visible || i >= n) { ponerInstancia(anillo, i, 0, -99, 0, 0, 0, 0, 0); continue }
     const a = (i / n) * Math.PI * 2
     const x = c.x + Math.cos(a) * r
     const y = c.y + Math.sin(a) * r
@@ -986,9 +1195,21 @@ function sincronizarAlcance () {
     // dentro del valle se apoya en el relieve; fuera, flota sobre el agua (si no,
     // con un campamento crecido el anillo se esconde bajo la mesa y no dice nada)
     const alto = t ? t.h + 0.04 : SUELO_MAR + 0.14
-    ponerInstancia(anillo, i, local(x), alto, local(y), 0.22, 0.05, 0.06, -a)
+    // una estaca de cada cuatro sobresale: se lee como una cerca, no como una raya
+    const estaca = i % 4 === 0
+    ponerInstancia(anillo, i, local(x), alto, local(y),
+      estaca ? 0.09 : 0.26, estaca ? 0.3 : 0.06, estaca ? 0.09 : 0.07, -a)
   }
   anillo.instanceMatrix.needsUpdate = true
+
+  // un cartelito al norte del anillo para que la cerca se explique sola
+  if (!rotuloAlcance) { rotuloAlcance = new THREE.Group(); raiz.add(rotuloAlcance) }
+  rotuloAlcance.visible = visible
+  if (visible) {
+    const t = porTile.get(clave(c.x, Math.round(c.y - r)))
+    rotuloAlcance.position.set(local(c.x), (t ? t.h : SUELO_MAR + 0.1), local(c.y - r))
+    ponerCartel(rotuloAlcance, ['⛳ Hasta aquí llegan', 'tus exploradores'], 'verde', 1.1, 2.9, true)
+  }
 }
 
 // ══ ANIMACIÓN POR FRAME ══════════════════════════════════════════════════
@@ -1008,6 +1229,11 @@ function porFrame (dt, t) {
 
   relojSincronizar += dt
   if (relojSincronizar > SEG_SINCRONIZAR) { relojSincronizar = 0; sincronizar() }
+
+  // se recuerda el zoom con el que el jugador mira el valle, para devolvérselo
+  const dz = ctx.camara?.distancia
+  if (Number.isFinite(dz)) zoomMundo = Math.min(ZOOM_MESA_MAX, Math.max(ZOOM_MESA_MIN, dz))
+  repasarCarteleria()
 
   animarMar(t)
   animarCielo(dt, t)
@@ -1106,6 +1332,7 @@ function animarExpediciones (t) {
     const tile = porTile.get(clave(Math.round(px), Math.round(py)))
     const h = (tile ? tile.h : 0.4) + (avanzando ? Math.abs(Math.sin(t * 6)) * 0.04 : 0)
     reg.figura.position.set(local(px), h, local(py))
+    if (reg.rotulo) reg.rotulo.position.set(local(px), h, local(py))
     const dx = (k < 0.5 ? reg.x - c.x : c.x - reg.x)
     const dy = (k < 0.5 ? reg.y - c.y : c.y - reg.y)
     reg.figura.rotation.y = Math.atan2(dx, dy)
@@ -1163,11 +1390,30 @@ function tileEnPantalla (px, py) {
 
 function marcar (marco, t) {
   if (!marco) return
-  if (!t) { marco.visible = false; return }
+  const esSel = marco === marcoSel
+  if (!t) {
+    marco.visible = false
+    if (esSel && rotuloSel) rotuloSel.visible = false
+    return
+  }
   const reg = porTile.get(clave(t.x, t.y))
-  if (!reg) { marco.visible = false; return }
+  if (!reg) {
+    marco.visible = false
+    if (esSel && rotuloSel) rotuloSel.visible = false
+    return
+  }
   marco.visible = true
   marco.position.set(local(t.x), reg.h + 0.03, local(t.y))
+  if (!esSel || !rotuloSel) return
+
+  rotuloSel.visible = true
+  rotuloSel.position.set(local(t.x), reg.h, local(t.y))
+  const visto = reg.visto ?? descubierto(t.x, t.y)
+  const bioma = BIOMAS[reg.bioma]?.nombre || 'tierra rara'
+  ponerCartel(rotuloSel,
+    visto ? [nombreLugar(reg.nombre || 'Tierra sin nombre'), bioma.toLowerCase()]
+      : ['☁️ Sin explorar', 'manda a un explorador'],
+    visto ? 'azul' : 'gris', 2.3, 3.0)
 }
 
 // ══ utilidades ═══════════════════════════════════════════════════════════

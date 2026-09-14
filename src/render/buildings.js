@@ -6,7 +6,7 @@ import { game } from '../core/state.js'
 import { gridAMundo, huecoLibre } from '../core/grid.js'
 import { def } from '../data/buildings.js'
 import { ctx, aEscena, onFrame, cuandoListo } from './ctx.js'
-import { mat, M, G, pieza } from './mats.js'
+import { mat, M, G, pieza, geoCajaCh } from './mats.js'
 
 /**
  * EL ASPECTO DE LA ALDEA.
@@ -42,11 +42,45 @@ function escalon (nivel, maxNivel = 8) {
   return e
 }
 
+/**
+ * FAMILIA VISUAL de cada edificio: es el código de color que hace que la aldea
+ * se lea de un vistazo. El tejado dice la función antes de que el jugador
+ * distinga ningún detalle.
+ *   centro   → teja roja y azul heráldico   (ayuntamiento, casas, pozo)
+ *   recursos → tablilla de madera y verde   (bosque, campo, mina, mercado)
+ *   militar  → teja granate y acero         (cuartel, arquería, herrería…)
+ *   noble    → azul y cobre                 (universidad, monasterio)
+ *   defensa  → piedra y pizarra             (torres, castillo, muralla)
+ */
+const FAMILIA = {
+  ayuntamiento: 'centro', casa: 'centro', pozo: 'centro', estandarte: 'centro',
+  serreria: 'recursos', cantera: 'recursos', granja: 'recursos', mina_oro: 'recursos',
+  molino: 'recursos', almacen: 'recursos', granero: 'recursos', mercado: 'recursos',
+  cuartel: 'militar', arqueria: 'militar', establo: 'militar', taller_asedio: 'militar',
+  herreria: 'militar', campamento_explorador: 'militar',
+  universidad: 'noble', monasterio: 'noble',
+  torre_vigia: 'defensa', torre_ballesta: 'defensa', castillo: 'defensa',
+  // el puesto de frontera es un poblado, no una fortaleza: madera, teja y
+  // estandarte, para que cante sobre el verde apagado del barbecho
+  puesto_avanzado: 'centro',
+  muralla: 'defensa', puerta: 'defensa'
+}
+
+/** Tejado y acento de cada familia en los tres escalones. */
+const TONOS = {
+  centro: { techo: [PALETA.paja, PALETA.tejado, PALETA.tejadoOscuro], acento: PALETA.telaAzul },
+  recursos: { techo: [PALETA.paja, PALETA.tejaMadera, PALETA.tejaMaderaOscura], acento: PALETA.telaVerde },
+  militar: { techo: [PALETA.cuero, PALETA.tejadoOscuro, PALETA.tejadoOscuro], acento: PALETA.tela },
+  noble: { techo: [PALETA.tejado, PALETA.tejadoAzul, PALETA.tejadoAzulOscuro], acento: PALETA.cobre },
+  defensa: { techo: [PALETA.piedraOscura, PALETA.pizarraClara, PALETA.pizarra], acento: PALETA.telaAzul }
+}
+
 const cachePaleta = new Map()
 
-/** Materiales del escalón. Se comparten: nadie crea materiales por edificio. */
-function paletaDe (t) {
-  if (cachePaleta.has(t)) return cachePaleta.get(t)
+/** Materiales del escalón y de la familia. Se comparten: nadie crea materiales por edificio. */
+function paletaDe (t, familia = 'centro') {
+  const clave = `${t}|${familia}`
+  if (cachePaleta.has(clave)) return cachePaleta.get(clave)
   const comun = {
     madera: M.madera,
     maderaClara: M.maderaClara,
@@ -70,23 +104,52 @@ function paletaDe (t) {
     paja: M.paja,
     andamio: M.andamio
   }
+  const e = Math.min(2, Math.max(0, t))
+  // La defensa es de cantería desde el primer día: una torre de adobe no cuela.
+  const esDefensa = familia === 'defensa'
   const porEscalon = [
-    { muro: mat(PALETA.adobe), muroAlt: M.madera, zocalo: M.piedraOscura, techo: M.paja, techoAlt: mat(PALETA.tejadoOscuro), remate: M.madera, suelo: M.tierra },
-    { muro: M.yeso, muroAlt: mat(PALETA.adobe), zocalo: M.piedra, techo: mat(PALETA.tejado), techoAlt: mat(PALETA.tejadoOscuro), remate: M.piedra, suelo: M.camino },
-    { muro: M.piedra, muroAlt: M.piedraOscura, zocalo: M.piedraOscura, techo: mat(PALETA.pizarra), techoAlt: mat(PALETA.pizarraClara), remate: M.oro, suelo: M.camino }
-  ]
-  const p = { ...comun, ...porEscalon[Math.min(2, Math.max(0, t))], t }
-  cachePaleta.set(t, p)
+    { muro: esDefensa ? M.piedra : mat(PALETA.adobe), muroAlt: esDefensa ? M.piedraOscura : M.madera, zocalo: M.piedraOscura, suelo: M.tierra },
+    { muro: esDefensa ? M.piedra : M.yeso, muroAlt: esDefensa ? M.piedraOscura : mat(PALETA.adobe), zocalo: M.piedra, suelo: M.camino },
+    { muro: M.piedra, muroAlt: M.piedraOscura, zocalo: M.piedraOscura, suelo: M.camino }
+  ][e]
+  const tono = TONOS[familia] || TONOS.centro
+  const p = {
+    ...comun,
+    ...porEscalon,
+    techo: mat(tono.techo[e]),
+    techoAlt: mat(e === 2 ? PALETA.pizarraClara : tono.techo[Math.min(2, e + 1)]),
+    // El acento es LA seña de color de la familia: banderas, toldos, remates.
+    acento: mat(tono.acento),
+    // Un único tono oscuro por edificio (vigas, herrajes, huecos): así los
+    // detalles no multiplican las llamadas de dibujo.
+    oscuro: familia === 'militar' || familia === 'defensa' ? M.hierro : mat(PALETA.entramado),
+    remate: e === 2 ? M.oro : (esDefensa ? M.piedra : M.madera),
+    t: e,
+    fam: familia
+  }
+  cachePaleta.set(clave, p)
   return p
 }
 
 // ── helpers geométricos (la `y` que reciben SIEMPRE es la base, no el centro) ──
 
-/** Caja apoyada en `y`. El ladrillo con el que está hecho el 80 % del juego. */
+/** Caja apoyada en `y`. El ladrillo de los DETALLES pequeños. */
 const caja = (m, x, y, z, sx, sy, sz, ry = 0) => pieza(G.caja, m, { x, y: y + sy / 2, z, sx, sy, sz, ry })
+
+/**
+ * Caja con los cantos verticales achaflanados, apoyada en `y`. Es la que se usa
+ * para TODO volumen grande (muros, zócalos, torres): el chaflán es lo que quita
+ * de golpe la sensación de "montón de cajas".
+ */
+const cajaR = (m, x, y, z, sx, sy, sz, ry = 0, ch = 0.09) =>
+  pieza(geoCajaCh(sx, sy, sz, ch), m, { x, y: y + sy / 2, z, ry })
 
 const cil = (m, x, y, z, d, h, ry = 0) => pieza(G.cilindro, m, { x, y: y + h / 2, z, sx: d, sy: h, sz: d, ry })
 const cil6 = (m, x, y, z, d, h, ry = 0) => pieza(G.cilindro6, m, { x, y: y + h / 2, z, sx: d, sy: h, sz: d, ry })
+/** Torreón, pozo, chimenea: doce caras y ya se lee redondo desde el móvil. */
+const cil12 = (m, x, y, z, d, h, ry = 0) => pieza(G.cilindro12, m, { x, y: y + h / 2, z, sx: d, sy: h, sz: d, ry })
+/** Fuste que se estrecha hacia arriba: molino y torres esbeltas. */
+const fuste = (m, x, y, z, d, h, ry = 0) => pieza(G.fuste12, m, { x, y: y + h / 2, z, sx: d, sy: h, sz: d, ry })
 const leno = (m, x, y, z, d, h, ry = 0) => pieza(G.tronco, m, { x, y: y + h / 2, z, sx: d, sy: h, sz: d, ry })
 /** Tronco tumbado, apoyado en `y`: a lo largo de X o de Z. */
 const lenoX = (m, x, y, z, d, largo) => pieza(G.tronco, m, { x, y: y + d / 2, z, sx: d, sy: largo, sz: d, rz: PI / 2 })
@@ -94,50 +157,79 @@ const lenoZ = (m, x, y, z, d, largo) => pieza(G.tronco, m, { x, y: y + d / 2, z,
 const roca = (m, x, y, z, d, ry = 0) => pieza(G.esfera, m, { x, y: y + d * 0.32, z, sx: d, sy: d * 0.8, sz: d, ry })
 
 /** Tejado piramidal de base cuadrada (torres y torreones). */
-const techo4 = (m, x, y, z, lado, alt, ry = PI / 4) =>
-  pieza(G.cono, m, { x, y: y + alt / 2, z, sx: lado * 1.4143, sy: alt, sz: lado * 1.4143, ry })
+const techo4 = (m, x, y, z, lado, alt) =>
+  pieza(G.piramide, m, { x, y: y + alt / 2, z, sx: lado * 1.4143, sy: alt, sz: lado * 1.4143 })
 
 /** Tejado cónico: la silueta que dice "torreón" desde lejos. */
 const techoCono = (m, x, y, z, d, alt) => pieza(G.cono8, m, { x, y: y + alt / 2, z, sx: d, sy: alt, sz: d })
+
+/** Tejado a CUATRO AGUAS (pirámide sobre rectángulo): silueta compacta, sin hastiales. */
+const techo4Aguas = (m, x, y, z, ancho, prof, alt) =>
+  pieza(G.piramide, m, { x, y: y + alt / 2, z, sx: ancho * 1.4143, sy: alt, sz: prof * 1.4143 })
 
 /** Triángulo del hastial: un cono de 4 lados aplastado en Z es exactamente eso. */
 const hastial = (m, x, y, z, ancho, alt, gro = 0.16) =>
   pieza(G.cono, m, { x, y: y + alt / 2, z, sx: ancho, sy: alt, sz: gro })
 
 /**
- * Tejado a dos aguas: dos losas inclinadas con vuelo. El caballete corre en Z,
- * así que los hastiales miran a ±Z.
+ * ARCO DE MEDIO PUNTO. Medio cilindro de 10 caras: puertas, ventanas, arquerías
+ * y soportales. Es lo que separa un edificio "de verdad" de una caja con un
+ * rectángulo oscuro pintado. `y` es el arranque del arco (la línea de imposta).
+ */
+const arco = (m, x, y, z, luz, gro) => pieza(G.arco, m, { x, y, z, sx: luz, sy: luz, sz: gro })
+
+/** Hueco de puerta/ventana ya completo: jamba recta + arco arriba. */
+function hueco (l, m, x, y, z, luz, alto, gro = 0.06) {
+  l.push(caja(m, x, y, z, luz, alto, gro))
+  l.push(arco(m, x, y + alto, z, luz, gro))
+}
+
+/** Bóveda de cañón: el mismo medio cilindro, pero a tamaño de tejado. */
+const boveda = (m, x, y, z, ancho, prof) => pieza(G.arco, m, { x, y, z, sx: ancho, sy: ancho, sz: prof })
+
+/** Cúpula facetada: remate noble de torres (universidad, monasterio, concejo). */
+const cupula = (m, x, y, z, d, alt) => pieza(G.cupula, m, { x, y, z, sx: d, sy: alt * 2, sz: d })
+
+/**
+ * Tejado a dos aguas: dos losas inclinadas con vuelo, CABALLETE redondeado y
+ * canto de alero. El caballete corre en Z, así que los hastiales miran a ±Z.
+ * El cilindro de la cumbrera es barato y es lo que da el aire de teja curva.
  */
 function techo2Aguas (m, x, y, z, ancho, prof, alt, vuelo = 0.16) {
   const g = new THREE.Group()
   const ang = Math.atan2(alt, ancho / 2)
   const largo = Math.hypot(ancho / 2, alt) + vuelo
   const gro = 0.11
-  g.add(pieza(G.caja, m, { x: -ancho / 4, y: alt / 2, z: 0, sx: largo, sy: gro, sz: prof + vuelo * 2, rz: ang }))
-  g.add(pieza(G.caja, m, { x: ancho / 4, y: alt / 2, z: 0, sx: largo, sy: gro, sz: prof + vuelo * 2, rz: -ang }))
+  const fondo = prof + vuelo * 2
+  g.add(pieza(G.caja, m, { x: -ancho / 4, y: alt / 2, z: 0, sx: largo, sy: gro, sz: fondo, rz: ang }))
+  g.add(pieza(G.caja, m, { x: ancho / 4, y: alt / 2, z: 0, sx: largo, sy: gro, sz: fondo, rz: -ang }))
+  g.add(pieza(G.cilindro6, m, { x: 0, y: alt + gro * 0.3, z: 0, sx: 0.17, sy: fondo, sz: 0.17, rx: PI / 2 }))
   g.position.set(x, y, z)
   return g
 }
+
+/** Cornisa: una losa fina que vuela sobre el muro. Da sombra y "acaba" el edificio. */
+const cornisa = (m, x, y, z, sx, sz, gro = 0.09) => cajaR(m, x, y, z, sx, gro, sz, 0, 0.05)
 
 /** Entramado de madera en una fachada. Cuatro piezas y ya parece medieval. */
 function entramado (l, p, x, y, z, ancho, alt, prof) {
   const gro = 0.1
   const zf = z + prof / 2 + 0.015
-  l.push(caja(p.viga, x, y + alt - gro, zf, ancho, gro, 0.05))
-  l.push(caja(p.viga, x - ancho / 2 + gro / 2, y, zf, gro, alt, 0.05))
-  l.push(caja(p.viga, x + ancho / 2 - gro / 2, y, zf, gro, alt, 0.05))
-  l.push(pieza(G.caja, p.viga, {
+  l.push(caja(p.oscuro, x, y + alt - gro, zf, ancho, gro, 0.05))
+  l.push(caja(p.oscuro, x - ancho / 2 + gro / 2, y, zf, gro, alt, 0.05))
+  l.push(caja(p.oscuro, x + ancho / 2 - gro / 2, y, zf, gro, alt, 0.05))
+  l.push(pieza(G.caja, p.oscuro, {
     x, y: y + alt / 2, z: zf, sx: Math.hypot(ancho, alt) * 0.92, sy: gro, sz: 0.05, rz: Math.atan2(alt, ancho)
   }))
 }
 
-/** Almenas sobre un muro: la firma de la piedra de nivel alto. */
+/** Almenas sobre un muro: la firma de la piedra de nivel alto. Merlones con el canto matado. */
 function almenas (l, m, x, y, z, largo, prof, paso = 0.36, alt = 0.2, enZ = false) {
   const n = Math.max(3, Math.round(largo / paso) | 1)
   const d = largo / n
   for (let i = 0; i < n; i += 2) {
     const o = -largo / 2 + d / 2 + i * d
-    l.push(enZ ? caja(m, x, y, z + o, prof, alt, d * 0.92) : caja(m, x + o, y, z, d * 0.92, alt, prof))
+    l.push(enZ ? cajaR(m, x, y, z + o, prof, alt, d * 0.92, 0, 0.05) : cajaR(m, x + o, y, z, d * 0.92, alt, prof, 0, 0.05))
   }
 }
 
@@ -145,7 +237,9 @@ function almenas (l, m, x, y, z, largo, prof, paso = 0.36, alt = 0.2, enZ = fals
 function bandera (p, mTela, x, y, z, alt = 1.0, ancho = 0.46) {
   const g = new THREE.Group()
   g.add(caja(p.madera, 0, 0, 0, 0.06, alt, 0.06))
-  g.add(pieza(G.esfera, p.oro, { x: 0, y: alt + 0.05, z: 0, sx: 0.12, sy: 0.14, sz: 0.12 }))
+  // la bola del mástil va del material de remate (madera abajo, oro arriba): así
+  // una bandera no obliga a un material extra en cada edificio
+  g.add(pieza(G.esfera, p.remate, { x: 0, y: alt + 0.05, z: 0, sx: 0.12, sy: 0.14, sz: 0.12 }))
   const tela = new THREE.Group()
   tela.position.set(0, alt - 0.08, 0)
   tela.add(caja(mTela, ancho / 2 + 0.04, -0.44, 0, ancho, 0.44, 0.04))
@@ -204,115 +298,141 @@ const SUELO = 0.09
 
 function fAyuntamiento ({ p, n, t, det }) {
   const l = []
-  const h = 1.05 + 0.06 * n
-  const y = SUELO + 0.18
-  l.push(caja(p.zocalo, 0, SUELO, 0, 3.5, 0.18, 3.1))
-  l.push(caja(p.muro, 0, y, 0, 3.0, h, 2.6))
+  const h = 1.1 + 0.055 * n
+  const y = SUELO + 0.2
+  l.push(cajaR(p.zocalo, 0, SUELO, 0, 3.5, 0.2, 3.1, 0, 0.14))
+  l.push(cajaR(p.muro, 0, y, 0, 3.0, h, 2.6, 0, 0.14))
   if (t < 2) entramado(l, p, 0, y, 0, 3.0, h, 2.6)
-  else almenas(l, p.muroAlt, 0, SUELO + 0.18, 1.5, 3.4, 0.2, 0.4, 0.18)
-  l.push(techo2Aguas(p.techo, 0, y + h, 0, 3.25, 2.85, 0.8))
-  l.push(hastial(p.muroAlt, 0, y + h, 1.42, 3.25, 0.8))
-  l.push(hastial(p.muroAlt, 0, y + h, -1.42, 3.25, 0.8))
-  // pórtico de entrada: dos columnas y un frontón, lo que le da empaque
-  l.push(caja(p.madera, 0, y, 1.32, 0.8, 0.95, 0.08))
-  l.push(caja(p.zocalo, 0, SUELO, 1.7, 1.5, 0.1, 0.5))
-  l.push(cil(p.zocalo, -0.55, y, 1.6, 0.22, 0.95))
-  l.push(cil(p.zocalo, 0.55, y, 1.6, 0.22, 0.95))
-  l.push(caja(p.techoAlt, 0, y + 0.95, 1.58, 1.5, 0.12, 0.7))
-  // torre del reloj: la silueta que lo hace inconfundible desde arriba
-  const yt = y + h + 0.6
-  l.push(caja(p.muro, 0, yt, -0.5, 0.95, 1.0 + 0.05 * n, 0.95))
-  l.push(caja(p.viga, 0, yt + 0.98 + 0.05 * n, -0.5, 1.05, 0.1, 1.05))
-  l.push(techo4(t >= 2 ? p.techo : p.techoAlt, 0, yt + 1.08 + 0.05 * n, -0.5, 1.15, 0.75))
-  l.push(pieza(G.esfera, p.oro, { x: 0, y: yt + 1.9 + 0.05 * n, z: -0.5, sx: 0.18, sy: 0.24, sz: 0.18 }))
-  if (det) {
-    l.push(caja(p.oro, 0, yt + 0.35, -0.02, 0.42, 0.42, 0.06))    // esfera del reloj
-    l.push(caja(p.carbon, -0.28, y + 0.45, 1.32, 0.24, 0.3, 0.04))
-    l.push(caja(p.carbon, 0.28, y + 0.45, 1.32, 0.24, 0.3, 0.04))
+  l.push(cornisa(p.muroAlt, 0, y + h, 0, 3.3, 2.9, 0.13))
+  // CUATRO AGUAS: es el único tejado grande de la aldea sin hastiales. Desde
+  // arriba se lee como una pirámide y ya no se confunde con ningún almacén.
+  l.push(techo4Aguas(p.techo, 0, y + h + 0.13, 0, 3.32, 2.92, 0.92))
+  // soportal de arco de medio punto: empaque de casa consistorial
+  l.push(cajaR(p.zocalo, 0, SUELO, 1.72, 2.3, 0.13, 0.7, 0, 0.07))
+  const hc = h * 0.62
+  // en el escalón de adobe el soportal es de madera; en piedra, de cantería
+  const mPortico = t === 0 ? p.madera : p.zocalo
+  for (const x of [-0.82, 0.82]) l.push(cil12(mPortico, x, SUELO + 0.13, 1.66, 0.3, hc))
+  l.push(arco(mPortico, 0, SUELO + 0.13 + hc, 1.66, 1.64, 0.26))
+  l.push(cornisa(p.techo, 0, SUELO + 0.13 + hc + 0.84, 1.66, 2.2, 0.8, 0.13))
+  hueco(l, p.madera, 0, y, 1.32, 0.82, 0.62, 0.08)
+  // TORRE DEL RELOJ CON CÚPULA DORADA: la seña que se ve desde cualquier zoom
+  const yt = y + h + 0.13
+  const ht = 1.0 + 0.05 * n
+  l.push(cajaR(p.muro, 0, yt, -0.6, 1.0, ht, 1.0, 0, 0.12))
+  l.push(cornisa(p.muroAlt, 0, yt + ht, -0.6, 1.2, 1.2, 0.12))
+  l.push(cupula(p.oro, 0, yt + ht + 0.12, -0.6, 1.12, 0.6))
+  l.push(caja(p.oro, 0, yt + ht + 0.7, -0.6, 0.07, 0.36, 0.07))
+  l.push(pieza(G.esfera, p.oro, { x: 0, y: yt + ht + 1.14, z: -0.6, sx: 0.17, sy: 0.21, sz: 0.17 }))
+  // dos esferas de reloj, a las dos caras que mira la cámara del juego
+  l.push(pieza(G.cilindro, p.oro, { x: 0, y: yt + ht * 0.62, z: -0.08, sx: 0.5, sy: 0.06, sz: 0.5, rx: PI / 2 }))
+  l.push(pieza(G.cilindro, p.oro, { x: 0.52, y: yt + ht * 0.62, z: -0.6, sx: 0.5, sy: 0.06, sz: 0.5, rz: PI / 2 }))
+  l.push(bandera(p, p.acento, -1.45, y, 1.3, 1.2, 0.44))
+  l.push(bandera(p, p.acento, 1.45, y, 1.3, 1.2, 0.44))
+  if (t >= 2) {
+    almenas(l, p.muroAlt, 0, y + h + 0.13, 1.46, 3.3, 0.2, 0.44, 0.22)
+    almenas(l, p.muroAlt, 0, y + h + 0.13, -1.46, 3.3, 0.2, 0.44, 0.22)
   }
-  if (t >= 1) {
-    l.push(bandera(p, p.telaAzul, -1.35, y + h * 0.2, 1.3, 1.1))
-    l.push(bandera(p, p.tela, 1.35, y + h * 0.2, 1.3, 1.1))
+  if (det) {
+    hueco(l, p.oscuro, -1.05, y + 0.34, 1.32, 0.32, 0.3, 0.05)
+    hueco(l, p.oscuro, 1.05, y + 0.34, 1.32, 0.32, 0.3, 0.05)
   }
   return l
 }
 
 function fCasa ({ p, n, t, det }) {
   const l = []
-  const h = 0.72 + 0.07 * n
+  const h = 0.6 + 0.055 * n
   const y = SUELO + 0.12
-  l.push(caja(p.zocalo, 0, SUELO, 0, 1.55, 0.12, 1.45))
-  l.push(caja(p.muro, 0, y, 0, 1.42, h, 1.32))
+  const ht = 0.64 + 0.03 * n      // tejado MUY empinado: la casa es un pico, no un cajón
+  l.push(cajaR(p.zocalo, 0, SUELO, 0, 1.55, 0.12, 1.45, 0, 0.1))
+  l.push(cajaR(p.muro, 0, y, 0, 1.42, h, 1.32, 0, 0.1))
   if (t < 2) entramado(l, p, 0, y, 0, 1.42, h, 1.32)
-  l.push(techo2Aguas(p.techo, 0, y + h, 0, 1.7, 1.5, 0.52 + 0.03 * n))
-  l.push(hastial(p.muroAlt, 0, y + h, 0.72, 1.7, 0.52 + 0.03 * n))
-  l.push(hastial(p.muroAlt, 0, y + h, -0.72, 1.7, 0.52 + 0.03 * n))
-  l.push(caja(p.madera, -0.32, y, 0.68, 0.36, 0.56, 0.06))
-  l.push(caja(p.oro, -0.2, y + 0.28, 0.72, 0.06, 0.06, 0.03))
-  l.push(caja(p.carbon, 0.32, y + h * 0.45, 0.68, 0.3, 0.26, 0.04))
-  l.push(caja(p.viga, 0.32, y + h * 0.45, 0.7, 0.34, 0.05, 0.05))
-  l.push(caja(p.zocalo, 0.46, y + h * 0.35, -0.42, 0.32, 1.0, 0.32))   // chimenea
-  l.push(caja(p.carbon, 0.46, y + h * 0.35 + 1.0, -0.42, 0.4, 0.09, 0.4))
+  l.push(techo2Aguas(p.techo, 0, y + h, 0, 1.68, 1.48, ht))
+  l.push(hastial(p.muroAlt, 0, y + h, 0.71, 1.68, ht))
+  l.push(hastial(p.muroAlt, 0, y + h, -0.71, 1.68, ht))
+  hueco(l, p.madera, -0.3, y, 0.67, 0.4, 0.4, 0.07)
+  hueco(l, p.oscuro, 0.34, y + 0.28, 0.67, 0.32, 0.18, 0.05)
+  // CHIMENEA REDONDA: en toda la aldea solo la casa tiene tubo cilíndrico
+  const yc = y + h * 0.25
+  l.push(cil12(p.zocalo, 0.46, yc, -0.46, 0.34, h * 0.85 + ht + 0.1))
+  l.push(cil12(p.oscuro, 0.46, yc + h * 0.85 + ht + 0.1, -0.46, 0.42, 0.1))
   if (det) {
-    l.push(barril(p, -0.58, SUELO, -0.5))
-    lena(l, p, 0.35, SUELO, -0.62)
+    l.push(barril(p, -0.6, SUELO, -0.5))
+    lena(l, p, 0.3, SUELO, -0.66)
+    l.push(caja(p.madera, 0.34, y + 0.24, 0.72, 0.36, 0.1, 0.12))       // jardinera
+    l.push(roca(mat(PALETA.florRoja), 0.34, y + 0.32, 0.72, 0.2))
   }
-  if (t >= 2) l.push(bandera(p, p.telaAzul, 0.62, y, 0.62, 0.7, 0.3))
+  if (t >= 2) l.push(bandera(p, p.acento, 0.64, y, 0.64, 0.72, 0.3))
   return l
 }
 
 function fSerreria ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 0.95 + 0.05 * n
-  // el cobertizo va al fondo: lo que identifica la serrería tiene que quedar
-  // FUERA del tejado, o desde arriba no se ve nada
-  for (const x of [-1.05, 1.05]) for (const z of [-1.15, 0.05]) l.push(caja(p.madera, x, y, z, 0.16, h, 0.16))
-  l.push(caja(p.muro, 0, y, -1.25, 2.4, h, 0.32))
-  l.push(techo2Aguas(p.techo, 0, y + h, -0.55, 2.6, 1.6, 0.5))
-  l.push(hastial(p.madera, 0, y + h, 0.25, 2.6, 0.5))
-  // troncos apilados delante
-  for (let i = 0; i < 3; i++) l.push(lenoX(p.tronco, 0.5, y, 0.55 + i * 0.32, 0.3, 1.7))
-  l.push(lenoX(p.tronco, 0.5, y + 0.29, 0.71, 0.3, 1.7))
-  l.push(lenoX(p.tronco, 0.5, y + 0.29, 1.03, 0.3, 1.7))
-  // sierra circular sobre su banco, al descubierto
-  l.push(caja(p.maderaClara, -0.9, y, 0.75, 0.95, 0.42, 0.75))
-  l.push(pieza(G.cilindro, p.metal, { x: -0.9, y: y + 0.68, z: 0.75, sx: 0.68, sy: 0.05, sz: 0.68, rx: PI / 2 }))
-  l.push(caja(p.metal, -0.9, y + 0.42, 0.75, 0.1, 0.28, 0.1))
-  if (det) {
-    for (let i = 0; i < 3; i++) l.push(caja(p.maderaClara, -0.55, y + i * 0.09, -0.7, 1.1, 0.08, 0.34, 0.08 * i))
-    l.push(roca(p.paja, -1.15, y, -0.1, 0.36))
-    l.push(barril(p, 1.15, y, -0.85))
+  const h = 0.88 + 0.04 * n
+  // cobertizo A UN AGUA y abierto: ni tejado a dos aguas ni hastiales
+  for (const x of [-1.15, 1.15]) for (const z of [-1.15, 0.15]) l.push(caja(p.madera, x, y, z, 0.16, h, 0.16))
+  l.push(cajaR(p.muro, 0, y, -1.28, 2.6, h + 0.46, 0.3, 0, 0.08))
+  // el faldón cae hacia el frente: el muro alto queda DEBAJO del alero, nunca asomando
+  l.push(pieza(G.caja, p.techo, { x: 0, y: y + h + 0.62, z: -0.5, sx: 2.85, sy: 0.12, sz: 1.9, rx: 0.3 }))
+  // RUEDA HIDRÁULICA girando: la seña de la serrería, visible desde arriba
+  const rd = new THREE.Group()
+  rd.position.set(-1.42, y + 0.72, 0.5)
+  rd.userData.anim = 'rueda'
+  rd.add(pieza(G.cilindro12, p.maderaClara, { x: 0, y: 0, z: 0, sx: 1.3, sy: 0.12, sz: 1.3, rz: PI / 2 }))
+  rd.add(pieza(G.cilindro6, p.madera, { x: 0, y: 0, z: 0, sx: 0.26, sy: 0.5, sz: 0.26, rz: PI / 2 }))
+  for (let i = 0; i < 8; i++) {
+    const a = (i * PI) / 4
+    rd.add(pieza(G.caja, p.madera, { x: 0, y: Math.sin(a) * 0.58, z: Math.cos(a) * 0.58, sx: 0.36, sy: 0.2, sz: 0.14, rx: -a }))
   }
-  if (t >= 1) l.push(bandera(p, p.telaVerde, 1.25, y, 1.25, 0.8, 0.3))
+  l.push(rd)
+  l.push(cajaR(p.piedraOscura, -1.42, y - 0.02, 0.5, 0.6, 0.16, 1.5, 0, 0.07))   // canal del agua
+  l.push(caja(mat(PALETA.agua), -1.42, y + 0.14, 0.5, 0.44, 0.05, 1.4))
+  // TRONCOS APILADOS: madera en bruto, siempre visible
+  for (let i = 0; i < 3; i++) l.push(lenoX(p.tronco, 0.45, y, 0.5 + i * 0.32, 0.32, 1.7))
+  l.push(lenoX(p.tronco, 0.45, y + 0.3, 0.66, 0.32, 1.7))
+  l.push(lenoX(p.tronco, 0.45, y + 0.3, 0.98, 0.32, 1.7))
+  // sierra circular sobre su banco
+  // el banco de la sierra va FUERA del cobertizo: si el disco queda bajo el
+  // tejado, desde la cámara del juego no se ve y la serrería pierde su icono
+  l.push(cajaR(p.maderaClara, 1.12, y, 0.72, 0.95, 0.44, 0.7, 0.3, 0.06))
+  l.push(pieza(G.cilindro12, p.metal, { x: 1.12, y: y + 0.72, z: 0.72, sx: 0.7, sy: 0.05, sz: 0.7, rx: PI / 2, ry: 0.3 }))
+  l.push(caja(p.metal, 1.12, y + 0.44, 0.72, 0.1, 0.3, 0.1))
+  if (det) {
+    for (let i = 0; i < 3; i++) l.push(caja(p.maderaClara, -0.45, y + i * 0.09, -0.75, 1.0, 0.08, 0.34, 0.07 * i))
+    l.push(barril(p, 1.25, y, -0.8))
+  }
+  l.push(bandera(p, p.acento, 1.3, y, 1.25, 0.85, 0.32))
   return l
 }
 
 function fCantera ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  // el hoyo y la roca madre
-  l.push(caja(p.tierra, -0.5, y - 0.04, -0.5, 1.7, 0.1, 1.7))
-  l.push(roca(p.piedraOscura, -0.9, y, -0.9, 1.0, 0.4))
-  l.push(roca(p.piedraOscura, -0.1, y, -1.0, 0.8, 1.1))
-  l.push(roca(p.piedra, -1.05, y + 0.3, -0.3, 0.7, 0.6))
-  // sillares cortados y bien apilados
-  for (let i = 0; i < 3; i++) l.push(caja(p.piedra, 0.75, y + i * 0.26, 0.6, 0.62, 0.26, 0.5, 0.08 * i))
-  l.push(caja(p.piedra, 0.75, y, 1.05, 0.62, 0.26, 0.4))
-  l.push(caja(p.piedra, 0.1, y, 0.85, 0.5, 0.24, 0.44, 0.3))
-  // grúa de madera para izar la piedra
-  l.push(caja(p.madera, 0.9, y, -0.7, 0.16, 1.5, 0.16))
-  l.push(pieza(G.caja, p.madera, { x: 0.5, y: y + 1.45, z: -0.7, sx: 1.2, sy: 0.12, sz: 0.12, rz: -0.18 }))
-  l.push(caja(p.metal, 0.05, y + 0.95, -0.7, 0.04, 0.45, 0.04))
-  l.push(caja(p.madera, 0.05, y + 0.75, -0.7, 0.3, 0.22, 0.3))
+  // SIN TEJADO: una cantera es un hoyo, y eso sola ya la separa del resto
+  l.push(cajaR(p.tierra, -0.45, y - 0.05, -0.45, 1.9, 0.1, 1.9, 0, 0.2))
+  l.push(roca(p.piedraOscura, -0.95, y, -0.95, 1.1, 0.4))
+  l.push(roca(p.piedraOscura, -0.1, y, -1.05, 0.85, 1.1))
+  l.push(roca(p.piedra, -1.1, y + 0.3, -0.25, 0.75, 0.6))
+  // SILLARES CORTADOS en pila ordenada: el contrapunto geométrico al pedrusco
+  for (let i = 0; i < 3; i++) l.push(cajaR(p.piedra, 0.8, y + i * 0.27, 0.62, 0.66, 0.27, 0.54, 0.07 * i, 0.05))
+  l.push(cajaR(p.piedra, 0.8, y, 1.1, 0.66, 0.27, 0.44, 0, 0.05))
+  l.push(cajaR(p.piedra, 0.12, y, 0.9, 0.54, 0.25, 0.48, 0.3, 0.05))
+  l.push(cajaR(p.piedra, 0.12, y + 0.25, 0.9, 0.46, 0.22, 0.4, 0.5, 0.05))
+  // GRÚA DE MADERA alta: la silueta vertical de la cantera
+  l.push(caja(p.madera, 0.95, y, -0.75, 0.18, 1.85, 0.18))
+  l.push(pieza(G.caja, p.madera, { x: 0.45, y: y + 1.78, z: -0.75, sx: 1.5, sy: 0.13, sz: 0.13, rz: -0.16 }))
+  l.push(pieza(G.caja, p.madera, { x: 0.72, y: y + 1.1, z: -0.75, sx: 1.0, sy: 0.1, sz: 0.1, rz: 0.9 }))
+  l.push(caja(p.oscuro, -0.05, y + 1.1, -0.75, 0.04, 0.62, 0.04))
+  l.push(cajaR(p.piedra, -0.05, y + 0.85, -0.75, 0.34, 0.26, 0.34, 0.2, 0.05))
   // carretilla
-  l.push(caja(p.maderaClara, -0.6, y + 0.24, 0.95, 0.55, 0.26, 0.4, 0.4))
-  l.push(rueda(p, -0.85, y, 0.86, 0.3))
-  l.push(pieza(G.caja, p.madera, { x: -0.35, y: y + 0.36, z: 1.06, sx: 0.5, sy: 0.06, sz: 0.06, ry: 0.4 }))
+  l.push(cajaR(p.maderaClara, -0.65, y + 0.26, 1.0, 0.58, 0.28, 0.42, 0.4, 0.05))
+  l.push(rueda(p, -0.9, y, 0.9, 0.32))
   if (det) {
-    l.push(caja(p.metal, 0.35, y + 0.5, -0.3, 0.5, 0.06, 0.06, 0.8))   // pico apoyado
-    l.push(roca(p.piedra, 0.3, y, -0.55, 0.3))
-    l.push(roca(p.piedra, -0.15, y, 0.25, 0.24))
+    l.push(pieza(G.caja, p.metal, { x: 0.35, y: y + 0.5, z: -0.25, sx: 0.5, sy: 0.06, sz: 0.06, rz: 0.8 }))
+    l.push(roca(p.piedra, 0.3, y, -0.5, 0.3))
+    l.push(roca(p.piedra, -0.2, y, 0.3, 0.24))
   }
   return l
 }
@@ -320,30 +440,31 @@ function fCantera ({ p, n, t, det }) {
 function fGranja ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  l.push(caja(p.tierra, 0, y - 0.02, 0.15, 2.7, 0.08, 2.4))
-  // bancales de trigo en franjas: se leen perfectamente desde arriba
-  const franjas = det ? 5 : 3
+  l.push(cajaR(p.tierra, 0, y - 0.02, 0.15, 2.75, 0.08, 2.45, 0, 0.16))
+  // BANCALES DE TRIGO en franjas: se leen perfectamente desde arriba
+  const franjas = det ? 5 : 4
   for (let i = 0; i < franjas; i++) {
     const z = -0.95 + (i * 2.2) / (franjas - 1)
-    l.push(caja(p.trigo, 0, y + 0.02, z, 2.5, 0.22 + 0.02 * (i % 2) + 0.02 * n, 0.24))
-    if (det) l.push(caja(p.tierra, 0, y, z + 0.22, 2.5, 0.05, 0.14))
+    l.push(caja(p.trigo, 0, y + 0.02, z, 2.5, 0.24 + 0.02 * (i % 2) + 0.02 * n, 0.26))
+    l.push(caja(p.tierra, 0, y, z + 0.24, 2.5, 0.05, 0.14))
   }
   // espantapájaros
-  l.push(caja(p.madera, -0.95, y, -1.1, 0.09, 1.0, 0.09))
-  l.push(caja(p.madera, -0.95, y + 0.68, -1.1, 0.8, 0.08, 0.08))
-  l.push(caja(p.tela, -0.95, y + 0.62, -1.1, 0.42, 0.42, 0.2))
-  l.push(pieza(G.esfera, p.paja, { x: -0.95, y: y + 1.08, z: -1.1, sx: 0.3, sy: 0.3, sz: 0.3 }))
-  l.push(techo4(p.madera, -0.95, y + 1.2, -1.1, 0.46, 0.22))
-  // cerca baja
-  if (det) {
-    for (let i = 0; i < 4; i++) l.push(caja(p.madera, -1.35 + i * 0.9, y, 1.35, 0.08, 0.42, 0.08))
-    l.push(caja(p.madera, 0, y + 0.28, 1.35, 3.0, 0.06, 0.06))
-    l.push(barril(p, 1.25, y, -1.2))
-    l.push(roca(p.paja, 0.6, y, -1.25, 0.5))
-  }
+  l.push(caja(p.madera, -1.0, y, -1.15, 0.09, 1.05, 0.09))
+  l.push(caja(p.madera, -1.0, y + 0.7, -1.15, 0.82, 0.08, 0.08))
+  l.push(caja(p.acento, -1.0, y + 0.62, -1.15, 0.44, 0.44, 0.2))
+  l.push(pieza(G.esfera, p.paja, { x: -1.0, y: y + 1.12, z: -1.15, sx: 0.32, sy: 0.32, sz: 0.32 }))
+  l.push(techoCono(p.madera, -1.0, y + 1.26, -1.15, 0.5, 0.24))
+  // cerca baja de estacas redondas
+  for (let i = 0; i < 5; i++) l.push(cil6(p.madera, -1.4 + i * 0.7, y, 1.38, 0.1, 0.44))
+  l.push(caja(p.madera, 0, y + 0.3, 1.38, 3.0, 0.06, 0.06))
   if (t >= 1) {
-    l.push(caja(p.muro, 1.05, y, -1.05, 0.8, 0.6, 0.7))
-    l.push(techo2Aguas(p.techo, 1.05, y + 0.6, -1.05, 0.95, 0.85, 0.3))
+    // pajar pequeño, para que la granja tenga algo de volumen
+    l.push(cajaR(p.muro, 1.05, y, -1.05, 0.9, 0.62, 0.78, 0, 0.08))
+    l.push(techo2Aguas(p.techo, 1.05, y + 0.62, -1.05, 1.05, 0.9, 0.36))
+  }
+  if (det) {
+    l.push(roca(p.paja, 0.55, y, -1.3, 0.55))
+    l.push(roca(p.paja, 0.1, y, -1.25, 0.42))
   }
   return l
 }
@@ -352,176 +473,204 @@ function fMinaOro ({ p, n, t, det }) {
   const l = []
   const y = SUELO
   // el cerro con la bocamina
-  l.push(roca(p.piedraOscura, 0, y, -0.85, 2.2, 0.3))
-  l.push(roca(p.piedraOscura, -0.85, y, -0.2, 1.3, 1.0))
-  l.push(roca(p.piedra, 0.85, y + 0.1, -0.5, 1.0, 0.6))
-  l.push(caja(p.carbon, 0, y, 0.05, 0.85, 0.85, 0.5))
-  l.push(caja(p.madera, -0.5, y, 0.3, 0.14, 1.0, 0.14))
-  l.push(caja(p.madera, 0.5, y, 0.3, 0.14, 1.0, 0.14))
-  l.push(caja(p.madera, 0, y + 1.0, 0.3, 1.25, 0.16, 0.2))
-  // vetas de oro a la vista
-  l.push(pieza(G.esfera, p.oro, { x: -0.95, y: y + 0.75, z: -0.55, sx: 0.28, sy: 0.2, sz: 0.28 }))
-  l.push(pieza(G.esfera, p.oro, { x: 0.75, y: y + 0.55, z: -1.0, sx: 0.22, sy: 0.16, sz: 0.22 }))
-  // vagoneta sobre raíles
-  l.push(caja(p.madera, 0, y, 0.95, 0.1, 0.05, 1.3))
-  l.push(caja(p.madera, 0.45, y, 0.95, 0.1, 0.05, 1.3))
-  l.push(caja(p.metal, 0.22, y + 0.22, 1.15, 0.66, 0.4, 0.55))
-  l.push(pieza(G.esfera, p.oro, { x: 0.22, y: y + 0.62, z: 1.15, sx: 0.4, sy: 0.2, sz: 0.34 }))
-  l.push(rueda(p, 0, y, 1.35, 0.24))
-  l.push(rueda(p, 0.45, y, 1.35, 0.24))
-  if (det) {
-    l.push(caja(p.madera, -1.15, y, 0.9, 0.12, 0.9, 0.12))
-    l.push(pieza(G.esfera, p.brasa, { x: -1.15, y: y + 0.95, z: 0.9, sx: 0.2, sy: 0.22, sz: 0.2 }))
-    l.push(roca(p.piedra, 1.1, y, 0.7, 0.4))
+  // el cerro, contenido dentro de la parcela: unos pedruscos enormes se comían
+  // media aldea desde la cámara de juego
+  l.push(roca(p.piedraOscura, -0.1, y, -1.0, 1.7, 0.3))
+  l.push(roca(p.piedraOscura, -1.0, y, -0.45, 1.1, 1.0))
+  l.push(roca(p.piedra, 0.95, y + 0.05, -0.75, 0.85, 0.6))
+  l.push(caja(p.oscuro, 0, y, 0.02, 0.9, 0.9, 0.5))
+  l.push(arco(p.oscuro, 0, y + 0.9, 0.02, 0.9, 0.5))
+  // CASTILLETE: la torre de madera sobre la bocamina, seña vertical de la mina
+  for (const sx of [-1, 1]) {
+    l.push(pieza(G.caja, p.madera, { x: sx * 0.6, y: y + 0.85, z: 0.34, sx: 0.15, sy: 1.75, sz: 0.15, rz: sx * 0.1 }))
+    l.push(pieza(G.caja, p.madera, { x: sx * 0.52, y: y + 0.85, z: -0.3, sx: 0.13, sy: 1.7, sz: 0.13, rz: sx * 0.1 }))
   }
-  if (t >= 2) l.push(techo2Aguas(p.techo, 0, y + 1.16, 0.3, 1.5, 0.9, 0.35))
+  l.push(caja(p.madera, 0, y + 1.7, 0.34, 1.4, 0.16, 0.16))
+  l.push(caja(p.madera, 0, y + 1.7, -0.3, 1.3, 0.16, 0.16))
+  l.push(pieza(G.cilindro12, p.maderaClara, { x: 0, y: y + 1.82, z: 0.02, sx: 0.5, sy: 0.28, sz: 0.5, rz: PI / 2 }))
+  l.push(caja(p.oscuro, 0, y + 1.0, 0.2, 0.04, 0.8, 0.04))
+  // VETAS Y CARGA DE ORO bien a la vista
+  l.push(pieza(G.esfera, p.oro, { x: -1.0, y: y + 0.78, z: -0.6, sx: 0.32, sy: 0.22, sz: 0.32 }))
+  l.push(pieza(G.esfera, p.oro, { x: 0.8, y: y + 0.58, z: -1.05, sx: 0.26, sy: 0.18, sz: 0.26 }))
+  // vagoneta sobre raíles
+  l.push(caja(p.madera, -0.22, y, 1.05, 0.09, 0.05, 1.3))
+  l.push(caja(p.madera, 0.22, y, 1.05, 0.09, 0.05, 1.3))
+  l.push(cajaR(p.metal, 0, y + 0.22, 1.2, 0.7, 0.42, 0.58, 0, 0.06))
+  l.push(pieza(G.esfera, p.oro, { x: 0, y: y + 0.64, z: 1.2, sx: 0.44, sy: 0.22, sz: 0.36 }))
+  l.push(rueda(p, -0.22, y, 1.38, 0.24))
+  l.push(rueda(p, 0.22, y, 1.38, 0.24))
+  if (det) {
+    l.push(caja(p.madera, -1.2, y, 0.95, 0.12, 0.9, 0.12))
+    l.push(pieza(G.esfera, p.brasa, { x: -1.2, y: y + 0.95, z: 0.95, sx: 0.2, sy: 0.22, sz: 0.2 }))
+    l.push(roca(p.piedra, 1.15, y, 0.75, 0.4))
+  }
   return l
 }
 
 function fMolino ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.45 + 0.11 * n
-  l.push(cil6(p.zocalo, 0, y, 0, 1.3, 0.16))
-  l.push(pieza(G.tronco, p.muro, { x: 0, y: y + 0.16 + h / 2, z: 0, sx: 1.15, sy: h, sz: 1.15 }))
-  l.push(cil6(p.viga, 0, y + 0.16 + h * 0.55, 0, 1.02, 0.1))
-  l.push(techoCono(p.techo, 0, y + 0.16 + h, 0, 1.15, 0.7))
-  l.push(caja(p.madera, 0, y + 0.16, 0.52, 0.34, 0.6, 0.08))
-  l.push(caja(p.carbon, 0, y + 0.16 + h * 0.6, 0.46, 0.22, 0.24, 0.06))
-  // aspas: giran de verdad (onFrame), es el detalle que da vida a la aldea
+  const h = 1.75 + 0.12 * n       // el más ESBELTO de la aldea
+  l.push(cil12(p.zocalo, 0, y, 0, 1.32, 0.18))
+  l.push(fuste(p.muro, 0, y + 0.18, 0, 1.16, h))
+  l.push(cil12(p.remate, 0, y + 0.18 + h * 0.52, 0, 1.06, 0.09))
+  l.push(cil12(p.muroAlt, 0, y + 0.18 + h, 0, 1.06, 0.12))
+  l.push(techoCono(p.techo, 0, y + 0.3 + h, 0, 1.12, 0.72))
+  l.push(pieza(G.esfera, p.remate, { x: 0, y: y + 1.02 + h, z: 0, sx: 0.16, sy: 0.2, sz: 0.16 }))
+  hueco(l, p.madera, 0, y + 0.18, 0.5, 0.38, 0.46, 0.08)
+  hueco(l, p.oscuro, 0, y + 0.18 + h * 0.62, 0.46, 0.24, 0.14, 0.06)
+  // ASPAS: giran de verdad; es la seña del molino a cualquier zoom
   const aspas = new THREE.Group()
-  aspas.position.set(0, y + 0.16 + h * 0.84, 0.58)
+  aspas.position.set(0, y + 0.2 + h * 0.88, 0.56)
   aspas.userData.anim = 'aspas'
-  aspas.add(pieza(G.cilindro, p.viga, { x: 0, y: 0, z: -0.06, sx: 0.22, sy: 0.22, sz: 0.22, rx: PI / 2 }))
+  aspas.add(pieza(G.cilindro, p.oscuro, { x: 0, y: 0, z: -0.06, sx: 0.24, sy: 0.24, sz: 0.24, rx: PI / 2 }))
   for (let i = 0; i < 4; i++) {
     const brazo = new THREE.Group()
     brazo.rotation.z = (i * PI) / 2
-    brazo.add(caja(p.madera, 0, 0.06, 0, 0.1, 1.35, 0.05))
-    brazo.add(caja(p.telaCruda, 0.13, 0.3, -0.02, 0.26, 0.95, 0.03))
+    brazo.add(caja(p.madera, 0, 0.06, 0, 0.1, 1.45, 0.05))
+    brazo.add(caja(p.telaCruda, 0.14, 0.32, -0.02, 0.28, 1.02, 0.03))
     aspas.add(brazo)
   }
   l.push(aspas)
-  if (det) {
-    l.push(roca(p.paja, -0.72, y, 0.6, 0.42))
-    l.push(roca(p.paja, -0.5, y, 0.82, 0.36))
-    l.push(barril(p, 0.75, y, -0.6))
-  }
+  // sacos de harina al pie: recurso a la vista
+  l.push(roca(p.paja, -0.76, y, 0.62, 0.44))
+  l.push(roca(p.paja, -0.52, y, 0.86, 0.38))
+  if (det) l.push(barril(p, 0.78, y, -0.62))
   return l
 }
 
 function fAlmacen ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 0.95 + 0.05 * n
-  l.push(caja(p.zocalo, 0, y, 0, 2.6, 0.14, 2.2))
-  l.push(caja(p.muro, 0, y + 0.14, 0, 2.4, h, 2.0))
-  l.push(techo2Aguas(p.techo, 0, y + 0.14 + h, 0, 2.75, 2.3, 0.62))
-  l.push(hastial(p.muroAlt, 0, y + 0.14 + h, 1.12, 2.75, 0.62))
-  l.push(hastial(p.muroAlt, 0, y + 0.14 + h, -1.12, 2.75, 0.62))
-  // portón grande con refuerzos en aspa
-  l.push(caja(p.madera, 0, y + 0.14, 1.02, 1.3, 1.0, 0.08))
-  l.push(pieza(G.caja, p.viga, { x: 0, y: y + 0.64, z: 1.08, sx: 1.5, sy: 0.08, sz: 0.04, rz: 0.62 }))
-  l.push(pieza(G.caja, p.viga, { x: 0, y: y + 0.64, z: 1.08, sx: 1.5, sy: 0.08, sz: 0.04, rz: -0.62 }))
-  // la mercancía a la vista: madera y piedra
-  for (let i = 0; i < 3; i++) l.push(lenoX(p.tronco, -1.1, y + (i % 2) * 0.24, -0.55 + i * 0.24, 0.22, 0.8))
-  l.push(caja(p.piedra, 1.3, y, 0.5, 0.5, 0.24, 0.44))
-  l.push(caja(p.piedra, 1.3, y + 0.24, 0.5, 0.44, 0.22, 0.4, 0.2))
+  const h = 0.62 + 0.04 * n
+  // BÓVEDA DE CAÑÓN: medio cilindro de punta a punta. Es el único tejado curvo
+  // de la aldea, así que el almacén no se puede confundir con nada.
+  l.push(cajaR(p.zocalo, 0, y, 0, 2.75, 0.16, 2.35, 0, 0.12))
+  l.push(cajaR(p.muro, 0, y + 0.16, 0, 2.55, h, 2.15, 0, 0.12))
+  l.push(cornisa(p.muroAlt, 0, y + 0.16 + h, 0, 2.8, 2.4, 0.11))
+  l.push(boveda(p.techo, 0, y + 0.27 + h, 0, 2.8, 2.45))
+  l.push(pieza(G.cilindro6, p.techoAlt, { x: 0, y: y + 0.27 + h + 1.4, z: 0, sx: 0.18, sy: 2.45, sz: 0.18, rx: PI / 2 }))
+  // el tímpano de la bóveda, con el portón arqueado dentro
+  l.push(arco(p.muroAlt, 0, y + 0.27 + h, 1.2, 2.78, 0.1))
+  l.push(arco(p.muroAlt, 0, y + 0.27 + h, -1.2, 2.78, 0.1))
+  hueco(l, p.madera, 0, y + 0.16, 1.1, 1.25, 0.72, 0.09)
+  l.push(pieza(G.caja, p.oscuro, { x: 0, y: y + 0.62, z: 1.16, sx: 1.5, sy: 0.08, sz: 0.04, rz: 0.6 }))
+  l.push(pieza(G.caja, p.oscuro, { x: 0, y: y + 0.62, z: 1.16, sx: 1.5, sy: 0.08, sz: 0.04, rz: -0.6 }))
+  // MERCANCÍA fuera: madera, piedra y barriles, que es lo que guarda
+  for (let i = 0; i < 3; i++) l.push(lenoX(p.tronco, -1.15, y + (i % 2) * 0.25, -0.6 + i * 0.25, 0.23, 0.85))
+  l.push(cajaR(p.piedra, 1.35, y, 0.55, 0.52, 0.25, 0.46, 0, 0.05))
+  l.push(cajaR(p.piedra, 1.35, y + 0.25, 0.55, 0.46, 0.23, 0.42, 0.2, 0.05))
+  l.push(barril(p, 1.3, y, -0.6))
+  l.push(barril(p, 1.3, y, -1.0))
   if (det) {
-    l.push(barril(p, 1.25, y, -0.6))
-    l.push(barril(p, 1.25, y, -1.0))
-    l.push(barril(p, 1.25, y + 0.34, -0.8))
-    l.push(cajon(p, -1.25, y, 0.95, 0.42))
+    l.push(barril(p, 1.3, y + 0.35, -0.8))
+    l.push(cajon(p, -1.3, y, 1.0, 0.44))
   }
-  if (t >= 1) l.push(bandera(p, p.telaVerde, -1.15, y + 0.14, 1.15, 0.9, 0.34))
+  l.push(bandera(p, p.acento, -1.2, y + 0.16, 1.2, 0.95, 0.36))
   return l
 }
 
 function fGranero ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.0 + 0.06 * n
-  // apoyado en pilares para que no suban los ratones
-  for (const x of [-0.85, 0.85]) for (const z of [-0.75, 0.75]) l.push(cil6(p.zocalo, x, y, z, 0.3, 0.34))
-  l.push(caja(p.madera, 0, y + 0.34, 0, 2.2, 0.14, 1.9))
-  l.push(caja(p.muro, 0, y + 0.48, 0, 2.05, h, 1.75))
+  const h = 0.92 + 0.05 * n
+  // sobre pilares redondos, y con un TEJADO A CUATRO AGUAS MUY ALTO: el granero
+  // es un cono sobre patas, nada que ver con la bóveda del almacén
+  for (const x of [-0.85, 0.85]) for (const z of [-0.75, 0.75]) l.push(cil12(p.zocalo, x, y, z, 0.32, 0.38))
+  l.push(cajaR(p.madera, 0, y + 0.38, 0, 2.2, 0.15, 1.95, 0, 0.1))
+  l.push(cajaR(p.muro, 0, y + 0.53, 0, 2.0, h, 1.75, 0, 0.11))
   if (t < 2) {
-    l.push(caja(p.viga, 0, y + 0.48 + h * 0.5, 0.9, 2.05, 0.1, 0.06))
-    l.push(caja(p.viga, 0, y + 0.48 + h - 0.1, 0.9, 2.05, 0.1, 0.06))
+    l.push(caja(p.oscuro, 0, y + 0.53 + h * 0.45, 0.9, 2.0, 0.09, 0.06))
+    l.push(caja(p.oscuro, 0, y + 0.53 + h - 0.09, 0.9, 2.0, 0.09, 0.06))
   }
-  l.push(techo2Aguas(p.techo, 0, y + 0.48 + h, 0, 2.4, 2.05, 0.75))
-  l.push(hastial(p.muroAlt, 0, y + 0.48 + h, 1.0, 2.4, 0.75))
-  l.push(hastial(p.muroAlt, 0, y + 0.48 + h, -1.0, 2.4, 0.75))
-  l.push(caja(p.madera, 0, y + 0.48, 0.9, 0.7, 0.8, 0.06))
+  l.push(cornisa(p.muroAlt, 0, y + 0.53 + h, 0, 2.3, 2.05, 0.11))
+  l.push(techo4Aguas(p.techo, 0, y + 0.64 + h, 0, 2.3, 2.05, 1.25))
+  // VELETA dorada en la cumbre: remate inconfundible desde arriba
+  l.push(caja(p.remate, 0, y + 1.89 + h, 0, 0.06, 0.34, 0.06))
+  l.push(pieza(G.cono6, p.oro, { x: 0.13, y: y + 2.12 + h, z: 0, sx: 0.3, sy: 0.26, sz: 0.06, rz: -PI / 2 }))
+  hueco(l, p.madera, 0, y + 0.53, 0.9, 0.72, 0.6, 0.07)
+  // GAVILLAS DE TRIGO al pie: el grano se ve, no hace falta leer el cartel
+  l.push(roca(p.trigo, 1.18, y, 1.05, 0.5))
+  l.push(roca(p.trigo, 0.85, y, 1.22, 0.42))
+  l.push(roca(p.trigo, -1.18, y, 1.0, 0.48))
+  for (let i = 0; i < 4; i++) l.push(cil6(p.trigo, -1.2 + i * 0.12, y, -1.1, 0.14, 0.62 + (i % 2) * 0.08))
   // escalera de acceso
-  l.push(pieza(G.caja, p.madera, { x: 0, y: y + 0.2, z: 1.16, sx: 0.34, sy: 0.06, sz: 0.72, rx: 0.55 }))
-  for (let i = 0; i < 3; i++) l.push(caja(p.maderaClara, 0, y + 0.08 + i * 0.11, 1.32 - i * 0.17, 0.4, 0.05, 0.06))
-  if (det) {
-    l.push(roca(p.paja, -1.15, y, 1.0, 0.46))
-    l.push(roca(p.paja, -0.85, y, 1.2, 0.4))
-    l.push(roca(p.trigo, 1.15, y, 1.05, 0.44))
-    l.push(barril(p, 1.2, y, -1.1))
-  }
-  if (t >= 2) l.push(pieza(G.esfera, p.oro, { x: 0, y: y + 0.48 + h + 0.8, z: 0, sx: 0.2, sy: 0.24, sz: 0.2 }))
+  l.push(pieza(G.caja, p.madera, { x: 0, y: y + 0.22, z: 1.2, sx: 0.36, sy: 0.06, sz: 0.76, rx: 0.55 }))
+  for (let i = 0; i < 3; i++) l.push(caja(p.madera, 0, y + 0.09 + i * 0.12, 1.36 - i * 0.17, 0.42, 0.05, 0.06))
+  if (det) l.push(barril(p, 1.22, y, -1.1))
   return l
 }
 
 function fMercado ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  l.push(caja(p.suelo, 0, y - 0.02, 0, 2.8, 0.08, 2.8))
+  l.push(cajaR(p.suelo, 0, y - 0.02, 0, 2.85, 0.08, 2.85, 0, 0.22))
+  // TRES TOLDOS de colores distintos y bien grandes: la mancha de color más
+  // alegre de la aldea, y la única que se mueve con el viento en horizontal
   const telas = [p.tela, p.telaVerde, p.telaAzul]
-  const sitios = [[-0.85, -0.75, 0], [0.85, -0.75, 0], [-0.85, 0.85, 0.35]]
-  for (let i = 0; i < (det ? 3 : 2); i++) {
+  const sitios = [[-0.82, -0.78, 0], [0.85, -0.72, 0.18], [-0.75, 0.88, 0.42]]
+  for (let i = 0; i < 3; i++) {
     const [x, z, ry] = sitios[i]
-    const h = 0.85 + 0.03 * n
-    for (const dx of [-0.42, 0.42]) for (const dz of [-0.35, 0.35]) l.push(caja(p.madera, x + dx, y, z + dz, 0.08, h, 0.08))
-    l.push(toldo(telas[i], x, y + h + 0.08, z, 1.15, 0.95, ry))
-    l.push(caja(p.maderaClara, x, y, z + 0.3, 1.0, 0.5, 0.32))
-    l.push(cajon(p, x - 0.25, y + 0.5, z + 0.3, 0.26))
-    if (det) l.push(pieza(G.esfera, i === 1 ? p.trigo : p.tela, { x: x + 0.25, y: y + 0.62, z: z + 0.3, sx: 0.24, sy: 0.2, sz: 0.24 }))
+    const h = 0.9 + 0.03 * n
+    for (const dx of [-0.45, 0.45]) for (const dz of [-0.38, 0.38]) l.push(caja(p.madera, x + dx, y, z + dz, 0.08, h, 0.08))
+    l.push(toldo(telas[i], x, y + h + 0.1, z, 1.3, 1.05, ry))
+    l.push(cajaR(p.maderaClara, x, y, z + 0.32, 1.05, 0.52, 0.34, 0, 0.05))
+    l.push(cajon(p, x - 0.26, y + 0.52, z + 0.32, 0.26))
+    l.push(pieza(G.esfera, i === 1 ? p.trigo : p.tela, { x: x + 0.26, y: y + 0.64, z: z + 0.32, sx: 0.26, sy: 0.22, sz: 0.26 }))
   }
-  // la balanza del tendero: el icono del mercado
-  l.push(caja(p.zocalo, 0.9, y, 0.9, 0.4, 0.3, 0.4))
-  l.push(caja(p.madera, 0.9, y + 0.3, 0.9, 0.09, 1.1, 0.09))
-  l.push(caja(p.madera, 0.9, y + 1.3, 0.9, 0.9, 0.07, 0.07))
-  l.push(cil(p.oro, 0.52, y + 1.16, 0.9, 0.3, 0.09))
-  l.push(cil(p.oro, 1.28, y + 1.22, 0.9, 0.3, 0.09))
-  if (t >= 1) l.push(bandera(p, p.telaAzul, -1.3, y, -1.3, 1.2, 0.4))
+  // BALANZA del tendero: el icono del trueque
+  l.push(cil12(p.zocalo, 0.92, y, 0.92, 0.44, 0.32))
+  l.push(caja(p.madera, 0.92, y + 0.32, 0.92, 0.09, 1.15, 0.09))
+  l.push(caja(p.madera, 0.92, y + 1.36, 0.92, 0.95, 0.07, 0.07))
+  l.push(cil12(p.oro, 0.53, y + 1.2, 0.92, 0.32, 0.09))
+  l.push(cil12(p.oro, 1.31, y + 1.27, 0.92, 0.32, 0.09))
+  if (det) {
+    l.push(barril(p, 1.3, y, -1.3))
+    l.push(cajon(p, -1.3, y, -1.3, 0.4))
+  }
   return l
 }
 
 function fCuartel ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.0 + 0.05 * n
-  l.push(caja(p.zocalo, 0, y, -0.2, 2.5, 0.14, 1.9))
-  l.push(caja(p.muro, 0, y + 0.14, -0.2, 2.3, h, 1.7))
-  if (t < 2) entramado(l, p, 0, y + 0.14, -0.2, 2.3, h, 1.7)
-  else almenas(l, p.muroAlt, 0, y + 0.14 + h, -0.2, 2.3, 1.7, 0.4, 0.2)
-  l.push(techo2Aguas(p.techo, 0, y + 0.14 + h, -0.2, 2.6, 2.0, 0.6))
-  l.push(hastial(p.muroAlt, 0, y + 0.14 + h, 0.78, 2.6, 0.6))
-  l.push(caja(p.madera, 0, y + 0.14, 0.68, 0.7, 0.9, 0.08))
-  // estandarte de guerra sobre la puerta
-  l.push(caja(p.madera, 0, y + h, 0.78, 0.06, 0.06, 0.45))
+  const h = 0.92 + 0.045 * n
+  l.push(cajaR(p.zocalo, 0, y, -0.25, 2.55, 0.16, 1.95, 0, 0.12))
+  l.push(cajaR(p.muro, 0, y + 0.16, -0.25, 2.35, h, 1.75, 0, 0.12))
+  if (t < 2) entramado(l, p, 0, y + 0.16, -0.25, 2.35, h, 1.75)
+  l.push(cornisa(p.muroAlt, 0, y + 0.16 + h, -0.25, 2.6, 2.0, 0.11))
+  // CUATRO AGUAS BAJO + TORREÓN ALMENADO en un extremo: perfil de cuartel
+  l.push(techo4Aguas(p.techo, 0, y + 0.27 + h, -0.25, 2.6, 2.0, 0.62))
+  const ht = h + 0.85
+  l.push(cajaR(p.muroAlt, -1.05, y, -0.9, 1.0, ht + 0.16, 1.0, 0, 0.11))
+  l.push(cornisa(p.muro, -1.05, y + ht + 0.16, -0.9, 1.18, 1.18, 0.1))
+  almenas(l, p.muroAlt, -1.05, y + ht + 0.26, -0.42, 1.18, 0.16, 0.32, 0.24)
+  almenas(l, p.muroAlt, -1.05, y + ht + 0.26, -1.38, 1.18, 0.16, 0.32, 0.24)
+  l.push(cajaR(p.muroAlt, -1.62, y + ht + 0.26, -0.9, 0.16, 0.24, 1.18, 0, 0.05))
+  l.push(cajaR(p.muroAlt, -0.48, y + ht + 0.26, -0.9, 0.16, 0.24, 1.18, 0, 0.05))
+  hueco(l, p.oscuro, -1.05, y + ht * 0.5, -0.42, 0.18, 0.34, 0.05)
+  hueco(l, p.madera, 0.35, y + 0.16, 0.65, 0.72, 0.68, 0.09)
+  // ESTANDARTE DE GUERRA colgando sobre la puerta
+  l.push(caja(p.madera, 0.35, y + h - 0.05, 0.72, 0.06, 0.06, 0.5))
   const tela = new THREE.Group()
-  tela.position.set(0, y + h + 0.02, 0.95)
-  tela.add(caja(p.tela, 0, -0.6, 0, 0.5, 0.6, 0.04))
-  tela.add(hastial(p.tela, 0, -0.78, 0, 0.5, 0.2, 0.04))
+  tela.position.set(0.35, y + h - 0.03, 0.92)
+  tela.add(caja(p.tela, 0, -0.66, 0, 0.54, 0.66, 0.04))
+  tela.add(hastial(p.tela, 0, -0.86, 0, 0.54, 0.22, 0.04))
   tela.userData.anim = 'bandera'
   l.push(tela)
-  // armero con lanzas
-  l.push(caja(p.madera, -1.0, y, 1.05, 0.9, 0.5, 0.2))
+  // ARMERO DE LANZAS: tres puntas de acero, siempre visibles
+  l.push(cajaR(p.madera, -0.95, y, 0.85, 0.95, 0.5, 0.22, 0, 0.05))
   for (let i = 0; i < 3; i++) {
-    l.push(pieza(G.caja, p.madera, { x: -1.25 + i * 0.24, y: y + 0.65, z: 1.02, sx: 0.05, sy: 1.2, sz: 0.05, rz: 0.12 }))
-    l.push(pieza(G.cono, p.metal, { x: -1.25 + i * 0.24 + 0.08, y: y + 1.28, z: 1.02, sx: 0.12, sy: 0.24, sz: 0.12 }))
+    l.push(pieza(G.caja, p.madera, { x: -1.22 + i * 0.26, y: y + 0.68, z: 0.82, sx: 0.05, sy: 1.25, sz: 0.05, rz: 0.1 }))
+    l.push(pieza(G.cono6, p.metal, { x: -1.22 + i * 0.26 + 0.07, y: y + 1.34, z: 0.82, sx: 0.13, sy: 0.26, sz: 0.13 }))
   }
   // muñeco de entrenamiento
-  l.push(caja(p.madera, 1.05, y, 1.0, 0.12, 1.0, 0.12))
-  l.push(caja(p.madera, 1.05, y + 0.72, 1.0, 0.7, 0.1, 0.1))
-  l.push(pieza(G.esfera, p.paja, { x: 1.05, y: y + 1.08, z: 1.0, sx: 0.3, sy: 0.3, sz: 0.3 }))
+  l.push(caja(p.madera, 1.18, y, 1.0, 0.12, 1.0, 0.12))
+  l.push(caja(p.madera, 1.18, y + 0.74, 1.0, 0.7, 0.1, 0.1))
+  l.push(pieza(G.esfera, p.paja, { x: 1.18, y: y + 1.1, z: 1.0, sx: 0.3, sy: 0.3, sz: 0.3 }))
   if (det) {
-    l.push(cil6(p.metal, 1.35, y + 0.35, -0.9, 0.5, 0.08, 0.4))    // escudo apoyado
-    l.push(barril(p, -1.3, y, -0.9))
+    l.push(pieza(G.cilindro12, p.metal, { x: 1.4, y: y + 0.4, z: -0.95, sx: 0.5, sy: 0.08, sz: 0.5, rz: 0.4, rx: 0.3 }))
+    l.push(barril(p, 0.4, y, -1.15))
   }
   return l
 }
@@ -529,90 +678,111 @@ function fCuartel ({ p, n, t, det }) {
 function fArqueria ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 0.95 + 0.05 * n
-  l.push(caja(p.zocalo, 0, y, -0.65, 2.4, 0.14, 1.4))
-  l.push(caja(p.muro, 0, y + 0.14, -0.65, 2.2, h, 1.25))
-  if (t < 2) entramado(l, p, 0, y + 0.14, -0.65, 2.2, h, 1.25)
-  l.push(techo2Aguas(p.techo, 0, y + 0.14 + h, -0.65, 2.5, 1.6, 0.55))
-  l.push(hastial(p.muroAlt, 0, y + 0.14 + h, 0.13, 2.5, 0.55))
-  l.push(caja(p.carbon, 0, y + 0.14, -0.02, 0.7, 0.85, 0.06))
-  // dianas de paja: el emblema de la arquería
-  for (const x of [-0.85, 0.45]) {
-    l.push(pieza(G.caja, p.madera, { x: x - 0.14, y: y + 0.45, z: 0.95, sx: 0.07, sy: 0.9, sz: 0.07, rz: 0.2 }))
-    l.push(pieza(G.caja, p.madera, { x: x + 0.14, y: y + 0.45, z: 0.95, sx: 0.07, sy: 0.9, sz: 0.07, rz: -0.2 }))
-    l.push(pieza(G.cilindro, p.telaCruda, { x, y: y + 0.85, z: 0.95, sx: 0.62, sy: 0.1, sz: 0.62, rx: PI / 2 }))
-    l.push(pieza(G.cilindro, p.tela, { x, y: y + 0.85, z: 1.01, sx: 0.3, sy: 0.04, sz: 0.3, rx: PI / 2 }))
-    if (det) l.push(pieza(G.caja, p.maderaClara, { x: x + 0.05, y: y + 0.88, z: 1.12, sx: 0.04, sy: 0.04, sz: 0.4 }))
+  const h = 0.78 + 0.035 * n     // LARGA Y BAJA: nada que ver con el cuartel
+  l.push(cajaR(p.zocalo, 0, y, -0.75, 2.6, 0.14, 1.3, 0, 0.12))
+  l.push(cajaR(p.muro, 0, y + 0.14, -1.05, 2.4, h, 0.62, 0, 0.1))
+  // GALERÍA DE TIRO: cinco arcos abiertos al frente, la firma de la arquería
+  for (let i = 0; i < 5; i++) {
+    const x = -0.96 + i * 0.48
+    l.push(cil12(p.muroAlt, x, y + 0.14, -0.42, 0.19, h * 0.6))
   }
+  for (let i = 0; i < 4; i++) {
+    l.push(arco(p.muroAlt, -0.72 + i * 0.48, y + 0.14 + h * 0.6, -0.42, 0.48, 0.22))
+  }
+  l.push(cornisa(p.muroAlt, 0, y + 0.14 + h, -0.72, 2.62, 1.32, 0.1))
+  l.push(pieza(G.caja, p.techo, { x: 0, y: y + 0.32 + h, z: -0.72, sx: 2.75, sy: 0.11, sz: 1.5, rx: 0.24 }))
+  l.push(pieza(G.cilindro6, p.techoAlt, { x: 0, y: y + 0.44 + h, z: -1.4, sx: 0.15, sy: 2.75, sz: 0.15, rz: PI / 2 }))
+  // DOS DIANAS grandes de paja con el centro rojo: se ven desde cualquier zoom
+  for (const x of [-0.9, 0.5]) {
+    l.push(pieza(G.caja, p.madera, { x: x - 0.16, y: y + 0.48, z: 0.95, sx: 0.07, sy: 0.98, sz: 0.07, rz: 0.22 }))
+    l.push(pieza(G.caja, p.madera, { x: x + 0.16, y: y + 0.48, z: 0.95, sx: 0.07, sy: 0.98, sz: 0.07, rz: -0.22 }))
+    l.push(pieza(G.cilindro12, p.telaCruda, { x, y: y + 0.92, z: 0.95, sx: 0.72, sy: 0.12, sz: 0.72, rx: PI / 2 }))
+    l.push(pieza(G.cilindro12, p.tela, { x, y: y + 0.92, z: 1.02, sx: 0.34, sy: 0.05, sz: 0.34, rx: PI / 2 }))
+    l.push(pieza(G.caja, p.maderaClara, { x: x + 0.06, y: y + 0.95, z: 1.14, sx: 0.04, sy: 0.04, sz: 0.42 }))
+  }
+  // HAZ DE FLECHAS apoyado
+  l.push(cil12(p.maderaClara, 1.32, y, 0.5, 0.32, 0.5))
+  for (let i = 0; i < 4; i++) l.push(caja(p.maderaClara, 1.32 + (i - 1.5) * 0.07, y + 0.5, 0.5, 0.03, 0.55, 0.03))
   if (det) {
-    l.push(roca(p.paja, 1.15, y, 0.9, 0.5))
-    l.push(cil6(p.maderaClara, -1.3, y, 0.35, 0.3, 0.5))      // haz de flechas
-    for (let i = 0; i < 3; i++) l.push(caja(p.maderaClara, -1.3 + (i - 1) * 0.06, y + 0.5, 0.35, 0.03, 0.5, 0.03))
+    l.push(roca(p.paja, 1.2, y, 1.1, 0.48))
+    l.push(barril(p, -1.35, y, -1.0))
   }
-  if (t >= 1) l.push(bandera(p, p.telaVerde, 1.15, y, -1.15, 1.0, 0.35))
+  l.push(bandera(p, p.acento, 1.25, y, -1.2, 1.05, 0.36))
   return l
 }
 
 function fEstablo ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.0 + 0.05 * n
-  l.push(caja(p.zocalo, 0, y, -0.55, 3.5, 0.14, 1.6))
-  l.push(caja(p.muro, 0, y + 0.14, -0.85, 3.3, h, 0.95))
-  // cuadras abiertas hacia el frente
-  for (const x of [-1.5, -0.5, 0.5, 1.5]) l.push(caja(p.madera, x, y + 0.14, -0.2, 0.12, h * 0.75, 0.9))
-  l.push(caja(p.madera, 0, y + 0.14 + h * 0.75, -0.2, 3.3, 0.12, 0.9))
-  l.push(techo2Aguas(p.techo, 0, y + 0.14 + h, -0.6, 3.6, 1.9, 0.6))
-  l.push(hastial(p.muroAlt, 0, y + 0.14 + h, 0.3, 3.6, 0.6))
-  // el caballo: sin él esto es un cobertizo cualquiera
+  const h = 0.86 + 0.04 * n      // EL MÁS LARGO Y EL MÁS BAJO de la aldea
+  l.push(cajaR(p.zocalo, 0, y, -0.55, 3.6, 0.14, 1.7, 0, 0.14))
+  l.push(cajaR(p.muro, 0, y + 0.14, -0.95, 3.4, h, 0.9, 0, 0.11))
+  // CUADRAS ABIERTAS con arcos: cuatro bocas oscuras alineadas
+  for (const x of [-1.5, -0.5, 0.5, 1.5]) {
+    l.push(cil12(p.madera, x, y + 0.14, -0.25, 0.14, h * 0.62))
+    l.push(caja(p.oscuro, x - 0.25, y + 0.14, -0.5, 0.42, h * 0.55, 0.06))
+  }
+  for (let i = 0; i < 3; i++) l.push(arco(p.madera, -1.0 + i * 1.0, y + 0.14 + h * 0.62, -0.25, 1.0, 0.16))
+  l.push(cornisa(p.muroAlt, 0, y + 0.14 + h, -0.6, 3.65, 1.9, 0.1))
+  // tablilla de madera, como las cuadras de verdad: separa el establo del cuartel
+  l.push(techo4Aguas(p.madera, 0, y + 0.24 + h, -0.6, 3.6, 1.85, 0.58))
+  // EL CABALLO: sin él esto es un cobertizo cualquiera
   const c = mat(PALETA.caballo)
   const cab = new THREE.Group()
-  cab.add(caja(c, 0, 0.36, 0, 0.72, 0.32, 0.3))
-  cab.add(caja(c, 0.3, 0.55, 0, 0.2, 0.32, 0.22))
-  cab.add(caja(c, 0.42, 0.78, 0, 0.36, 0.17, 0.19))
+  cab.add(cajaR(c, 0, 0.36, 0, 0.74, 0.34, 0.32, 0, 0.07))
+  cab.add(caja(c, 0.31, 0.56, 0, 0.2, 0.34, 0.22))
+  cab.add(caja(c, 0.43, 0.8, 0, 0.38, 0.18, 0.2))
   for (const dx of [-0.25, 0.25]) for (const dz of [-0.1, 0.1]) cab.add(caja(c, dx, 0, dz, 0.09, 0.36, 0.09))
-  cab.add(caja(p.carbon, -0.38, 0.42, 0, 0.08, 0.26, 0.11))
-  cab.add(caja(p.carbon, 0.2, 0.7, 0, 0.16, 0.14, 0.2))
-  cab.position.set(0.55, y, 0.75)
+  cab.add(caja(p.oscuro, -0.39, 0.42, 0, 0.08, 0.28, 0.12))
+  cab.add(caja(p.oscuro, 0.21, 0.72, 0, 0.16, 0.14, 0.2))
+  cab.position.set(0.6, y, 0.8)
   cab.rotation.y = -0.5
   l.push(cab)
-  if (det) {
-    l.push(caja(p.madera, -1.15, y, 0.85, 0.9, 0.3, 0.45))       // abrevadero
-    l.push(caja(mat(PALETA.agua), -1.15, y + 0.26, 0.85, 0.8, 0.06, 0.36))
-    l.push(roca(p.paja, -1.75, y, 0.5, 0.55))
-    for (let i = 0; i < 3; i++) l.push(caja(p.madera, -1.8 + i * 0.9, y, 1.35, 0.08, 0.45, 0.08))
-    l.push(caja(p.madera, -0.9, y + 0.3, 1.35, 1.9, 0.06, 0.06))
-  }
-  if (t >= 1) l.push(bandera(p, p.tela, 1.6, y, 1.2, 1.0, 0.35))
+  // abrevadero y paja: el patio de un establo
+  l.push(cajaR(p.madera, -1.2, y, 0.85, 0.95, 0.32, 0.46, 0, 0.06))
+  l.push(caja(mat(PALETA.agua), -1.2, y + 0.28, 0.85, 0.85, 0.06, 0.38))
+  l.push(roca(p.paja, -1.8, y, 0.5, 0.58))
+  for (let i = 0; i < 5; i++) l.push(cil6(p.madera, -1.8 + i * 0.75, y, 1.4, 0.09, 0.46))
+  l.push(caja(p.madera, -0.55, y + 0.32, 1.4, 3.0, 0.06, 0.06))
+  if (det) l.push(barril(p, 1.65, y, 1.2))
+  l.push(bandera(p, p.tela, 1.7, y, -1.2, 1.0, 0.34))
   return l
 }
 
 function fTallerAsedio ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.1 + 0.05 * n
-  // nave abierta al fondo; las máquinas, delante y a la vista
-  for (const x of [-1.45, 1.45]) for (const z of [-1.6, -0.2]) l.push(caja(p.madera, x, y, z, 0.18, h, 0.18))
-  l.push(caja(p.muro, 0, y, -1.7, 3.1, h, 0.35))
-  l.push(techo2Aguas(p.techo, 0, y + h, -0.9, 3.5, 1.9, 0.6))
-  l.push(hastial(p.madera, 0, y + h, -1.75, 3.5, 0.6))
-  // catapulta montada delante
-  l.push(caja(p.madera, -0.55, y, 0.9, 1.5, 0.24, 0.9))
-  l.push(rueda(p, -1.25, y, 0.55, 0.56))
-  l.push(rueda(p, -1.25, y, 1.25, 0.56))
-  l.push(rueda(p, 0.1, y, 0.55, 0.56))
-  l.push(rueda(p, 0.1, y, 1.25, 0.56))
-  l.push(caja(p.madera, -0.55, y + 0.24, 0.9, 0.18, 0.85, 0.18))
-  l.push(pieza(G.caja, p.madera, { x: -0.15, y: y + 0.95, z: 0.9, sx: 1.5, sy: 0.12, sz: 0.12, rz: 0.75 }))
-  l.push(pieza(G.esfera, p.piedraOscura, { x: 0.28, y: y + 1.5, z: 0.9, sx: 0.34, sy: 0.34, sz: 0.34 }))
-  // ariete apoyado
-  l.push(lenoZ(p.tronco, 1.15, y + 0.45, 0.55, 0.32, 1.5))
-  l.push(pieza(G.cilindro, p.metal, { x: 1.15, y: y + 0.61, z: 1.25, sx: 0.38, sy: 0.2, sz: 0.38, rx: PI / 2 }))
-  l.push(caja(p.madera, 1.15, y, -0.05, 0.12, 0.5, 0.12))
-  l.push(caja(p.madera, 1.15, y, 1.1, 0.12, 0.5, 0.12))
+  const h = 1.05 + 0.05 * n
+  // ARMAZÓN ABIERTO: no hay muros ni tejado completo, solo cerchas de madera.
+  // Desde arriba se ve el interior, que es justo lo que lo hace reconocible.
+  for (const z of [-1.5, -0.55, 0.4]) {
+    l.push(pieza(G.caja, p.madera, { x: -0.72, y: y + h * 0.62, z, sx: 0.16, sy: h * 1.5, sz: 0.16, rz: 0.42 }))
+    l.push(pieza(G.caja, p.madera, { x: 0.72, y: y + h * 0.62, z, sx: 0.16, sy: h * 1.5, sz: 0.16, rz: -0.42 }))
+    l.push(caja(p.madera, 0, y + h * 0.72, z, 1.5, 0.11, 0.11))
+  }
+  l.push(pieza(G.cilindro6, p.madera, { x: 0, y: y + h * 1.32, z: -0.55, sx: 0.17, sy: 2.2, sz: 0.17, rx: PI / 2 }))
+  l.push(pieza(G.caja, p.techo, { x: -0.62, y: y + h * 0.98, z: -0.55, sx: 1.35, sy: 0.1, sz: 2.2, rz: 0.42 }))
+  // el fondo es un tablero de madera con sus montantes, no un lienzo blanco
+  l.push(cajaR(p.maderaClara, 0, y, -1.85, 3.0, h + 0.25, 0.2, 0, 0.06))
+  for (const x of [-1.2, 0, 1.2]) l.push(caja(p.madera, x, y, -1.76, 0.18, h + 0.3, 0.1))
+  l.push(caja(p.madera, 0, y + h + 0.2, -1.76, 3.0, 0.14, 0.1))
+  // CATAPULTA montada, con el brazo en alto y la piedra cargada
+  l.push(cajaR(p.madera, -0.5, y, 1.0, 1.6, 0.26, 0.95, 0, 0.07))
+  l.push(rueda(p, -1.2, y, 0.62, 0.58))
+  l.push(rueda(p, -1.2, y, 1.35, 0.58))
+  l.push(rueda(p, 0.18, y, 0.62, 0.58))
+  l.push(rueda(p, 0.18, y, 1.35, 0.58))
+  l.push(caja(p.madera, -0.5, y + 0.26, 1.0, 0.2, 0.9, 0.2))
+  l.push(pieza(G.caja, p.madera, { x: -0.06, y: y + 1.02, z: 1.0, sx: 1.6, sy: 0.13, sz: 0.13, rz: 0.78 }))
+  l.push(pieza(G.esfera, p.piedraOscura, { x: 0.42, y: y + 1.62, z: 1.0, sx: 0.38, sy: 0.38, sz: 0.38 }))
+  // ARIETE con la cabeza de hierro
+  l.push(lenoZ(p.tronco, 1.3, y + 0.5, 0.55, 0.34, 1.6))
+  l.push(pieza(G.cilindro12, p.metal, { x: 1.3, y: y + 0.67, z: 1.3, sx: 0.42, sy: 0.24, sz: 0.42, rx: PI / 2 }))
+  l.push(caja(p.madera, 1.3, y, -0.1, 0.12, 0.55, 0.12))
+  l.push(caja(p.madera, 1.3, y, 1.15, 0.12, 0.55, 0.12))
   if (det) {
-    for (let i = 0; i < 3; i++) l.push(caja(p.maderaClara, 0.9 + i * 0.02, y + i * 0.14, -0.9, 1.1, 0.13, 0.4))
-    l.push(barril(p, -1.3, y, -0.9))
+    for (let i = 0; i < 3; i++) l.push(caja(p.maderaClara, -1.3, y + i * 0.15, -1.3, 1.2, 0.14, 0.42))
+    l.push(barril(p, 1.45, y, -1.4))
   }
   return l
 }
@@ -620,34 +790,41 @@ function fTallerAsedio ({ p, n, t, det }) {
 function fHerreria ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 0.95 + 0.05 * n
-  l.push(caja(p.zocalo, 0, y, -0.5, 2.4, 0.14, 1.8))
-  l.push(caja(p.muro, 0, y + 0.14, -0.5, 2.2, h, 1.6))
-  if (t < 2) entramado(l, p, 0, y + 0.14, -0.5, 2.2, h, 1.6)
-  l.push(techo2Aguas(p.techo, 0, y + 0.14 + h, -0.5, 2.5, 1.9, 0.55))
-  l.push(hastial(p.muroAlt, 0, y + 0.14 + h, 0.44, 2.5, 0.55))
-  // chimenea de piedra con la fragua encendida
-  l.push(caja(p.piedraOscura, -0.75, y, 0.25, 0.7, h + 1.15, 0.7))
-  l.push(caja(p.carbon, -0.75, y + h + 1.29, 0.25, 0.8, 0.12, 0.8))
-  l.push(caja(p.carbon, -0.75, y + 0.2, 0.62, 0.45, 0.45, 0.1))
-  if (det) {
-    const fuego = pieza(G.caja, p.fuego, { x: -0.75, y: y + 0.36, z: 0.6, sx: 0.36, sy: 0.3, sz: 0.14 })
-    fuego.userData.anim = 'llama'
-    fuego.castShadow = false
-    l.push(fuego)
+  const h = 0.85 + 0.04 * n
+  l.push(cajaR(p.zocalo, 0, y, -0.55, 2.5, 0.15, 1.85, 0, 0.13))
+  l.push(cajaR(p.muro, 0, y + 0.15, -0.75, 2.3, h, 1.4, 0, 0.11))
+  if (t < 2) entramado(l, p, 0, y + 0.15, -0.75, 2.3, h, 1.4)
+  // TEJADO A UN AGUA volado sobre la fragua: taller abierto, no vivienda
+  // techumbre de chapa ennegrecida por el humo: dentro de la familia militar,
+  // la herrería tiene que separarse del cuartel sin salirse de la paleta
+  l.push(pieza(G.caja, p.oscuro, { x: 0, y: y + 0.35 + h, z: -0.35, sx: 2.6, sy: 0.12, sz: 2.0, rx: 0.3 }))
+  for (const x of [-1.05, 1.05]) l.push(caja(p.madera, x, y + 0.15, 0.35, 0.14, h * 0.92, 0.14))
+  // CHIMENEA REDONDA ENORME con la lumbre encendida: la seña de la herrería
+  const hc = h + 1.5
+  l.push(cil12(p.piedraOscura, -0.8, y, 0.3, 0.82, hc))
+  l.push(cil12(p.piedra, -0.8, y + hc, 0.3, 0.96, 0.14))
+  l.push(cil12(p.oscuro, -0.8, y + hc + 0.14, 0.3, 0.66, 0.1))
+  l.push(arco(p.oscuro, -0.8, y + 0.12, 0.72, 0.52, 0.2))
+  l.push(caja(p.oscuro, -0.8, y, 0.72, 0.52, 0.12, 0.2))
+  const fuego = pieza(G.caja, p.fuego, { x: -0.8, y: y + 0.22, z: 0.7, sx: 0.4, sy: 0.34, sz: 0.16 })
+  fuego.userData.anim = 'llama'
+  fuego.castShadow = false
+  l.push(fuego)
+  // YUNQUE: cuatro piezas y se reconoce al instante
+  l.push(cil12(p.madera, 0.6, y, 0.72, 0.48, 0.3))
+  l.push(caja(p.metal, 0.6, y + 0.3, 0.72, 0.22, 0.18, 0.26))
+  l.push(cajaR(p.metal, 0.6, y + 0.48, 0.72, 0.66, 0.17, 0.32, 0, 0.05))
+  l.push(pieza(G.cono6, p.metal, { x: 1.03, y: y + 0.57, z: 0.72, sx: 0.3, sy: 0.32, sz: 0.24, rz: -PI / 2 }))
+  l.push(pieza(G.caja, p.madera, { x: 0.42, y: y + 0.72, z: 0.94, sx: 0.06, sy: 0.52, sz: 0.06, rz: 0.5 }))
+  l.push(caja(p.metal, 0.26, y + 0.93, 0.94, 0.22, 0.13, 0.13))
+  // HERRADURAS colgadas del muro: tres aros de acero bien visibles
+  for (let i = 0; i < 3; i++) {
+    l.push(pieza(G.cilindro12, p.metal, { x: 0.1 + i * 0.32, y: y + h * 0.78, z: -0.02, sx: 0.24, sy: 0.05, sz: 0.24, rx: PI / 2 }))
   }
-  // yunque: cuatro piezas y se reconoce al instante
-  l.push(caja(p.piedraOscura, 0.55, y, 0.75, 0.45, 0.3, 0.45))
-  l.push(caja(p.metal, 0.55, y + 0.3, 0.75, 0.2, 0.18, 0.24))
-  l.push(caja(p.metal, 0.55, y + 0.48, 0.75, 0.62, 0.16, 0.3))
-  l.push(pieza(G.cono, p.metal, { x: 0.95, y: y + 0.56, z: 0.75, sx: 0.28, sy: 0.3, sz: 0.22, rz: -PI / 2 }))
-  l.push(pieza(G.caja, p.madera, { x: 0.4, y: y + 0.7, z: 0.95, sx: 0.06, sy: 0.5, sz: 0.06, rz: 0.5 }))
-  l.push(caja(p.metal, 0.25, y + 0.9, 0.95, 0.2, 0.12, 0.12))
   if (det) {
-    l.push(caja(p.madera, 1.15, y, -0.1, 0.5, 0.4, 0.5))
-    l.push(caja(mat(PALETA.agua), 1.15, y + 0.36, -0.1, 0.42, 0.06, 0.42))
-    l.push(roca(p.carbon, -1.2, y, 0.85, 0.45))
-    for (let i = 0; i < 2; i++) l.push(pieza(G.cilindro, p.metal, { x: 0.15 + i * 0.3, y: y + h * 0.75, z: 0.34, sx: 0.22, sy: 0.05, sz: 0.22, rx: PI / 2 }))
+    l.push(cajaR(p.madera, 1.3, y, -0.2, 0.52, 0.42, 0.52, 0, 0.06))
+    l.push(caja(mat(PALETA.agua), 1.3, y + 0.38, -0.2, 0.44, 0.06, 0.44))
+    l.push(roca(p.carbon, -1.35, y, 0.85, 0.46))
   }
   return l
 }
@@ -655,94 +832,100 @@ function fHerreria ({ p, n, t, det }) {
 function fUniversidad ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.25 + 0.07 * n
-  l.push(caja(p.zocalo, 0, y, -0.25, 2.6, 0.22, 2.2))
-  l.push(caja(p.muro, 0, y + 0.22, -0.25, 2.3, h, 1.95))
-  // arcada de columnas: lo que separa un edificio noble de un granero
+  const h = 1.3 + 0.07 * n       // ALTA y esbelta: edificio noble
+  l.push(cajaR(p.zocalo, 0, y, -0.25, 2.6, 0.24, 2.2, 0, 0.14))
+  l.push(cajaR(p.muro, 0, y + 0.24, -0.25, 2.3, h, 1.95, 0, 0.13))
+  // ARCADA de medio punto en la fachada: la marca del saber
   for (let i = 0; i < 4; i++) {
     const x = -1.05 + i * 0.7
-    l.push(cil(p.zocalo, x, y + 0.22, 0.95, 0.24, h * 0.8))
-    l.push(caja(p.muroAlt, x, y + 0.22 + h * 0.8, 0.95, 0.34, 0.12, 0.34))
+    l.push(cil12(p.zocalo, x, y + 0.24, 0.95, 0.24, h * 0.72))
   }
-  l.push(caja(p.muroAlt, 0, y + 0.22 + h * 0.8 + 0.12, 0.95, 2.4, 0.16, 0.5))
-  l.push(techo2Aguas(p.techo, 0, y + 0.22 + h, -0.25, 2.55, 2.2, 0.8))
-  l.push(hastial(p.muroAlt, 0, y + 0.22 + h, 0.85, 2.55, 0.8))
-  l.push(hastial(p.muroAlt, 0, y + 0.22 + h, -1.35, 2.55, 0.8))
-  // ventanales altos y estrechos
-  for (const x of [-0.7, 0, 0.7]) {
-    l.push(caja(p.telaAzul, x, y + 0.22 + h * 0.35, -1.23, 0.26, h * 0.5, 0.05))
-    l.push(pieza(G.cono, p.telaAzul, { x, y: y + 0.22 + h * 0.85 - 0.06, z: -1.23, sx: 0.26, sy: 0.2, sz: 0.05 }))
-  }
-  // torreta del escribano
-  l.push(cil6(p.muro, 1.05, y + 0.22, -1.05, 0.7, h + 0.45))
-  l.push(techoCono(t >= 1 ? p.techoAlt : p.techo, 1.05, y + 0.22 + h + 0.45, -1.05, 0.85, 0.6))
+  for (let i = 0; i < 3; i++) l.push(arco(p.muroAlt, -0.7 + i * 0.7, y + 0.24 + h * 0.72, 0.95, 0.7, 0.3))
+  l.push(cornisa(p.muroAlt, 0, y + 0.24 + h * 0.72 + 0.35, 0.95, 2.45, 0.55, 0.14))
+  l.push(cornisa(p.muroAlt, 0, y + 0.24 + h, -0.25, 2.55, 2.2, 0.13))
+  l.push(techo2Aguas(p.techo, 0, y + 0.37 + h, -0.25, 2.55, 2.2, 0.82))
+  l.push(hastial(p.muroAlt, 0, y + 0.37 + h, 0.85, 2.55, 0.82))
+  l.push(hastial(p.muroAlt, 0, y + 0.37 + h, -1.35, 2.55, 0.82))
+  // VENTANALES ALTOS con arco: tres huecos azules muy verticales
+  for (const x of [-0.72, 0, 0.72]) hueco(l, p.telaAzul, x, y + 0.24 + h * 0.3, -1.24, 0.28, h * 0.45, 0.06)
+  // TORRE DEL ESCRIBANO con CÚPULA DE COBRE: el remate verde que la identifica
+  const ht = h + 0.75
+  l.push(cil12(p.muro, 1.08, y + 0.24, -1.08, 0.72, ht))
+  l.push(cil12(p.muroAlt, 1.08, y + 0.24 + ht, -1.08, 0.86, 0.12))
+  l.push(cupula(p.acento, 1.08, y + 0.36 + ht, -1.08, 0.86, 0.52))
+  l.push(caja(p.oro, 1.08, y + 0.88 + ht, -1.08, 0.06, 0.3, 0.06))
+  l.push(pieza(G.esfera, p.oro, { x: 1.08, y: y + 1.22 + ht, z: -1.08, sx: 0.15, sy: 0.18, sz: 0.15 }))
   if (det) {
-    l.push(caja(p.maderaClara, -1.05, y + 0.22, 1.3, 0.6, 0.4, 0.4))
-    l.push(pieza(G.cilindro, p.telaCruda, { x: -1.05, y: y + 0.66, z: 1.3, sx: 0.16, sy: 0.5, sz: 0.16, rz: PI / 2 }))
-    l.push(caja(p.tela, 0.95, y + 0.62, 1.3, 0.3, 0.08, 0.24))
+    l.push(cajaR(p.maderaClara, -1.05, y + 0.24, 1.3, 0.62, 0.42, 0.42, 0, 0.06))
+    l.push(pieza(G.cilindro12, p.telaCruda, { x: -1.05, y: y + 0.68, z: 1.3, sx: 0.17, sy: 0.52, sz: 0.17, rz: PI / 2 }))
+    l.push(caja(p.tela, 0.95, y + 0.66, 1.3, 0.3, 0.08, 0.24))
   }
-  if (t >= 1) l.push(bandera(p, p.telaAzul, -1.25, y + 0.22, -1.25, 1.2, 0.4))
+  l.push(bandera(p, p.telaAzul, -1.3, y + 0.24, -1.3, 1.25, 0.42))
+  // ESFERA ARMILAR de oro en el patio: el icono del saber, y lo que impide
+  // confundir la universidad con el monasterio desde arriba
+  l.push(cil12(p.zocalo, -0.35, y, 1.35, 0.36, 0.44))
+  l.push(pieza(G.esfera1, p.oro, { x: -0.35, y: y + 0.72, z: 1.35, sx: 0.42, sy: 0.42, sz: 0.42 }))
+  l.push(pieza(G.cilindro12, p.oro, { x: -0.35, y: y + 0.72, z: 1.35, sx: 0.56, sy: 0.04, sz: 0.56, rx: 0.5 }))
+  l.push(pieza(G.cilindro12, p.oro, { x: -0.35, y: y + 0.72, z: 1.35, sx: 0.56, sy: 0.04, sz: 0.56, rz: 1.2 }))
   return l
 }
 
 function fMonasterio ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.15 + 0.06 * n
-  l.push(caja(p.zocalo, 0.2, y, 0, 2.3, 0.2, 2.3))
-  l.push(caja(p.muro, 0.2, y + 0.2, 0, 2.0, h, 2.0))
-  l.push(techo2Aguas(p.techo, 0.2, y + 0.2 + h, 0, 2.25, 2.2, 0.7))
-  l.push(hastial(p.muroAlt, 0.2, y + 0.2 + h, 1.1, 2.25, 0.7))
-  l.push(hastial(p.muroAlt, 0.2, y + 0.2 + h, -1.1, 2.25, 0.7))
-  // campanario: tiene que sobresalir del tejado o no se lee como monasterio
-  const ht = h + 1.75
-  l.push(caja(p.muro, -1.05, y, 0.9, 0.85, ht, 0.85))
-  l.push(caja(p.carbon, -1.05, y + ht - 0.62, 0.9, 0.52, 0.5, 0.9))
-  l.push(pieza(G.cono8, p.oro, { x: -1.05, y: y + ht - 0.38, z: 0.9, sx: 0.36, sy: 0.36, sz: 0.36, rx: PI }))
-  l.push(caja(p.viga, -1.05, y + ht, 0.9, 0.98, 0.1, 0.98))
-  l.push(techo4(t >= 2 ? p.techo : p.techoAlt, -1.05, y + ht + 0.1, 0.9, 1.02, 0.78))
-  l.push(caja(p.oro, -1.05, y + ht + 0.88, 0.9, 0.07, 0.42, 0.07))
-  l.push(caja(p.oro, -1.05, y + ht + 1.04, 0.9, 0.28, 0.07, 0.07))
-  // vidriera redonda: la mancha de color que lo identifica
-  l.push(pieza(G.cilindro, p.telaAzul, { x: 0.2, y: y + 0.2 + h * 0.62, z: 1.03, sx: 0.62, sy: 0.06, sz: 0.62, rx: PI / 2 }))
-  l.push(pieza(G.cilindro, p.tela, { x: 0.2, y: y + 0.2 + h * 0.62, z: 1.06, sx: 0.3, sy: 0.05, sz: 0.3, rx: PI / 2 }))
-  l.push(pieza(G.cono, p.madera, { x: 0.2, y: y + 0.2 + h * 0.2, z: 1.02, sx: 0.55, sy: 1.1, sz: 0.06 }))
-  l.push(caja(p.madera, 0.2, y + 0.2, 1.04, 0.5, h * 0.42, 0.06))
-  if (det) {
-    for (let i = 0; i < 3; i++) {
-      l.push(cil(p.zocalo, 1.15, y + 0.2, -1.0 + i * 0.7, 0.22, 0.75))
-      l.push(caja(p.muroAlt, 1.15, y + 0.95, -1.0 + i * 0.7, 0.3, 0.12, 0.3))
-    }
-    l.push(roca(p.hierba, -1.15, y, -0.9, 0.5))
-  }
+  const h = 1.12 + 0.06 * n
+  l.push(cajaR(p.zocalo, 0.25, y, 0, 2.3, 0.22, 2.3, 0, 0.14))
+  l.push(cajaR(p.muro, 0.25, y + 0.22, 0, 2.0, h, 2.0, 0, 0.13))
+  l.push(cornisa(p.muroAlt, 0.25, y + 0.22 + h, 0, 2.25, 2.25, 0.12))
+  l.push(techo2Aguas(p.techo, 0.25, y + 0.34 + h, 0, 2.25, 2.2, 0.72))
+  l.push(hastial(p.muroAlt, 0.25, y + 0.34 + h, 1.1, 2.25, 0.72))
+  l.push(hastial(p.muroAlt, 0.25, y + 0.34 + h, -1.1, 2.25, 0.72))
+  // CAMPANARIO CON AGUJA DE COBRE: la torre más fina y más alta de la aldea
+  const ht = h + 1.85
+  l.push(cajaR(p.muro, -1.05, y, 0.9, 0.82, ht, 0.82, 0, 0.1))
+  l.push(caja(p.oscuro, -1.05, y + ht - 0.66, 0.9, 0.5, 0.54, 0.88))
+  l.push(arco(p.muro, -1.05, y + ht - 0.12, 0.9, 0.82, 0.86))
+  l.push(pieza(G.cono8, p.oro, { x: -1.05, y: y + ht - 0.4, z: 0.9, sx: 0.36, sy: 0.36, sz: 0.36, rx: PI }))
+  l.push(cornisa(p.muroAlt, -1.05, y + ht + 0.29, 0.9, 0.98, 0.98, 0.11))
+  l.push(pieza(G.cono8, p.acento, { x: -1.05, y: y + ht + 0.4 + 0.55, z: 0.9, sx: 1.0, sy: 1.1, sz: 1.0 }))
+  l.push(caja(p.oro, -1.05, y + ht + 1.5, 0.9, 0.07, 0.42, 0.07))
+  l.push(caja(p.oro, -1.05, y + ht + 1.66, 0.9, 0.28, 0.07, 0.07))
+  // ROSETÓN: la mancha de color de la fachada
+  l.push(pieza(G.cilindro12, p.telaAzul, { x: 0.25, y: y + 0.22 + h * 0.62, z: 1.03, sx: 0.66, sy: 0.06, sz: 0.66, rx: PI / 2 }))
+  l.push(pieza(G.cilindro12, p.acento, { x: 0.25, y: y + 0.22 + h * 0.62, z: 1.07, sx: 0.32, sy: 0.05, sz: 0.32, rx: PI / 2 }))
+  // portada con arco apuntado sobre arco de medio punto
+  hueco(l, p.madera, 0.25, y + 0.22, 1.03, 0.56, h * 0.4, 0.07)
+  // CLAUSTRO: cuatro columnas con arcos al costado
+  for (let i = 0; i < 3; i++) l.push(cil12(p.zocalo, 1.2, y + 0.22, -1.0 + i * 0.75, 0.22, 0.78))
+  for (let i = 0; i < 2; i++) l.push(pieza(G.arco, p.muroAlt, { x: 1.2, y: y + 1.0, z: -0.62 + i * 0.75, sx: 0.75, sy: 0.75, sz: 0.3, ry: PI / 2 }))
+  if (det) l.push(roca(p.hierba, -1.2, y, -0.95, 0.52))
   return l
 }
 
 function fCampamento ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  // dos tiendas de campaña
-  for (const [x, z, d] of [[-0.85, -0.6, 1.4], [0.85, 0.25, 1.15]]) {
-    l.push(pieza(G.cono6, p.telaCruda, { x, y: y + d * 0.42, z, sx: d, sy: d * 0.85, sz: d }))
-    l.push(caja(p.carbon, x, y, z + d * 0.4, d * 0.28, d * 0.42, 0.05))
-    l.push(caja(p.madera, x, y + d * 0.8, z, 0.05, 0.3, 0.05))
-    l.push(hastial(p.tela, x, y + d * 0.86, z, 0.3, 0.16, 0.03))
+  // TIENDAS CÓNICAS: no hay ningún otro edificio hecho de conos de tela
+  for (const [x, z, d] of [[-0.85, -0.6, 1.5], [0.85, 0.25, 1.2]]) {
+    l.push(pieza(G.cono6, p.telaCruda, { x, y: y + d * 0.44, z, sx: d, sy: d * 0.9, sz: d }))
+    l.push(caja(p.oscuro, x, y, z + d * 0.4, d * 0.28, d * 0.44, 0.05))
+    l.push(caja(p.madera, x, y + d * 0.84, z, 0.05, 0.32, 0.05))
+    l.push(hastial(p.tela, x, y + d * 0.9, z, 0.32, 0.18, 0.03))
   }
   hoguera(l, p, 0, y, 1.0, det)
-  // mesa de mapas
-  l.push(caja(p.maderaClara, 0.9, y + 0.42, -0.95, 1.0, 0.08, 0.7, 0.3))
-  for (const dx of [-0.38, 0.38]) for (const dz of [-0.24, 0.24]) l.push(caja(p.madera, 0.9 + dx, y, -0.95 + dz, 0.07, 0.42, 0.07))
-  l.push(caja(p.telaCruda, 0.9, y + 0.5, -0.95, 0.7, 0.03, 0.5, 0.3))
-  // asta con el gallardete
-  l.push(bandera(p, p.telaVerde, -1.2, y, 1.1, 1.5, 0.42))
+  // MESA DE MAPAS
+  l.push(cajaR(p.maderaClara, 0.92, y + 0.44, -0.98, 1.05, 0.09, 0.72, 0.3, 0.06))
+  for (const dx of [-0.4, 0.4]) for (const dz of [-0.25, 0.25]) l.push(caja(p.madera, 0.92 + dx, y, -0.98 + dz, 0.07, 0.44, 0.07))
+  l.push(caja(p.telaCruda, 0.92, y + 0.53, -0.98, 0.72, 0.03, 0.52, 0.3))
+  l.push(bandera(p, p.acento, -1.25, y, 1.15, 1.6, 0.44))
   if (det) {
     l.push(cajon(p, 0.15, y, -0.35, 0.34))
-    l.push(barril(p, -0.2, y, -1.15))
-    for (let i = 0; i < 3; i++) l.push(pieza(G.caja, p.madera, { x: 1.3, y: y + 0.5, z: 0.9, sx: 0.05, sy: 1.0, sz: 0.05, rz: 0.2 * (i - 1), ry: i }))
+    l.push(barril(p, -0.2, y, -1.2))
+    for (let i = 0; i < 3; i++) l.push(pieza(G.caja, p.madera, { x: 1.35, y: y + 0.52, z: 0.95, sx: 0.05, sy: 1.05, sz: 0.05, rz: 0.2 * (i - 1), ry: i }))
   }
   if (t >= 1) {
-    l.push(caja(p.zocalo, -0.85, y, -0.6, 1.5, 0.12, 1.5))
-    l.push(caja(p.zocalo, 0.85, y, 0.25, 1.25, 0.12, 1.25))
+    l.push(cajaR(p.zocalo, -0.85, y, -0.6, 1.6, 0.12, 1.6, 0, 0.2))
+    l.push(cajaR(p.zocalo, 0.85, y, 0.25, 1.3, 0.12, 1.3, 0, 0.18))
   }
   return l
 }
@@ -750,54 +933,61 @@ function fCampamento ({ p, n, t, det }) {
 function fTorreVigia ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 1.25 + 0.14 * n
-  l.push(caja(p.zocalo, 0, y, 0, 1.45, 0.2, 1.45))
-  l.push(caja(p.muro, 0, y + 0.2, 0, 1.15, h, 1.15))
-  l.push(caja(p.carbon, 0, y + 0.2 + h * 0.45, 0.6, 0.16, 0.42, 0.04))   // saetera
-  // remate: plataforma de madera y voladizo
-  const yp = y + 0.2 + h
-  l.push(caja(p.viga, 0, yp, 0, 1.5, 0.14, 1.5))
+  const h = 1.6 + 0.15 * n       // TORRE CUADRADA, alta y estrecha
+  l.push(cajaR(p.zocalo, 0, y, 0, 1.5, 0.22, 1.5, 0, 0.14))
+  l.push(cajaR(p.muro, 0, y + 0.22, 0, 1.12, h, 1.12, 0, 0.12))
+  hueco(l, p.oscuro, 0, y + 0.22 + h * 0.4, 0.58, 0.16, 0.34, 0.05)
+  // el remate vuela sobre el fuste: cadalso de madera con tejadillo a cuatro aguas
+  const yp = y + 0.22 + h
+  l.push(cornisa(p.muroAlt, 0, yp, 0, 1.5, 1.5, 0.14))
   if (t >= 1) {
     almenas(l, p.muroAlt, 0, yp + 0.14, 0.66, 1.5, 0.18, 0.38, 0.26)
     almenas(l, p.muroAlt, 0, yp + 0.14, -0.66, 1.5, 0.18, 0.38, 0.26)
-    l.push(caja(p.muroAlt, -0.66, yp + 0.14, 0, 0.18, 0.26, 1.5))
-    l.push(caja(p.muroAlt, 0.66, yp + 0.14, 0, 0.18, 0.26, 1.5))
+    l.push(cajaR(p.muroAlt, -0.66, yp + 0.14, 0, 0.18, 0.26, 1.5, 0, 0.05))
+    l.push(cajaR(p.muroAlt, 0.66, yp + 0.14, 0, 0.18, 0.26, 1.5, 0, 0.05))
   } else {
-    for (const [x, z] of [[0, 0.7], [0, -0.7], [0.7, 0], [-0.7, 0]]) l.push(caja(p.madera, x, yp + 0.14, z, x ? 0.1 : 1.5, 0.24, x ? 1.5 : 0.1))
+    for (const [x, z] of [[0, 0.7], [0, -0.7], [0.7, 0], [-0.7, 0]]) l.push(caja(p.madera, x, yp + 0.14, z, x ? 0.1 : 1.5, 0.26, x ? 1.5 : 0.1))
   }
-  // caseta del vigía: el tejadillo va POR ENCIMA del pretil, nunca metido dentro
-  for (const px of [-0.52, 0.52]) for (const pz of [-0.52, 0.52]) l.push(caja(p.madera, px, yp + 0.4, pz, 0.11, 0.34, 0.11))
-  l.push(techo4(p.techo, 0, yp + 0.74, 0, 1.5, 0.62))
-  if (t >= 2) l.push(bandera(p, p.telaAzul, 0, yp + 1.36, 0, 0.55, 0.3))
+  for (const px of [-0.5, 0.5]) for (const pz of [-0.5, 0.5]) l.push(caja(p.madera, px, yp + 0.4, pz, 0.11, 0.36, 0.11))
+  l.push(techo4Aguas(p.techo, 0, yp + 0.76, 0, 1.2, 1.2, 0.68))
+  l.push(pieza(G.esfera, p.remate, { x: 0, y: yp + 1.5, z: 0, sx: 0.14, sy: 0.17, sz: 0.14 }))
+  // BRASERO DE SEÑALES: la luz que avisa de que esto es una atalaya
+  l.push(cil12(p.metal, 0.52, yp + 0.14, 0.52, 0.3, 0.2))
   if (det) {
-    l.push(pieza(G.caja, p.madera, { x: 0.62, y: y + h * 0.5, z: 0.72, sx: 0.08, sy: h * 1.1, sz: 0.08, rz: 0.12 }))
-    for (let i = 0; i < 3; i++) l.push(caja(p.madera, 0.62, y + 0.3 + i * 0.35, 0.72, 0.32, 0.06, 0.06))
+    const f = pieza(G.cono6, p.fuego, { x: 0.52, y: yp + 0.46, z: 0.52, sx: 0.24, sy: 0.34, sz: 0.24 })
+    f.userData.anim = 'llama'; f.castShadow = false
+    l.push(f)
+    l.push(pieza(G.caja, p.madera, { x: 0.6, y: y + h * 0.5, z: 0.72, sx: 0.08, sy: h * 1.05, sz: 0.08, rz: 0.12 }))
+    for (let i = 0; i < 3; i++) l.push(caja(p.madera, 0.6, y + 0.35 + i * 0.4, 0.72, 0.32, 0.06, 0.06))
   }
+  if (t >= 2) l.push(bandera(p, p.acento, -0.52, yp + 0.14, -0.52, 0.75, 0.3))
   return l
 }
 
 function fTorreBallesta ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  const h = 0.95 + 0.11 * n
-  l.push(caja(p.zocalo, 0, y, 0, 1.5, 0.22, 1.5))
-  l.push(caja(p.muro, 0, y + 0.22, 0, 1.25, h, 1.25))
-  l.push(caja(p.viga, 0, y + 0.22 + h, 0, 1.55, 0.14, 1.55))
-  almenas(l, p.muroAlt, 0, y + 0.36 + h, 0.68, 1.55, 0.18, 0.4, 0.24)
-  almenas(l, p.muroAlt, 0, y + 0.36 + h, -0.68, 1.55, 0.18, 0.4, 0.24)
-  // la ballesta montada: dos brazos, carril y virote
-  const yb = y + 0.5 + h
-  l.push(cil6(p.madera, 0, y + 0.36 + h, 0, 0.45, 0.18))
-  l.push(pieza(G.caja, p.madera, { x: 0, y: yb + 0.1, z: 0, sx: 0.18, sy: 0.12, sz: 1.1, rx: -0.18 }))
-  l.push(pieza(G.caja, p.metal, { x: 0, y: yb + 0.18, z: -0.15, sx: 1.35, sy: 0.08, sz: 0.08, rz: 0.12 }))
-  l.push(pieza(G.caja, p.metal, { x: 0, y: yb + 0.22, z: -0.1, sx: 1.1, sy: 0.03, sz: 0.03 }))
-  l.push(pieza(G.caja, p.maderaClara, { x: 0, y: yb + 0.2, z: 0.25, sx: 0.06, sy: 0.06, sz: 0.8, rx: -0.18 }))
-  l.push(pieza(G.cono, p.metal, { x: 0, y: yb + 0.28, z: 0.66, sx: 0.14, sy: 0.22, sz: 0.14, rx: PI / 2 - 0.18 }))
-  if (det) {
-    l.push(cajon(p, 0.5, y + 0.36 + h, 0.45, 0.32))
-    l.push(caja(p.carbon, 0, y + 0.22 + h * 0.4, 0.65, 0.16, 0.4, 0.04))
+  const h = 0.95 + 0.1 * n       // TORRE REDONDA, baja y ancha: el contrario exacto de la vigía
+  l.push(cil12(p.zocalo, 0, y, 0, 1.55, 0.24))
+  l.push(cil12(p.muro, 0, y + 0.24, 0, 1.35, h))
+  l.push(cil12(p.muroAlt, 0, y + 0.24 + h * 0.5, 0, 1.42, 0.1))    // cordón a media altura
+  l.push(cil12(p.muroAlt, 0, y + 0.24 + h, 0, 1.62, 0.16))
+  // almenas en corona: doce merlones alrededor
+  for (let i = 0; i < 10; i += 2) {
+    const a = (i * PI) / 5
+    l.push(cajaR(p.muroAlt, Math.sin(a) * 0.68, y + 0.4 + h, Math.cos(a) * 0.68, 0.34, 0.26, 0.24, -a, 0.05))
   }
-  if (t >= 2) l.push(bandera(p, p.tela, -0.55, y + 0.36 + h, -0.5, 0.8, 0.3))
+  hueco(l, p.oscuro, 0, y + 0.24 + h * 0.22, 0.68, 0.18, 0.32, 0.05)
+  // LA BALLESTA montada: dos brazos de acero y el virote cargado
+  const yb = y + 0.56 + h
+  l.push(cil12(p.madera, 0, y + 0.4 + h, 0, 0.5, 0.18))
+  l.push(pieza(G.caja, p.madera, { x: 0, y: yb + 0.1, z: 0, sx: 0.2, sy: 0.13, sz: 1.15, rx: -0.18 }))
+  l.push(pieza(G.caja, p.metal, { x: 0, y: yb + 0.19, z: -0.16, sx: 1.45, sy: 0.08, sz: 0.08, rz: 0.12 }))
+  l.push(pieza(G.caja, p.metal, { x: 0, y: yb + 0.23, z: -0.1, sx: 1.18, sy: 0.03, sz: 0.03 }))
+  l.push(pieza(G.caja, p.maderaClara, { x: 0, y: yb + 0.21, z: 0.26, sx: 0.06, sy: 0.06, sz: 0.85, rx: -0.18 }))
+  l.push(pieza(G.cono6, p.metal, { x: 0, y: yb + 0.3, z: 0.68, sx: 0.15, sy: 0.24, sz: 0.15, rx: PI / 2 - 0.18 }))
+  if (det) l.push(cajon(p, 0.52, y + 0.4 + h, 0.48, 0.32))
+  if (t >= 2) l.push(bandera(p, p.tela, -0.55, y + 0.4 + h, -0.5, 0.85, 0.32))
   return l
 }
 
@@ -805,40 +995,46 @@ function fCastillo ({ p, n, t, det }) {
   const l = []
   const y = SUELO
   const hm = 1.0 + 0.06 * n        // muro cortina
-  const ht = 1.9 + 0.12 * n        // torreones
-  l.push(caja(p.zocalo, 0, y, 0, 3.8, 0.22, 3.8))
+  const ht = 1.95 + 0.12 * n       // torre del homenaje
+  l.push(cajaR(p.zocalo, 0, y, 0, 3.85, 0.24, 3.85, 0, 0.2))
   // muro cortina con almenas en los cuatro lados
   for (const s of [1, -1]) {
-    l.push(caja(p.muro, 0, y + 0.22, s * 1.45, 3.4, hm, 0.45))
-    l.push(caja(p.muro, s * 1.45, y + 0.22, 0, 0.45, hm, 3.4))
-    almenas(l, p.muroAlt, 0, y + 0.22 + hm, s * 1.45, 3.4, 0.45, 0.42, 0.26)
-    almenas(l, p.muroAlt, s * 1.45, y + 0.22 + hm, 0, 3.4, 0.45, 0.42, 0.26, true)
+    l.push(cajaR(p.muro, 0, y + 0.24, s * 1.45, 3.4, hm, 0.45, 0, 0.08))
+    l.push(cajaR(p.muro, s * 1.45, y + 0.24, 0, 0.45, hm, 3.4, 0, 0.08))
+    l.push(cornisa(p.muroAlt, 0, y + 0.24 + hm, s * 1.45, 3.45, 0.56, 0.1))
+    l.push(cornisa(p.muroAlt, s * 1.45, y + 0.24 + hm, 0, 0.56, 3.45, 0.1))
+    almenas(l, p.muroAlt, 0, y + 0.34 + hm, s * 1.45, 3.4, 0.45, 0.42, 0.28)
+    almenas(l, p.muroAlt, s * 1.45, y + 0.34 + hm, 0, 3.4, 0.45, 0.42, 0.28, true)
   }
-  // torreón central
-  l.push(caja(p.muro, 0, y + 0.22, -0.2, 1.7, ht, 1.7))
-  almenas(l, p.muroAlt, 0, y + 0.22 + ht, 0.62, 1.7, 0.22, 0.42, 0.26)
-  almenas(l, p.muroAlt, 0, y + 0.22 + ht, -1.02, 1.7, 0.22, 0.42, 0.26)
-  l.push(caja(p.muroAlt, -0.84, y + 0.22 + ht, -0.2, 0.22, 0.26, 1.7))
-  l.push(caja(p.muroAlt, 0.84, y + 0.22 + ht, -0.2, 0.22, 0.26, 1.7))
-  l.push(bandera(p, p.telaAzul, 0, y + 0.22 + ht + 0.26, -0.2, 1.1, 0.5))
-  // cuatro torres redondas con capirote de pizarra
+  // torre del homenaje
+  l.push(cajaR(p.muro, 0, y + 0.24, -0.2, 1.7, ht, 1.7, 0, 0.14))
+  l.push(cornisa(p.muroAlt, 0, y + 0.24 + ht, -0.2, 1.9, 1.9, 0.12))
+  almenas(l, p.muroAlt, 0, y + 0.36 + ht, 0.66, 1.9, 0.22, 0.42, 0.28)
+  almenas(l, p.muroAlt, 0, y + 0.36 + ht, -1.06, 1.9, 0.22, 0.42, 0.28)
+  l.push(cajaR(p.muroAlt, -0.94, y + 0.36 + ht, -0.2, 0.22, 0.28, 1.9, 0, 0.05))
+  l.push(cajaR(p.muroAlt, 0.94, y + 0.36 + ht, -0.2, 0.22, 0.28, 1.9, 0, 0.05))
+  l.push(bandera(p, p.acento, 0, y + 0.36 + ht + 0.28, -0.2, 1.15, 0.52))
+  // CUATRO TORRES REDONDAS con capirote: el perfil del castillo
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
     const x = sx * 1.5; const z = sz * 1.5
-    l.push(cil6(p.muro, x, y + 0.22, z, 1.0, ht * 0.85))
-    l.push(cil6(p.muroAlt, x, y + 0.22 + ht * 0.85, z, 1.15, 0.18))
-    l.push(techoCono(p.techo, x, y + 0.4 + ht * 0.85, z, 1.2, 0.85))
-    l.push(caja(p.carbon, x, y + 0.22 + ht * 0.45, z + sz * 0.5, 0.14, 0.36, 0.05))
+    l.push(cil12(p.muro, x, y + 0.24, z, 1.0, ht * 0.88))
+    l.push(cil12(p.muroAlt, x, y + 0.24 + ht * 0.88, z, 1.18, 0.18))
+    l.push(techoCono(p.techo, x, y + 0.42 + ht * 0.88, z, 1.24, 0.92))
+    l.push(pieza(G.esfera, p.remate, { x, y: y + 1.42 + ht * 0.88, z, sx: 0.12, sy: 0.15, sz: 0.12 }))
+    hueco(l, p.oscuro, x, y + 0.24 + ht * 0.4, z + sz * 0.5, 0.16, 0.3, 0.06)
   }
-  // puerta con puente levadizo y cadenas
-  l.push(caja(p.carbon, 0, y + 0.22, 1.5, 0.9, hm * 0.9, 0.5))
-  l.push(pieza(G.cono, p.carbon, { x: 0, y: y + 0.22 + hm * 0.9, z: 1.5, sx: 0.9, sy: 0.4, sz: 0.5 }))
-  l.push(pieza(G.caja, p.madera, { x: 0, y: y + 0.55, z: 2.3, sx: 0.85, sy: 0.1, sz: 1.5, rx: -0.55 }))
-  for (const dx of [-0.38, 0.38]) {
-    l.push(pieza(G.caja, p.metal, { x: dx, y: y + 0.95, z: 2.15, sx: 0.05, sy: 1.1, sz: 0.05, rz: 0.1, rx: 0.35 }))
+  // PUERTA con arco, rastrillo y puente levadizo
+  l.push(caja(p.oscuro, 0, y + 0.24, 1.5, 0.95, hm * 0.72, 0.5))
+  l.push(arco(p.oscuro, 0, y + 0.24 + hm * 0.72, 1.5, 0.95, 0.5))
+  l.push(arco(p.muroAlt, 0, y + 0.24 + hm * 0.72, 1.72, 1.2, 0.12))
+  // el puente BAJADO y apoyado en el suelo: levantado quedaba un tablón flotando
+  l.push(cajaR(p.madera, 0, y - 0.06, 2.42, 0.95, 0.12, 1.5, 0, 0.06))
+  for (const dx of [-0.42, 0.42]) {
+    l.push(pieza(G.caja, p.metal, { x: dx, y: y + 0.72, z: 2.05, sx: 0.05, sy: 1.5, sz: 0.05, rx: -0.72 }))
   }
   if (det) {
-    l.push(bandera(p, p.tela, -1.5, y + 0.4 + ht * 0.85 + 0.8, -1.5, 0.6, 0.3))
-    l.push(bandera(p, p.tela, 1.5, y + 0.4 + ht * 0.85 + 0.8, -1.5, 0.6, 0.3))
+    l.push(bandera(p, p.tela, -1.5, y + 0.42 + ht * 0.88 + 0.85, -1.5, 0.62, 0.3))
+    l.push(bandera(p, p.tela, 1.5, y + 0.42 + ht * 0.88 + 0.85, -1.5, 0.62, 0.3))
   }
   return l
 }
@@ -846,27 +1042,122 @@ function fCastillo ({ p, n, t, det }) {
 function fPozo ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  l.push(cil6(p.zocalo, 0, y, 0, 0.82, 0.36))
-  l.push(cil6(p.carbon, 0, y + 0.36, 0, 0.62, 0.03))
-  l.push(caja(p.madera, -0.3, y + 0.36, 0, 0.09, 0.78, 0.09))
-  l.push(caja(p.madera, 0.3, y + 0.36, 0, 0.09, 0.78, 0.09))
-  l.push(techo2Aguas(p.techo, 0, y + 1.14, 0, 0.82, 0.66, 0.46, 0.08))
-  l.push(pieza(G.cilindro, p.madera, { x: 0, y: y + 0.95, z: 0, sx: 0.16, sy: 0.62, sz: 0.16, rz: PI / 2 }))
-  l.push(caja(p.metal, 0, y + 0.6, 0, 0.03, 0.32, 0.03))
-  l.push(cil6(p.maderaClara, 0, y + 0.46, 0, 0.2, 0.16))
-  if (det) l.push(pieza(G.caja, p.madera, { x: 0.34, y: y + 0.95, z: 0.14, sx: 0.06, sy: 0.2, sz: 0.06, rz: 0.6 }))
+  l.push(cil12(p.zocalo, 0, y, 0, 0.88, 0.2))
+  l.push(cil12(p.piedra, 0, y + 0.2, 0, 0.78, 0.22))
+  l.push(cil12(p.oscuro, 0, y + 0.42, 0, 0.6, 0.03))
+  l.push(cil6(p.madera, -0.3, y + 0.42, 0, 0.11, 0.76))
+  l.push(cil6(p.madera, 0.3, y + 0.42, 0, 0.11, 0.76))
+  l.push(techo2Aguas(p.techo, 0, y + 1.18, 0, 0.9, 0.7, 0.44, 0.09))
+  l.push(pieza(G.cilindro12, p.madera, { x: 0, y: y + 1.0, z: 0, sx: 0.17, sy: 0.62, sz: 0.17, rz: PI / 2 }))
+  l.push(caja(p.oscuro, 0, y + 0.66, 0, 0.03, 0.34, 0.03))
+  l.push(cil6(p.maderaClara, 0, y + 0.52, 0, 0.21, 0.17))
+  if (det) l.push(pieza(G.caja, p.madera, { x: 0.34, y: y + 1.0, z: 0.14, sx: 0.06, sy: 0.2, sz: 0.06, rz: 0.6 }))
   return l
 }
 
 function fEstandarte ({ p, n, t, det }) {
   const l = []
   const y = SUELO
-  l.push(cil6(p.zocalo, 0, y, 0, 0.6, 0.22))
-  l.push(caja(p.piedraOscura, 0, y + 0.22, 0, 0.3, 0.14, 0.3))
-  l.push(bandera(p, p.telaAzul, 0, y + 0.36, 0, 1.6, 0.55))
+  l.push(cil12(p.zocalo, 0, y, 0, 0.62, 0.2))
+  l.push(cil12(p.piedraOscura, 0, y + 0.2, 0, 0.42, 0.14))
+  l.push(bandera(p, p.acento, 0, y + 0.34, 0, 1.65, 0.56))
   if (det) {
-    l.push(roca(p.piedra, 0.32, y, 0.28, 0.24))
-    l.push(roca(p.piedra, -0.3, y, -0.25, 0.2))
+    l.push(roca(p.piedra, 0.34, y, 0.3, 0.24))
+    l.push(roca(p.piedra, -0.3, y, -0.26, 0.2))
+  }
+  return l
+}
+
+
+/**
+ * PUESTO AVANZADO: el poblado fortificado de la frontera.
+ *
+ * Vive en tierra recién ganada, sobre el verde apagado del barbecho, así que
+ * tira de madera caliente, teja y un estandarte azul para cantar contra ese
+ * fondo. La silueta es un RECINTO CERRADO de empalizada con una torrecilla
+ * REDONDA de madera en una esquina y dos casitas dentro: ni la torre vigía
+ * (una torre cuadrada de piedra, suelta) ni el castillo (cantería, cuatro
+ * torreones y almenas) se parecen a esto desde la cámara del juego.
+ */
+function fPuestoAvanzado ({ p, n, t, det }) {
+  const l = []
+  const y = SUELO
+  const R = 1.3
+  const hp = 0.64 + 0.028 * n          // altura de la empalizada
+  const yp = y + (t >= 1 ? 0.14 : 0)   // desde el escalón de piedra, sobre zócalo
+
+  // EMPALIZADA: paño de troncos con las puntas afiladas y su amarre a media
+  // altura. Un paño macizo con las puntas encima cuesta la décima parte que
+  // cuarenta troncos sueltos y se lee exactamente igual desde arriba.
+  const tramo = (cx, cz, largo, enZ, hueco = 0) => {
+    if (hueco) {
+      const semi = (largo - hueco) / 2
+      const off = (hueco + semi) / 2
+      tramo(enZ ? cx : cx - off, enZ ? cz - off : cz, semi, enZ)
+      tramo(enZ ? cx : cx + off, enZ ? cz + off : cz, semi, enZ)
+      return
+    }
+    const sx = enZ ? 0.18 : largo
+    const sz = enZ ? largo : 0.18
+    if (t >= 1) l.push(cajaR(p.zocalo, cx, y, cz, sx + 0.12, 0.14, sz + 0.12, 0, 0.05))
+    l.push(cajaR(p.madera, cx, yp, cz, sx, hp, sz, 0, 0.05))
+    l.push(caja(p.oscuro, cx, yp + hp * 0.6, cz, enZ ? 0.22 : largo, 0.07, enZ ? largo : 0.22))
+    const nn = Math.max(2, Math.round(largo / 0.3))
+    for (let i = 0; i < nn; i++) {
+      const u = -largo / 2 + largo / (2 * nn) + (i * largo) / nn
+      l.push(pieza(G.cono6, p.maderaClara, {
+        x: enZ ? cx : cx + u, y: yp + hp + 0.09, z: enZ ? cz + u : cz, sx: 0.21, sy: 0.22, sz: 0.21
+      }))
+    }
+  }
+  tramo(0, -R, R * 2, false)
+  tramo(-R, 0, R * 2, true)
+  tramo(R, 0, R * 2, true)
+  tramo(0, R, R * 2, false, 0.9)        // el portón mira al frente
+
+  // PORTÓN: dos postes gordos, dintel y las hojas de madera
+  for (const s of [-1, 1]) {
+    l.push(leno(p.madera, s * 0.5, y, R, 0.28, hp + 0.34))
+    l.push(pieza(G.cono6, p.maderaClara, { x: s * 0.5, y: y + hp + 0.44, z: R, sx: 0.3, sy: 0.26, sz: 0.3 }))
+  }
+  l.push(caja(p.oscuro, 0, y + hp + 0.16, R, 1.2, 0.14, 0.22))
+  l.push(caja(p.madera, 0, y, R, 0.86, hp * 0.92, 0.14))
+  l.push(caja(p.oscuro, 0, y + hp * 0.4, R, 0.86, 0.08, 0.18))
+
+  // TORRECILLA REDONDA de madera con su capirote: la seña vertical del puesto
+  const tx = -0.66; const tz = -0.66
+  const ht = 1.45 + 0.1 * n
+  l.push(cil12(t >= 2 ? p.zocalo : p.madera, tx, y, tz, 0.88, ht))
+  l.push(cil12(p.maderaClara, tx, y + ht, tz, 1.16, 0.13))
+  for (let i = 0; i < 6; i++) {
+    const a = (i * PI) / 3
+    l.push(caja(p.madera, tx + Math.sin(a) * 0.52, y + ht + 0.13, tz + Math.cos(a) * 0.52, 0.1, 0.28, 0.1))
+  }
+  l.push(techoCono(p.techo, tx, y + ht + 0.41, tz, 1.22, 0.64))
+  l.push(bandera(p, p.acento, tx, y + ht + 1.05, tz, 0.68, 0.36))
+  // escala de mano apoyada en el fuste
+  l.push(pieza(G.caja, p.madera, { x: tx + 0.5, y: y + ht * 0.5, z: tz + 0.5, sx: 0.07, sy: ht * 1.08, sz: 0.07, rz: 0.14 }))
+  for (let i = 0; i < 3; i++) l.push(caja(p.maderaClara, tx + 0.5, y + 0.3 + i * 0.36, tz + 0.5, 0.28, 0.05, 0.05))
+
+  // DOS CASITAS dentro: esto es un poblado en la linde, no una torre suelta
+  const casita = (cx, cz, w, alt) => {
+    l.push(cajaR(p.zocalo, cx, y, cz, w + 0.14, 0.1, w * 0.84 + 0.14, 0, 0.06))
+    l.push(cajaR(p.muro, cx, y + 0.1, cz, w, alt, w * 0.84, 0, 0.07))
+    l.push(techo2Aguas(p.techo, cx, y + 0.1 + alt, cz, w + 0.24, w * 0.84 + 0.2, 0.34, 0.1))
+    l.push(hastial(p.muroAlt, cx, y + 0.1 + alt, cz + (w * 0.84 + 0.2) / 2, w + 0.24, 0.34, 0.08))
+    l.push(hastial(p.muroAlt, cx, y + 0.1 + alt, cz - (w * 0.84 + 0.2) / 2, w + 0.24, 0.34, 0.08))
+    hueco(l, p.oscuro, cx, y + 0.1, cz + w * 0.42 + 0.02, w * 0.32, alt * 0.5, 0.05)
+  }
+  casita(0.62, -0.62, 0.92, 0.5 + 0.02 * n)
+  casita(-0.58, 0.62, 0.82, 0.46 + 0.02 * n)
+
+  // hoguera del turno de guardia y el huerto que da la comida del puesto
+  hoguera(l, p, 0.38, y, 0.34, det)
+  for (let i = 0; i < 2; i++) l.push(caja(p.trigo, 0.92, y, 0.62 + i * 0.3, 0.72, 0.2, 0.16))
+  if (det) {
+    l.push(barril(p, -1.02, y, -0.12))
+    lena(l, p, 1.0, y, -1.0)
+    l.push(cajon(p, 0.05, y, -1.0, 0.32))
   }
   return l
 }
@@ -933,13 +1224,14 @@ function fMuralla ({ p, n, t, det, mask }) {
     almenas(l, cor, cx, y + 0.24 + h, cz, dx ? 0.54 : gro, dx ? gro : 0.54, 0.26, 0.2, !dx)
   }
   if (cuenta <= 1) {
-    // extremo: torreta redonda, para que el muro no acabe en un tajo
-    l.push(cil6(muroP, 0, y + 0.14, 0, 0.78, h + 0.18))
-    l.push(cil6(cor, 0, y + 0.32 + h, 0, 0.9, 0.12))
-    l.push(techoCono(p.techo, 0, y + 0.44 + h, 0, 0.98, 0.66))
+    // extremo: torreta REDONDA de doce caras, para que el muro no acabe en un tajo
+    l.push(cil12(muroP, 0, y + 0.14, 0, 0.8, h + 0.18))
+    l.push(cil12(cor, 0, y + 0.32 + h, 0, 0.92, 0.12))
+    l.push(techoCono(p.techo, 0, y + 0.44 + h, 0, 1.0, 0.68))
   } else {
-    l.push(caja(muroP, 0, y + 0.14, 0, gro + 0.08, h + 0.1, gro + 0.08))
-    l.push(caja(cor, 0, y + 0.24 + h, 0, gro + 0.18, 0.22, gro + 0.18))
+    // el machón de la esquina va achaflanado: es lo que quita el aire de cajas
+    l.push(cajaR(muroP, 0, y + 0.14, 0, gro + 0.08, h + 0.1, gro + 0.08, 0, 0.08))
+    l.push(cajaR(cor, 0, y + 0.24 + h, 0, gro + 0.18, 0.22, gro + 0.18, 0, 0.06))
   }
   if (det && t >= 2 && cuenta <= 2) {
     l.push(caja(p.madera, 0.3, y + h * 0.7, 0.3, 0.06, 0.3, 0.06))
@@ -958,25 +1250,25 @@ function fPuerta ({ p, n, t, det }) {
   const muroP = t === 0 ? p.madera : t >= 2 ? p.piedraOscura : p.piedra
   const cor = t === 0 ? p.maderaClara : t >= 2 ? p.piedra : p.piedraOscura
   const h = 0.72 + 0.075 * n
-  // dos torreones con el arco en medio: se lee como puerta desde arriba
+  // dos torreones con el ARCO DE MEDIO PUNTO en medio: se lee como puerta desde arriba
   for (const s of [-1, 1]) {
-    l.push(caja(p.piedraOscura, s * 0.62, y, 0, 0.76, 0.16, 0.76))
-    l.push(caja(muroP, s * 0.62, y + 0.16, 0, 0.64, h + 0.35, 0.64))
+    l.push(cajaR(p.piedraOscura, s * 0.62, y, 0, 0.76, 0.16, 0.76, 0, 0.07))
+    l.push(cajaR(muroP, s * 0.62, y + 0.16, 0, 0.64, h + 0.35, 0.64, 0, 0.08))
     almenas(l, cor, s * 0.62, y + 0.51 + h, 0, 0.74, 0.74, 0.28, 0.18)
     if (det) l.push(caja(p.carbon, s * 0.62, y + 0.16 + h * 0.55, 0.33, 0.12, 0.3, 0.04))
   }
-  l.push(caja(muroP, 0, y + 0.16 + h * 0.78, 0, 0.72, h * 0.35, 0.6))
-  almenas(l, cor, 0, y + 0.16 + h * 1.13, 0, 0.72, 0.6, 0.24, 0.16)
+  l.push(arco(muroP, 0, y + 0.16 + h * 0.6, 0, 0.62, 0.62))
+  l.push(caja(muroP, 0, y + 0.16 + h * 0.9, 0, 0.72, h * 0.25, 0.6))
+  almenas(l, cor, 0, y + 0.16 + h * 1.15, 0, 0.72, 0.6, 0.24, 0.16)
   // hojas de madera con herrajes
   for (const s of [-1, 1]) {
     l.push(caja(p.madera, s * 0.17, y + 0.1, 0, 0.32, h * 0.78, 0.28))
     l.push(caja(p.metal, s * 0.17, y + 0.1 + h * 0.28, 0.15, 0.3, 0.07, 0.04))
     l.push(caja(p.metal, s * 0.17, y + 0.1 + h * 0.6, 0.15, 0.3, 0.07, 0.04))
   }
-  l.push(pieza(G.cono, p.piedraOscura, { x: 0, y: y + 0.16 + h * 0.78, z: 0, sx: 0.72, sy: 0.3, sz: 0.62 }))
   if (t >= 1) {
-    l.push(bandera(p, p.telaAzul, -0.62, y + 0.51 + h + 0.18, 0, 0.7, 0.3))
-    l.push(bandera(p, p.telaAzul, 0.62, y + 0.51 + h + 0.18, 0, 0.7, 0.3))
+    l.push(bandera(p, p.acento, -0.62, y + 0.51 + h + 0.18, 0, 0.7, 0.3))
+    l.push(bandera(p, p.acento, 0.62, y + 0.51 + h + 0.18, 0, 0.7, 0.3))
   }
   return l
 }
@@ -1076,7 +1368,8 @@ const CONSTRUCTORES = {
   puerta: fPuerta,
   castillo: fCastillo,
   pozo: fPozo,
-  estandarte: fEstandarte
+  estandarte: fEstandarte,
+  puesto_avanzado: fPuestoAvanzado
 }
 
 /** Estos se apoyan directamente en la hierba: una plataforma les quedaría fatal. */
@@ -1093,6 +1386,38 @@ const tieneAnim = (o) => !!(o.userData && o.userData.anim)
  * Un edificio de 30 cajas pasa a 4-6 llamadas de dibujo: es la diferencia entre
  * cincuenta edificios a 60 fps y un móvil ardiendo. Lo animado se queda fuera.
  */
+/**
+ * Compacta el INTERIOR de una pieza animada (las aspas del molino, la rueda de
+ * la serrería): sus hijos se funden por material sin tocar el pivote, que es lo
+ * que gira. Sin esto, unas aspas de nueve mallas costaban nueve llamadas.
+ */
+function fusionarDentro (nodo) {
+  if (!nodo.children || nodo.children.length < 2) return
+  const porMat = new Map()
+  const recoger = (o, m) => {
+    const mm = m.clone().multiply(o.matrix)
+    if (o.isMesh) {
+      let e = porMat.get(o.material.uuid)
+      if (!e) porMat.set(o.material.uuid, e = { material: o.material, geos: [], sombra: o.castShadow })
+      const g = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone()
+      g.applyMatrix4(mm)
+      e.geos.push(g)
+    }
+    for (const h of [...o.children]) recoger(h, mm)
+  }
+  for (const h of [...nodo.children]) recoger(h, new THREE.Matrix4())
+  if (!porMat.size) return
+  nodo.clear()
+  for (const e of porMat.values()) {
+    const geo = e.geos.length === 1 ? e.geos[0] : mergeGeometries(e.geos, false)
+    if (!geo) continue
+    const malla = new THREE.Mesh(geo, e.material)
+    malla.castShadow = e.sombra
+    malla.receiveShadow = true
+    nodo.add(malla)
+  }
+}
+
 function fusionar (raiz) {
   try {
     raiz.updateMatrixWorld(true)
@@ -1125,6 +1450,7 @@ function fusionar (raiz) {
     }
     for (const { nodo, mm } of vivos) {
       mm.decompose(nodo.position, nodo.quaternion, nodo.scale)
+      fusionarDentro(nodo)      // las aspas y la rueda también se compactan
       out.add(nodo)
     }
     return out
@@ -1160,7 +1486,7 @@ function montar (tipo, n, estado, mask, d) {
   const ancho = d.ancho ?? 2
   const alto = d.alto ?? 2
   const t = escalon(n, d.maxNivel || 8)
-  const p = paletaDe(t)
+  const p = paletaDe(t, FAMILIA[tipo] || 'centro')
   const det = ctx.calidad !== 'bajo'
   const raiz = new THREE.Group()
   let piezas
@@ -1168,7 +1494,13 @@ function montar (tipo, n, estado, mask, d) {
   else if (estado === 'ruina') piezas = fRuina(p, ancho, alto)
   else {
     piezas = []
-    if (!SIN_PLATAFORMA.has(tipo)) piezas.push(caja(p.suelo, 0, 0, 0, ancho - 0.14, SUELO, alto - 0.14))
+    if (!SIN_PLATAFORMA.has(tipo)) {
+      piezas.push(caja(p.suelo, 0, 0, 0, ancho - 0.14, SUELO, alto - 0.14))
+      // El escalón máximo lleva filo de oro en la plataforma: desde la cámara del
+      // juego se ve QUÉ está al tope sin abrir ninguna ficha. Es un solo prisma y
+      // comparte material con los remates dorados, así que no cuesta ni una llamada.
+      if (t === 2) piezas.push(caja(p.remate, 0, SUELO * 0.3, 0, ancho - 0.05, 0.045, alto - 0.05))
+    }
     piezas.push(...(CONSTRUCTORES[tipo] || fGenerico)({ p, n, t, det, ancho, alto, mask }))
   }
   for (const x of piezas) if (x) raiz.add(x)
@@ -1326,6 +1658,10 @@ function animar (dt, t) {
     switch (a.tipo) {
       case 'aspas':
         a.obj.rotation.z += dt * 0.9 * a.vel
+        break
+      case 'rueda':
+        // la rueda hidráulica gira despacio y en el eje X: es la que mueve la sierra
+        a.obj.rotation.x += dt * 0.55 * a.vel
         break
       case 'bandera':
         a.obj.rotation.y = a.by + Math.sin(t * 2.1 * a.vel + a.fase) * 0.3

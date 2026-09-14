@@ -9,6 +9,10 @@ import { PALETA } from '../core/config.js'
  * Se genera CON SEMILLA: la misma partida enseña siempre el mismo valle, así que
  * el jugador puede recordar "al noreste había una veta de oro" y volver a por ella.
  *
+ * CADA CASILLA ES UNA COMARCA, y cada comarca tiene su PLAZA: el sitio donde
+ * vive su señor. Quien manda en cada una lo lleva world/imperio.js (tuyas,
+ * de un señor rival o neutrales); aquí está el terreno, el nombre y lo que da.
+ *
  * Este módulo solo escribe en game.state.world. Habla con el resto por eventos.
  */
 
@@ -390,6 +394,46 @@ export function nodoEn (x, y) {
   const w = mundo()
   if (!w || !w.nodos) return null
   return w.nodos.find(n => n.x === x && n.y === y) || null
+}
+
+/**
+ * La comarca de una casilla: terreno, nombre y lo que se saca de ella. Es la
+ * ficha que leen el mapa del mundo y el imperio; el dueño lo pone imperio.js.
+ * @returns {{x:number,y:number,nombre:string,bioma:string,altura:number,coste:number,nodo:any,visible:boolean,distancia:number}|null}
+ */
+export function comarcaEn (x, y) {
+  const t = tileEn(x, y)
+  if (!t) return null
+  const b = BIOMAS[t.bioma] || BIOMAS.llanura
+  return {
+    x: t.x,
+    y: t.y,
+    nombre: t.nombre,
+    bioma: t.bioma,
+    altura: t.altura,
+    coste: b.coste,
+    nodo: nodoEn(x, y),
+    visible: visible(x, y),
+    distancia: distanciaACasa(x, y)
+  }
+}
+
+/**
+ * Las comarcas de alrededor (distancia de rey: el cuadrado, no la cruz). Es por
+ * donde se extiende una mancha en el mapa, así que lo usa la conquista.
+ * @returns {Array<any>} tiles vecinos dentro del valle
+ */
+export function comarcasVecinas (x, y, radio = 1) {
+  const fuera = []
+  const r = Math.max(1, Math.round(radio))
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      if (!dx && !dy) continue
+      const t = dentroMundo(x + dx, y + dy) ? tileEn(x + dx, y + dy) : null
+      if (t) fuera.push(t)
+    }
+  }
+  return fuera
 }
 
 export function nodosDescubiertos () {
