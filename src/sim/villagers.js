@@ -53,6 +53,35 @@ const REVISION_SIN_ATENDER = 240
 /** Y como poco cuánto se tarda en volver a decirlo: un aviso útil, no una matraca. */
 const ESPERA_AVISO_SIN_ATENDER = 4
 
+/**
+ * EL APAÑO — que un aldeano parado no exista (14-sep-2026).
+ *
+ * Lo que contó el dueño jugando: «los aldeanos están muy bien, pero no me
+ * sirven de nada; tengo 22 y como 7 parados sin hacer nada». Tenía razón por
+ * partida doble: el tope de población regalaba camas por encima de los puestos
+ * que había (arreglado en data/buildings.js) y, sobre todo, el que no tenía
+ * puesto fijo se dedicaba A PASEAR. Un tercio de la aldea, de adorno.
+ *
+ * Ahora el que no tiene plantilla se busca la vida SOLO, por este orden:
+ *   1. CUADRILLA DE DESPEJE: sale al valle a talar y picar con los demás. Dos
+ *      parados hacen el trabajo de un constructor (sim/despeje.js), la madera y
+ *      la piedra entran en la caja de verdad, y —esto es lo gordo— NO le quitan
+ *      plazas de obra a la construcción: tu gente limpia el valle mientras la
+ *      cuadrilla oficial sigue levantando edificios.
+ *   2. PEONADA EN LA OBRA: se arriman al andamio a dar martillazos. Se ve (son
+ *      las chispas de EV.VILLAGER_CONSTRUYENDO) pero NO acorta el reloj de la
+ *      obra: ese reloj es el ritmo de la partida y no se toca.
+ *   3. Y si de verdad no queda nada, entonces sí, la vuelta por la plaza.
+ *
+ * El apaño vive en `v.apano` ({ tipo, id, x, z }: JSON puro, se guarda), no en
+ * `v.job`, que sigue valiendo 'parado'. Así el jugador no pierde el mando: el
+ * reparto de PUESTOS DE VERDAD se sigue haciendo a mano o con el botón de
+ * "repartir", y nadie le mueve un leñador de sitio por su cuenta.
+ */
+const APANO_REVISION = 3        // segundos entre "a ver en qué echo una mano"
+const PEONES_POR_FAENA = 2      // cuántos caben talando la misma casilla
+const APANO_LLEGADA = 1.2       // a esta distancia del tajo ya se puede arrimar
+
 const JOB_POR_TIPO = {
   serreria: 'leñador',
   cantera: 'cantero',
@@ -117,6 +146,9 @@ function sanear () {
     if (!v.estado) v.estado = 'descansando'
     if (v.portando === undefined) v.portando = null
     if (typeof v.animo !== 'number') v.animo = 1
+    // el apaño se guarda, pero una partida vieja llega sin él y hay que sanearlo:
+    // si trae basura se tira y el aldeano se busca otro en el primer tick
+    if (!v.apano || typeof v.apano !== 'object' || !v.apano.tipo) v.apano = null
   }
   sincronizarTrabajadores()
   // Partidas guardadas a medio asalto: nadie se queda encerrado en un solar.
@@ -280,7 +312,36 @@ function actualizarAnimo (dt) {
 }
 
 // -------------------------------------------------------------------- API
-/** @returns {{actual:number, maxima:number}} el tope sale del ayuntamiento, limitado por camas. */
+/**
+ * EL CENSO. El tope sale de tres frenos y manda el más pequeño de los tres:
+ *   1. el nivel del Ayuntamiento (`poblacionMax` del catálogo),
+ *   2. las CAMAS que hay puestas (ayuntamiento + casas + avanzadillas),
+ *   3. y —esto es lo nuevo, 14-sep-2026— los PUESTOS DE TRABAJO que existen
+ *      hoy en la aldea, más el colchón de los andamios.
+ *
+ * Por qué el tercero: el dueño se encontró con 22 aldeanos y 7 parados, y el
+ * banco de pruebas lo confirmó a lo bestia — entre el 33 % y el 68 % de la
+ * aldea sin puesto en TODAS las edades. La razón es que los dos primeros frenos
+ * miran el catálogo (lo que el juego DEJARÍA construir) y no la aldea que el
+ * jugador tiene de verdad: en la Edad de los Castillos el catálogo permite 51
+ * puestos, pero una aldea normal a esa altura tiene 28. Las camas de la
+ * diferencia eran una promesa falsa: gente que se contrataba, comía y paseaba.
+ *
+ * Con el tercer freno, contratar SIEMPRE se nota: o entras en un puesto que
+ * sube la producción ese mismo minuto, o entras en el colchón, que son los
+ * martillos de los andamios y las cuadrillas del valle (ver `apañarse`). Y el
+ * tope deja de ser decorativo: sube cuando levantas una serrería, una granja o
+ * una cantera. Levantar sitios de trabajo es lo que te deja traer gente.
+ *
+ * El colchón son las `obrasSimultaneas` del Ayuntamiento más dos de relevo:
+ * ayto 1 → 3 · ayto 4 → 4 · ayto 9 → 7 · ayto 14 → 8.
+ *
+ * `Math.max(actual, …)` al final: si demueles media aldea el tope no puede
+ * quedar por DEBAJO de la gente que ya vive ahí (nadie se evapora). Lo que hace
+ * es congelar la contratación hasta que vuelva a haber sitio.
+ *
+ * @returns {{actual:number, maxima:number}}
+ */
 export function poblacion () {
   alDia()
   const actual = game.state.villagers.length
@@ -288,8 +349,9 @@ export function poblacion () {
   // siguen puestas. Antes, subir el Ayuntamiento dejaba el censo a 0 camas.
   const enPie = ayuntamiento && (ayuntamiento.nivel || 0) > 0
   if (!enPie) return { actual, maxima: 0 }
+  const dAyto = def('ayuntamiento')
   const nivelAyto = ayuntamiento.nivel || 1
-  const tope = def('ayuntamiento').poblacionMax(nivelAyto)
+  const tope = dAyto.poblacionMax(nivelAyto)
   const dCasa = def('casa')
   let camas = camasAyuntamiento(nivelAyto)
   for (const c of casas) camas += dCasa.aloja(c.nivel || 1)
@@ -306,7 +368,28 @@ export function poblacion () {
       extra += dPuesto.aloja(b.nivel) || 0
     }
   }
-  return { actual, maxima: Math.min(tope, camas) + extra }
+
+  const colchon = (typeof dAyto.obrasSimultaneas === 'function' ? dAyto.obrasSimultaneas(nivelAyto) : 1) + 2
+  const cabe = Math.min(tope, camas + extra, plazasDelCenso() + colchon)
+  return { actual, maxima: Math.max(actual, cabe) }
+}
+
+/**
+ * Puestos de trabajo para el CENSO. A diferencia de `plazasDeLaAldea()`, aquí
+ * una serrería en obras o en ruinas SIGUE contando: son situaciones de un rato
+ * y, si no contaran, mejorar un edificio bajaría el tope de población y el
+ * jugador vería desaparecer camas cada vez que toca algo.
+ */
+function plazasDelCenso () {
+  let n = 0
+  for (const b of game.state.buildings || []) {
+    const d = def(b.tipo)
+    if (!d) continue
+    const nivel = Math.max(1, b.nivel || 1)
+    if (typeof d.plazas === 'function') n += Math.max(0, d.plazas(nivel))
+    else if (typeof d.exploradores === 'function') n += Math.max(0, d.exploradores(nivel))
+  }
+  return n
 }
 
 /**
@@ -339,7 +422,15 @@ export function contratar () {
   alDia()
   const p = poblacion()
   if (!p.maxima) { avisar('Sin ayuntamiento no hay a quién llamar', 'mal'); return null }
-  if (p.actual >= p.maxima) { avisar('No quedan camas: construye o mejora una casa', 'mal'); return null }
+  if (p.actual >= p.maxima) {
+    // decir cuál de los dos frenos es el que aprieta: mandar a construir una
+    // casa cuando lo que falta son PUESTOS es el consejo que más despistaba
+    const pl = plazasDeLaAldea()
+    avisar(pl.libres > 0
+      ? 'No quedan camas: construye o mejora una casa'
+      : 'No hay dónde meter a nadie más: levanta una granja, una serrería o una cantera', 'mal')
+    return null
+  }
   if (!cobrar({ comida: costeContratar() })) return null
   const v = crearAldeano()
   // Si hay un edificio SIN NADIE, el recién llegado va derecho: contratar para
@@ -553,6 +644,7 @@ function desalojarRuinas () {
 const jobDe = (b) => (b.enObra ? 'constructor' : (JOB_POR_TIPO[b.tipo] || 'parado'))
 
 function soltar (v) {
+  v.apano = null                      // con puesto fijo no se hacen apaños
   const b = edificio(v.buildingId)
   if (b && Array.isArray(b.trabajadores)) {
     const i = b.trabajadores.indexOf(v.id)
@@ -638,6 +730,7 @@ function crearAldeano () {
     destinoX: p.x, destinoZ: p.z,
     estado: 'descansando',
     portando: null,
+    apano: null,
     animo: factor === 1 ? 1 : 0.4
   }
   s.villagers.push(v)
@@ -718,7 +811,7 @@ function alTick ({ dt }) {
     if (v.estado === 'durmiendo') despertar(v, m)
     switch (v.job) {
       case 'constructor': cicloObra(v, m, dt); break
-      case 'parado': deambular(v, m, dt); break
+      case 'parado': apañarse(v, m, dt); break
       case 'explorador': rondar(v, m, dt); break
       default: cicloRecoleccion(v, m, dt)
     }
@@ -953,10 +1046,185 @@ function rondar (v, m, dt) {
 
 // ----------------------------------------------------------- los que sobran
 /**
+ * EL QUE NO TIENE PUESTO SE BUSCA LA VIDA. Ver el comentario de APANO_REVISION.
+ * Cada pocos segundos mira si lo que estaba haciendo sigue en pie y, si no,
+ * busca otro tajo. Solo pasea el que de verdad no tiene dónde arrimarse.
+ */
+function apañarse (v, m, dt) {
+  if (v.apano && !apañoVivo(v.apano)) { v.apano = null; m.fase = null; v.estado = 'descansando' }
+  if (!v.apano) {
+    m.busca = (m.busca || 0) - dt
+    if (m.busca <= 0) { m.busca = APANO_REVISION; buscarApaño(v, m) }
+  }
+  if (v.apano) { cicloApaño(v, m, dt); return }
+  deambular(v, m, dt)
+}
+
+/** ¿El tajo que tenía sigue existiendo? La faena pudo terminar o la obra acabar. */
+function apañoVivo (a) {
+  if (a.tipo === 'talar') {
+    const faenas = game.state.despeje?.faenas
+    return Array.isArray(faenas) && faenas.some(f => f.id === a.id)
+  }
+  if (a.tipo === 'obra') {
+    const b = edificio(a.id)
+    return !!b && !!b.enObra
+  }
+  return false
+}
+
+/** Cuántos parados están ya arrimados a ese tajo (para que se repartan). */
+function yaEn (tipo, id) {
+  let n = 0
+  for (const o of game.state.villagers) if (o.apano && o.apano.tipo === tipo && o.apano.id === id) n++
+  return n
+}
+
+/**
+ * Buscar tajo: primero el valle (que paga en madera y piedra), luego el andamio.
+ * A igualdad, lo que pille más cerca: nadie cruza la aldea por gusto.
+ */
+function buscarApaño (v, m) {
+  const faena = mejorFaena(v)
+  if (faena) {
+    v.apano = { tipo: 'talar', id: faena.id, x: faena.x, z: faena.z }
+    m.fase = null; v.estado = 'descansando'
+    return
+  }
+  const obra = obraConHueco(v)
+  if (obra) {
+    const q = puertaDe(obra)
+    v.apano = { tipo: 'obra', id: obra.id, x: q.x, z: q.z }
+    m.fase = null; v.estado = 'descansando'
+  }
+}
+
+/** La casilla que está talando la cuadrilla y todavía admite otro par de manos. */
+function mejorFaena (v) {
+  const faenas = game.state.despeje?.faenas
+  if (!Array.isArray(faenas) || !faenas.length) return null
+  let mejor = null; let md = Infinity
+  for (const f of faenas) {
+    if (yaEn('talar', f.id) >= PEONES_POR_FAENA) continue
+    const d = dist(v.x, v.z, f.x, f.z)
+    if (d < md) { md = d; mejor = f }
+  }
+  return mejor
+}
+
+/**
+ * Un andamio donde quepa otro martillo. Los peones NO acortan la obra (el reloj
+ * de las obras es el ritmo de la partida): están para que se vea que la aldea
+ * entera arrima el hombro, y para tener a la gente donde el jugador la busca.
+ */
+function obraConHueco (v) {
+  let mejor = null; let md = Infinity
+  for (const b of obras) {
+    const gente = trabajadoresDe(b.id).length + yaEn('obra', b.id)
+    if (gente >= PLAZAS_OBRA) continue
+    const c = centroDe(b)
+    const d = dist(v.x, v.z, c.x, c.z)
+    if (d < md) { md = d; mejor = b }
+  }
+  return mejor
+}
+
+/** Ir al tajo y arrimarse: talar hace ruido de hacha, el andamio echa chispas. */
+function cicloApaño (v, m, dt) {
+  const a = v.apano
+  if (v.estado === 'yendo' && m.fase === 'apaño') {
+    if (mover(v, m, dt) || dist(v.x, v.z, a.x, a.z) <= APANO_LLEGADA) {
+      v.estado = 'trabajando'; m.martillo = 0
+    }
+    return
+  }
+  if (v.estado === 'trabajando' && m.fase === 'apaño') {
+    m.martillo -= dt
+    if (m.martillo <= 0) {
+      m.martillo = azar(0.5, 0.9)
+      // el render ya sabe pintar esto: mismo aviso que un constructor de plantilla
+      events.emit(EV.VILLAGER_CONSTRUYENDO, { id: v.id, x: v.x, z: v.z, buildingId: a.tipo === 'obra' ? a.id : null })
+    }
+    return
+  }
+  irA(v, m, a.x, a.z, 'apaño')
+}
+
+/**
+ * LO QUE SE PUEDE HACER CON LA GENTE QUE SOBRA, para que el HUD lo cuente en vez
+ * de enseñar un globo rojo con un número y ya. Devuelve las opciones de MÁS a
+ * MENOS provecho, cada una con su número: puestos que rinden al 25 %, cuadrillas
+ * en el valle, andamios… y, si de verdad no hay dónde meterlos, lo dice.
+ *
+ * @returns {{parados:number, apañados:number, sueltos:number, plazasLibres:number,
+ *   opciones:Array<{clave:string,icono:string,texto:string,detalle:string,cuantos:number,boton:string}>}}
+ */
+export function faenaParaParados () {
+  alDia()
+  let parados = 0; let apañados = 0
+  const cuenta = { talar: 0, obra: 0 }
+  for (const v of game.state.villagers) {
+    if (v.job !== 'parado') continue
+    parados++
+    if (v.apano) { apañados++; cuenta[v.apano.tipo] = (cuenta[v.apano.tipo] || 0) + 1 }
+  }
+  const pl = plazasDeLaAldea()
+  const vacios = edificiosSinAtender(true)
+  const perdida = Math.round(vacios.reduce((a, f) => a + f.perdidaPorMinuto, 0) * 60)
+  const opciones = []
+
+  if (vacios.length && parados) {
+    opciones.push({
+      clave: 'vacios', icono: '🏚️', cuantos: Math.min(parados, vacios.length),
+      texto: vacios.length === 1
+        ? `Meter a uno en ${vacios[0].icono} la ${vacios[0].nombre.toLowerCase()}`
+        : `Cubrir ${vacios.length} edificios que trabajan sin nadie`,
+      detalle: perdida > 0 ? `Ahora mismo se pierden ${perdida}/h por tenerlos vacíos` : 'Un edificio sin nadie rinde la cuarta parte',
+      boton: 'Repartir'
+    })
+  }
+  if (pl.libres > 0 && parados) {
+    opciones.push({
+      clave: 'plazas', icono: '🧑‍🌾', cuantos: Math.min(parados, pl.libres),
+      texto: `Llenar ${pl.libres} ${pl.libres === 1 ? 'puesto libre' : 'puestos libres'}`,
+      detalle: 'Cada puesto que cubres sube lo que entra por hora',
+      boton: 'Repartir'
+    })
+  }
+  if (cuenta.talar) {
+    opciones.push({
+      clave: 'talar', icono: '🪓', cuantos: cuenta.talar,
+      texto: `${cuenta.talar} en la cuadrilla, talando y picando`,
+      detalle: 'Madera y piedra del valle, sin quitarle plazas de obra a la construcción',
+      boton: ''
+    })
+  }
+  if (cuenta.obra) {
+    opciones.push({
+      clave: 'obra', icono: '🔨', cuantos: cuenta.obra,
+      texto: `${cuenta.obra} arrimando el hombro en los andamios`,
+      detalle: 'Echan una mano en las obras en marcha',
+      boton: ''
+    })
+  }
+  const sueltos = parados - apañados
+  if (sueltos > 0 && !pl.libres && !vacios.length) {
+    opciones.push({
+      clave: 'sitio', icono: '🏗️', cuantos: sueltos,
+      texto: `${sueltos} sin dónde meterse`,
+      detalle: 'No queda ni un puesto en la aldea: levanta otra granja, serrería o cantera',
+      boton: 'Construir'
+    })
+  }
+  return { parados, apañados, sueltos, plazasLibres: pl.libres, opciones }
+}
+
+/**
  * Los parados no se quedan de estatuas: dan vueltas por la plaza, se paran en el
  * pozo y se juntan de dos en dos a charlar. Cuesta cuatro líneas y es lo que hace
  * que la aldea parezca habitada.
  */
+
 function deambular (v, m, dt) {
   if (v.estado === 'descansando' || v.estado === 'trabajando') {
     m.t -= dt

@@ -1261,8 +1261,15 @@ function fMuralla ({ p, n, t, det, mask }) {
   const y = 0
   const muroP = t >= 2 ? p.piedraOscura : p.piedra
   const cor = t >= 2 ? p.piedra : p.piedraOscura
-  const h = 0.62 + 0.075 * n
-  const gro = t === 0 ? 0.42 : 0.5
+  // La altura sube con el nivel, pero MENOS que antes: a esto se le suma el
+  // escalado de nivel de la raíz, y con la subida vieja un muro del 12 sacaba
+  // una cabeza a las casas y tapaba media aldea desde el móvil.
+  const h = 0.58 + 0.052 * n
+  // El PAÑO es fino y las PILASTRAS sobresalen: es lo que rompe el plano cada
+  // casilla. Con el paño tan ancho como el machón, veinte tramos seguidos se
+  // fundían en una lámina lisa gigante en vez de leerse como una muralla.
+  const gro = t === 0 ? 0.42 : 0.44
+  const pil = gro + 0.18
   const brazos = DIRS.filter(d => mask & d[2])
   const cuenta = brazos.length
 
@@ -1281,29 +1288,49 @@ function fMuralla ({ p, n, t, det, mask }) {
     return l
   }
 
-  // sillería: zócalo, paño, cordón y almenas
-  l.push(caja(p.piedraOscura, 0, y, 0, gro + 0.16, 0.14, gro + 0.16))
+  // Sillería: zócalo volado, ESCARPE (el talud de la base), paño retranqueado,
+  // cordón y almenas. El escalón entre escarpe y paño parte el muro en dos
+  // franjas de luz distinta: desde la cámara del juego es lo que hace que un
+  // lienzo largo se lea como muralla y no como una plancha de cartón.
+  const hEsc = h * 0.26
+  l.push(caja(p.piedraOscura, 0, y, 0, pil + 0.12, 0.14, pil + 0.12))
   for (const [dx, dz] of brazos) {
     const cx = dx * 0.26; const cz = dz * 0.26
-    const sx = dx ? 0.54 : gro; const sz = dz ? 0.54 : gro
-    l.push(caja(p.piedraOscura, cx, y, cz, sx + 0.12, 0.14, sz + 0.12))
-    l.push(caja(muroP, cx, y + 0.14, cz, sx, h, sz))
-    l.push(caja(cor, cx, y + 0.14 + h, cz, sx + 0.1, 0.1, sz + 0.1))
-    almenas(l, cor, cx, y + 0.24 + h, cz, dx ? 0.54 : gro, dx ? gro : 0.54, 0.26, 0.2, !dx)
+    const largo = 0.54
+    const sx = dx ? largo : gro; const sz = dz ? largo : gro
+    // el escarpe engorda SOLO por las caras del muro; por el eje del brazo va a
+    // ras, o cada casilla dejaría un escalón contra la siguiente
+    const ex = dx ? sx : sx + 0.1; const ez = dz ? sz : sz + 0.1
+    l.push(caja(p.piedraOscura, cx, y, cz, ex + 0.06, 0.14, ez + 0.06))
+    l.push(caja(muroP, cx, y + 0.14, cz, ex, hEsc, ez))
+    l.push(caja(muroP, cx, y + 0.14 + hEsc, cz, sx, h - hEsc, sz))
+    l.push(caja(cor, cx, y + 0.14 + h, cz, dx ? sx : gro + 0.12, 0.1, dz ? sz : gro + 0.12))
+    // los merlones se reparten a lo LARGO del brazo y tienen el grosor del muro:
+    // antes, en los tramos norte-sur, se pasaban cambiados y la coronación salía
+    // volando once centímetros por cada cara, como una losa suelta sobre el paño
+    almenas(l, cor, cx, y + 0.24 + h, cz, largo, gro + 0.06, 0.26, 0.22, !dx)
   }
   if (cuenta <= 1) {
     // extremo: torreta REDONDA de doce caras, para que el muro no acabe en un tajo
-    l.push(cil12(muroP, 0, y + 0.14, 0, 0.8, h + 0.18))
-    l.push(cil12(cor, 0, y + 0.32 + h, 0, 0.92, 0.12))
-    l.push(techoCono(p.techo, 0, y + 0.44 + h, 0, 1.0, 0.68))
+    l.push(cil12(muroP, 0, y + 0.14, 0, 0.82, h + 0.18))
+    l.push(cil12(cor, 0, y + 0.32 + h, 0, 0.94, 0.12))
+    l.push(techoCono(p.techo, 0, y + 0.44 + h, 0, 1.0, 0.56))
   } else {
-    // el machón de la esquina va achaflanado: es lo que quita el aire de cajas
-    l.push(cajaR(muroP, 0, y + 0.14, 0, gro + 0.08, h + 0.1, gro + 0.08, 0, 0.08))
-    l.push(cajaR(cor, 0, y + 0.24 + h, 0, gro + 0.18, 0.22, gro + 0.18, 0, 0.06))
+    // la PILASTRA: sobresale nueve centímetros por cada cara del paño y remata
+    // en un dado más ancho. Es el ritmo vertical que da escala al lienzo.
+    l.push(cajaR(muroP, 0, y + 0.14, 0, pil, h + 0.12, pil, 0, 0.07))
+    l.push(cajaR(cor, 0, y + 0.26 + h, 0, pil + 0.1, 0.22, pil + 0.1, 0, 0.06))
+    // en la buena sillería la pilastra saca la cabeza por encima de las almenas:
+    // así un muro del 12 se distingue de uno del 5 aunque los dos sean de piedra
+    if (t >= 2) l.push(caja(cor, 0, y + 0.48 + h, 0, pil * 0.62, 0.16, pil * 0.62))
   }
-  if (det && t >= 2 && cuenta <= 2) {
-    l.push(caja(p.madera, 0.3, y + h * 0.7, 0.3, 0.06, 0.3, 0.06))
-    const f = pieza(G.cono6, p.fuego, { x: 0.3, y: y + h * 0.7 + 0.34, z: 0.3, sx: 0.18, sy: 0.26, sz: 0.18 })
+  // El pebetero va SOLO en esquinas y cruces, que son cuatro contados. Antes lo
+  // llevaba cada tramo recto: en un recinto grande eran cien llamas vivas, cien
+  // mallas fuera de la fusión y cien llamadas de dibujo por frame en el móvil.
+  const recto = cuenta === 2 && (mask === 5 || mask === 10)
+  if (det && t >= 2 && cuenta >= 2 && !recto) {
+    l.push(caja(p.madera, 0.3, y + h * 0.72, 0.3, 0.06, 0.3, 0.06))
+    const f = pieza(G.cono6, p.fuego, { x: 0.3, y: y + h * 0.72 + 0.34, z: 0.3, sx: 0.18, sy: 0.26, sz: 0.18 })
     f.userData.anim = 'llama'; f.castShadow = false
     l.push(f)
   }
@@ -1317,7 +1344,9 @@ function fPuerta ({ p, n, t, det }) {
   // troncos en el mismo muro queda a parches
   const muroP = t === 0 ? p.madera : t >= 2 ? p.piedraOscura : p.piedra
   const cor = t === 0 ? p.maderaClara : t >= 2 ? p.piedra : p.piedraOscura
-  const h = 0.72 + 0.075 * n
+  // sube al mismo ritmo que la muralla y siempre un palmo por encima: la puerta
+  // manda en el lienzo, pero sin convertirse en una torre suelta
+  const h = 0.68 + 0.052 * n
   // dos torreones con el ARCO DE MEDIO PUNTO en medio: se lee como puerta desde arriba
   for (const s of [-1, 1]) {
     l.push(cajaR(p.piedraOscura, s * 0.62, y, 0, 0.76, 0.16, 0.76, 0, 0.07))

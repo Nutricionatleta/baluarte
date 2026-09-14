@@ -863,6 +863,11 @@ async function jugarPartida () {
         esperaDetalle: hayCola ? Edificios.obrasEnEspera().map(e => `${e.icono}${e.nombre} n${e.nivel} ${e.aviso || (e.pagable ? 'lista' : 'sin material')}`) : [],
         poder: Ejercito.poderMilitar(), nivel: game.state.jugador.nivel,
         gemas: game.state.jugador.gemas,
+        // ALDEANOS OCIOSOS. La queja del dueño («tengo 7 parados sin hacer nada»)
+        // no se veía en ningún número del banco. Se mide al CERRAR la sesión,
+        // cuando el jugador automático ya ha repartido a todo el mundo: lo que
+        // siga parado aquí es gente que de verdad no tiene dónde ir.
+        ociosos: censoOciosos(),
         bloqueadoSeg: bloqueado, muertoSeg: muerto,
         cuelloBotella: cuelloDeBotella(resumenIni),
         censo: censoEdificios()
@@ -879,6 +884,34 @@ async function jugarPartida () {
 }
 
 /** Censo de la aldea: tipo -> "cantidad×nivelMedio". */
+/**
+ * Plantilla al cerrar la sesión: cuánta gente hay, cuánta está de brazos
+ * cruzados y cuántos puestos quedan sin cubrir. `sinOficio` son los parados de
+ * verdad; `enFaena` los que se buscan la vida solos (cuadrilla de despeje,
+ * martillo de refuerzo, acarreo), que no tienen plantilla fija pero sí faena.
+ */
+function censoOciosos () {
+  const s = game.state
+  const pl = Aldeanos.plazasDeLaAldea()
+  const p = Aldeanos.poblacion()
+  let sinOficio = 0; let enFaena = 0
+  for (const v of s.villagers) {
+    if (v.job !== 'parado') continue
+    if (v.apano) enFaena++; else sinOficio++
+  }
+  return {
+    aldeanos: s.villagers.length,
+    tope: p.maxima,
+    sinOficio,
+    enFaena,
+    pctSinOficio: +(sinOficio / Math.max(1, s.villagers.length) * 100).toFixed(1),
+    plazas: pl.plazas,
+    ocupadas: pl.ocupadas,
+    plazasLibres: pl.libres,
+    edificiosSinNadie: pl.sinAtender
+  }
+}
+
 function censoEdificios () {
   const c = {}
   for (const b of game.state.buildings) {
@@ -1088,6 +1121,48 @@ function informeEventos () {
 }
 
 // ─────────────────────────────── 13. informe ───────────────────────────────
+/**
+ * Aldeanos sin nada que hacer, edad por edad, con las plazas libres y lo que
+ * entra por hora al lado. Es la medida que faltaba: la queja era «un tercio de
+ * mi gente está parada» y no había ni un número en el informe que lo enseñara.
+ */
+function ociosidadPorEdad () {
+  const porEdad = {}
+  for (const ses of M.sesiones) {
+    const o = ses.ociosos
+    if (!o) continue
+    const e = porEdad[ses.edad] || (porEdad[ses.edad] = {
+      sesiones: 0, aldeanos: 0, sinOficio: 0, enFaena: 0, plazas: 0, plazasLibres: 0,
+      picoSinOficio: 0, pmSuma: 0
+    })
+    e.sesiones++
+    e.aldeanos += o.aldeanos
+    e.sinOficio += o.sinOficio
+    e.enFaena += o.enFaena
+    e.plazas += o.plazas
+    e.plazasLibres += o.plazasLibres
+    e.picoSinOficio = Math.max(e.picoSinOficio, o.sinOficio)
+    e.pmSuma += (ses.pm ? Object.values(ses.pm).reduce((a, v) => a + v, 0) : 0)
+  }
+  const fuera = {}
+  for (const k in porEdad) {
+    const e = porEdad[k]
+    const n = Math.max(1, e.sesiones)
+    fuera[k] = {
+      sesiones: e.sesiones,
+      aldeanosMedia: +(e.aldeanos / n).toFixed(1),
+      sinOficioMedia: +(e.sinOficio / n).toFixed(1),
+      pctSinOficio: +(e.sinOficio / Math.max(1, e.aldeanos) * 100).toFixed(1),
+      enFaenaMedia: +(e.enFaena / n).toFixed(1),
+      picoSinOficio: e.picoSinOficio,
+      plazasMedia: +(e.plazas / n).toFixed(1),
+      plazasLibresMedia: +(e.plazasLibres / n).toFixed(1),
+      produccionPorHora: Math.round(e.pmSuma / n * 60)
+    }
+  }
+  return fuera
+}
+
 function resumenFinal () {
   const s = game.state
   const mediaTick = M.rendimiento.ms / Math.max(1, M.rendimiento.ticks)
@@ -1128,6 +1203,7 @@ function resumenFinal () {
       mediaAlCerrarSesion: +(M.sesiones.reduce((a, s) => a + (s.espera || 0), 0) / Math.max(1, M.sesiones.length)).toFixed(2),
       pendientesAlFinal: hayCola ? Edificios.obrasEnEspera().length : 0
     },
+    ociosidad: ociosidadPorEdad(),
     paron: {
       minutosBloqueado: +(M.segundosBloqueado / 60).toFixed(1),
       minutosMuerto: +(M.segundosMuerto / 60).toFixed(1),

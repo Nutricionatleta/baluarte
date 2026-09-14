@@ -81,32 +81,56 @@ const vida = (base, factor = 1.32) => (n = 1) => Math.round(base * Math.pow(fact
 const porMin = (base, factor = 1.52) => (n = 1) => Math.round(base * Math.pow(factor, Math.max(0, n - 1)) * 10) / 10
 
 /**
- * PUESTOS DE TRABAJO frente a ALDEANOS — la cuenta que cuadra la aldea (sep-2026).
+ * PUESTOS DE TRABAJO frente a ALDEANOS — la cuenta que cuadra la aldea.
  *
- * Lo que arregla esto: se podían levantar 3 serrerías, 3 canteras y 3 granjas
- * (18 plazas con la fórmula vieja) teniendo camas para 7 aldeanos. Media aldea
- * trabajaba al 25 % y el jugador no se enteraba hasta mucho después.
+ * HISTORIA, porque el péndulo ya se ha ido a los dos lados:
+ *   · Antes (ago-2026): 56 puestos y camas para 7. Media aldea rendía al 25 %.
+ *   · Al arreglarlo (sep-2026) se dejó un colchón para que SOBRARA gente… y
+ *     sobraba demasiada: en CADA nivel de Ayuntamiento quedaba entre el 15 % y
+ *     el 36 % de la aldea sin dónde meterse. El dueño lo cazó jugando: «tengo
+ *     22 aldeanos y 7 parados sin hacer nada». Contratar no significaba nada y
+ *     el tope de población era decorativo.
  *
- * REGLA DURA: en CADA nivel de Ayuntamiento el tope de población tiene que
- * cubrir TODAS las plazas que el juego deja construir en ese momento, y sobrar
- * gente. La cuenta es cerrada porque ningún edificio pasa de nivel del
- * Ayuntamiento (sim/buildings.js) y los de recursos tienen tope de unidades
- * (`max`): 4 serrerías + 4 canteras + 5 granjas (13 desde la Edad Oscura) y
- * 3 minas de oro desde la Feudal (16 en total), más el campamento aparte.
+ * LA MEDIDA (14-sep-2026), con el catálogo en la mano y los topes de unidades
+ * de verdad —4 serrerías + 4 canteras + 5 granjas desde la Oscura, 3 minas de
+ * oro desde la Feudal, y el campamento aparte—, contando que ningún edificio
+ * pasa del nivel del Ayuntamiento:
  *
- *   Edad       Ayto    Edificios   Plazas de recursos   Batidores   TOTAL   Población   Sobran
- *   Oscura      1-3        13         13 x 1 = 13           2         15        24        +9
- *   Feudal      3-8        16         16 x 3 = 48           3         51        62       +11
- *   Castillos   9-10       16         16 x 3 = 48           3         51        66       +15
- *   Imperial   11-14       16         16 x 4 = 64           3         67        88       +21
+ *   Ayto  Edad       Plazas   Tope VIEJO  sobraban   Tope NUEVO  sobran
+ *     1   oscura       13         20        +7 (35%)     16       +3
+ *     2   oscura       14         22        +8 (36%)     18       +4
+ *     3   feudal       18         24        +6 (25%)     20       +2
+ *     4   feudal       34         40        +6 (15%)     38       +4
+ *     5   feudal       34         42        +8 (19%)     39       +5
+ *     6   feudal       35         44        +9 (20%)     40       +5
+ *     7   feudal       35         46       +11 (24%)     41       +6
+ *     8   feudal       51         62       +11 (18%)     57       +6
+ *     9   castillos    51         64       +13 (20%)     58       +7
+ *    10   castillos    51         66       +15 (23%)     59       +8
+ *    11   imperial     51         68       +17 (25%)     60       +9
+ *    12   imperial     67         84       +17 (20%)     76       +9
+ *    13   imperial     67         86       +19 (22%)     77      +10
+ *    14   imperial     67         88       +21 (24%)     78      +11
  *
- * Los niveles intermedios también salen: ayto 4 → 34 plazas con 40 de tope;
- * ayto 7 → 35 con 46; ayto 11 → 51 con 68. Nunca falta gente.
+ * QUÉ PALANCA SE MUEVE Y POR QUÉ: **se baja la POBLACIÓN, no se suben las
+ * plazas.** Subir plazas es subir la producción por hora, y el informe de
+ * partida ya dice que la economía se desborda (los almacenes acaban clavados al
+ * 100 % y se tira entre el 35 % y el 69 % de lo producido). El ritmo pausado es
+ * lo que gusta del juego: no se toca. Lo que estaba mal era el tope, que
+ * prometía camas para gente que no tenía dónde trabajar.
  *
- * Y la gente que sobra no está de adorno: son los MARTILLOS. Las obras admiten
- * 3 constructores cada una y el Ayuntamiento del 9 en adelante abre 6 obras a
- * la vez, o sea hasta 18 aldeanos en andamios. Por eso el colchón crece con el
- * Ayuntamiento (+9 en la Oscura, +21 en la Imperial) en vez de quedarse fijo.
+ * REGLA DURA, la nueva: el tope de población = las plazas que el juego DEJA
+ * construir a ese nivel + el colchón de obra (los martillos de las
+ * `obrasSimultaneas` del Ayuntamiento, más dos de relevo). Ni una cama de
+ * regalo por encima de eso. Así, mientras el jugador no tenga la aldea entera
+ * levantada, CADA aldeano que contrata entra en un puesto vacío y la producción
+ * sube el mismo minuto; y cuando ya la tiene entera, el colchón que queda es
+ * exactamente la cuadrilla que cabe en los andamios y en el valle.
+ *
+ * Y ese colchón ya no es decorado: los que no tienen plantilla fija se buscan
+ * la vida solos (sim/villagers.js → `apañarse`): se apuntan a las obras, salen
+ * con la cuadrilla a talar y picar (sim/despeje.js, y SIN robarle plazas de
+ * obra a la construcción) y acarrean al almacén lo que se amontona fuera.
  *
  * Un nivel 1 con UNA plaza no produce menos: la faena de sim/resources.js es
  * relativa (25 % sin nadie, 100 % a plazas llenas), así que llenarla con un solo
@@ -141,13 +165,17 @@ export const EDIFICIOS = {
     // muerta: el ahorro para la Edad Feudal pide 50 de oro y no entran nunca.
     produce: 'oro',
     porMinuto: porMin(1.5, 1.32),
-    // TOPE DE POBLACIÓN. Ya no es una geométrica que se dispara al final y deja
-    // la Edad Oscura con 5 camas: sigue paso a paso a las plazas de trabajo
-    // (ver la tabla de `plazasDeTrabajo`). El escalón gordo cae en los niveles
-    // 4, 8 y 12, que es justo donde los edificios de recursos ganan una plaza,
-    // así que el tope y la faena suben el MISMO día.
-    //   1→20  2→22  3→24 | 4→40  5→42  6→44  7→46 | 8→62 ... 11→68 | 12→84 ... 14→88
-    poblacionMax: (n = 1) => 20 + 14 * Math.floor(n / 4) + 2 * (Math.max(1, n) - 1),
+    // TOPE DE POBLACIÓN. Va PEGADO a las plazas de trabajo que existen a ese
+    // nivel, con el colchón justo de los andamios (ver la tabla de
+    // `plazasDeTrabajo`): antes regalaba entre 6 y 21 camas de más y un tercio
+    // de la aldea se pasaba la partida de brazos cruzados. El escalón gordo
+    // sigue cayendo en los niveles 4, 8 y 12, que es donde los edificios de
+    // recursos ganan una plaza: el tope y la faena suben el MISMO día.
+    //   1→16  2→18  3→20 | 4→38  5→39  6→40  7→41 | 8→57 … 11→60 | 12→76 … 14→78
+    poblacionMax: (n = 1) => {
+      const nivel = Math.max(1, n)
+      return nivel < 4 ? 14 + 2 * nivel : nivel + 19 + 15 * Math.floor(nivel / 4)
+    },
     // Plazas de obra: 1 al empezar y 6 en el imperio. Ya no son el cuello de
     // botella (lo que no cabe espera en la cola), pero cada plaza nueva sigue
     // siendo de las mejoras que más se notan: la aldea crece por varios sitios.

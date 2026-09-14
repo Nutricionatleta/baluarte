@@ -16,7 +16,7 @@ import { game } from '../core/state.js'
 import { CONFIG, ICONO } from '../core/config.js'
 import {
   dentro, huecoLibre, parcelaDe, coordsParcela, rectParcela,
-  parcelaDisponible, parcelaEsMia, fronteraDe, PARCELAS, NUCLEO
+  parcelaDisponible, parcelaEsMia, fronteraDe, limitesDelTerritorio, PARCELAS, NUCLEO
 } from '../core/grid.js'
 import { EDIFICIOS, def, AGE_NOMBRE, ORDEN_EDADES, efectosDe, paraQueSirve } from '../data/buildings.js'
 import {
@@ -1649,22 +1649,34 @@ function entrarEnColocacion (tipo) {
     // muralla y foso se pintan arrastrando: son de los que se ponen a docenas.
     // La puerta no: una a cada casilla que roza el dedo sería una ruina, y solo
     // caben seis.
-    pintando: SE_PINTA.has(tipo)
+    pintando: SE_PINTA.has(tipo),
+    // el trazado se marca primero y se encarga después: NADA se pide por un roce
+    trazo: 'linea', herramienta: 'poner',
+    trazado: [], vivas: [], quitar: [], paso: 0,
+    ancla: null, arrastrando: false, dedos: 0,
+    imant: '', desplazar: null            // null: lo decide el primer dedo que toque
   }
   emitirModo(true)
   crearBarra()
-  toast(`Elige dónde va: ${d.nombre}`, 'info', 1800)
+  if (puesta.pintando) { escucharTrazo(true); crearCapa() }
+  toast(puesta.pintando
+    ? `${d.nombre}: marca el trazado y confírmalo abajo`
+    : `Elige dónde va: ${d.nombre}`, 'info', 2000)
 }
 
 function salirDeColocacion (silencioso = false) {
   if (!puesta) return
   const pendientes = puesta.cola.length
   const puestos = puesta.puestos
+  const marcados = celdasMarcadas().length
+  escucharTrazo(false)
+  quitarCapa()
   puesta = null
   quitarBarra()
   emitirModo(false)
   if (silencioso) return
-  if (pendientes) toast(`Quedaron ${pendientes} tramos sin levantar`, 'info')
+  if (marcados) toast(`${marcados} tramos marcados que no llegaste a encargar`, 'info')
+  else if (pendientes) toast(`Quedaron ${pendientes} tramos sin levantar`, 'info')
   else if (puestos > 1) toast(`${puestos} obras en marcha`, 'bien')
 }
 
@@ -1696,9 +1708,6 @@ function moverFantasma (x, z) {
     valido: puesta.valido, motivo: puesta.motivo
   })
   refrescarBarra()
-
-  // pintar muros: cada casilla nueva que pisa el dedo entra en la cola
-  if (puesta.pintando && puesta.valido) encolar(x, z)
 }
 
 /**
@@ -1724,7 +1733,7 @@ function sitioLibre (tipo, x, z) {
   return { ok: true, motivo: '' }
 }
 
-const COLA_MAX = 30      // un trazo largo, no la muralla china de una sentada
+const COLA_MAX = 140     // un recinto entero cabe de sobra: la cola lo va soltando
 
 function encolar (x, z) {
   if (!puesta) return
@@ -1738,33 +1747,31 @@ function encolar (x, z) {
 }
 
 /**
- * Va metiendo la cola en cuanto hay constructor libre. Es la clave de que
- * encadenar murallas no sea un suplicio: el jugador pinta la línea de un
- * trazo y la aldea la levanta sola al ritmo que le dejan las plazas de obra.
+ * Va metiendo la cola en cuanto la obra admite un encargo más. Es la clave de
+ * que encadenar murallas no sea un suplicio: el jugador marca el recinto entero
+ * de un gesto y la aldea lo levanta sola al ritmo que le dejan los constructores.
+ * Ojo: ni el dinero ni las manos libres frenan aquí. La simulación RESERVA el
+ * tramo sin cobrarlo y lo arranca cuando puede; cortar por "no hay material"
+ * dejaba medio recinto sin encargar y al jugador repitiendo el gesto.
  */
 function vaciarCola () {
   if (!puesta || !puesta.cola.length) return
   let seguro100 = 0
-  while (puesta.cola.length && seguro100++ < 200) {
+  while (puesta.cola.length && seguro100++ < 300) {
     const ev = evaluar(puesta.tipo)
-    if (!ev.ok) {
-      if (ev.causa === 'recursos' && !puesta.avisoSinRecursos) {
-        puesta.avisoSinRecursos = true
-        toast(`Sin material: quedan ${puesta.cola.length} tramos esperando`, 'mal')
-      }
-      if (ev.causa === 'tope' || ev.causa === 'edad' || ev.causa === 'requisito') {
-        toast(ev.motivo, 'mal')
-        puesta.cola.length = 0
-      }
+    // lo que no se arregla esperando sí frena: edad, requisitos y tope
+    if (!ev.ok && (ev.causa === 'tope' || ev.causa === 'edad' || ev.causa === 'requisito')) {
+      toast(ev.motivo, 'mal')
+      puesta.cola.length = 0
       break
     }
+    if (simHuecosEnCola() <= 0) break        // la cola de obras está llena: ya irán entrando
     const c = puesta.cola[0]
     if (!sitioLibre(puesta.tipo, c.x, c.z).ok) { puesta.cola.shift(); continue }   // se ocupó mientras esperaba
     const b = simColocar(puesta.tipo, c.x, c.z, c.rot)
     puesta.cola.shift()
     if (!b) break
     puesta.puestos++
-    puesta.avisoSinRecursos = false
   }
   refrescarBarra()
 }
@@ -1788,6 +1795,484 @@ function construirAqui () {
   // y su motivo: repetirlo aquí sería gritar dos veces lo mismo.
   if (!aCola) toast(`${def(puesta.tipo).icono} ${ANIMOS[Math.floor(Math.random() * ANIMOS.length)]}`, 'bien')
   salirDeColocacion(true)
+}
+
+/* ===========================================================================
+   5 bis. EL TRAZADO — se marca, se mira y SOLO DESPUÉS se encarga
+   ---------------------------------------------------------------------------
+   Un recinto son cuarenta u ochenta tramos: encargarlos al levantar el dedo
+   convertía cualquier roce en una obra pagada. Así que el dedo solo MARCA;
+   levantar la muralla es un botón aparte. Mientras se marca:
+     · el trazado se ve sobre el suelo (capa SVG proyectada con la cámara),
+     · el punto de colocación va por ENCIMA del pulgar, que si no lo tapa,
+     · y el trazo se imanta a lo que ya hay: muros, esquinas, linde y fachadas.
+   =========================================================================== */
+
+const TRAZOS = [
+  { id: 'linea', icono: '📏', texto: 'Línea' },
+  { id: 'rect', icono: '▭', texto: 'Recinto' },
+  { id: 'libre', icono: '✏️', texto: 'Libre' }
+]
+/** Lo que el borrador del propio modo puede quitar: cercas, nunca tu granja. */
+const BORRABLE = new Set(['muralla', 'puerta', 'foso'])
+const IMANTAN = new Set(['muralla', 'puerta', 'foso'])
+const PX_PULGAR = 92          // cuánto sube el punto de colocación sobre el dedo
+const MARGEN_RODEAR = 2       // casillas de aire entre la aldea y su muralla
+
+const simHuecosEnCola = () => seguro(OBRA.huecosEnCola, 1)
+const simEdificioEn = (x, z) => seguro(OBRA.edificioEn, null, x, z)
+const simDemoler = (id) => seguro(OBRA.demoler, false, id)
+
+/* --- imantado: el trazo se pega a lo que ya hay ---------------------------- */
+
+let guias = null              // { firma, x:[{v,que,tol}], z:[...] }
+
+/**
+ * Las líneas a las que tira el imán, en cada eje por separado: cruzar una de X
+ * con una de Z es justo lo que hace que una esquina caiga donde debe.
+ */
+function guiasDeImantado () {
+  const s = estado()
+  const firma = `${s.buildings.length}:${Object.keys(s.territorio?.parcelas || {}).length}`
+  if (guias && guias.firma === firma) return guias
+  const ejeX = new Map(); const ejeZ = new Map()
+  const meter = (m, v, que, peso, tol) => {
+    if (!Number.isFinite(v) || v < 0 || v >= CONFIG.GRID) return
+    const hay = m.get(v)
+    if (!hay || peso < hay.peso) m.set(v, { v, que, peso, tol })
+  }
+  for (const b of s.buildings) {
+    const an = b.ancho ?? 1; const al = b.alto ?? 1
+    if (IMANTAN.has(b.tipo)) {
+      // un muro imanta su propia fila y su columna: el tramo nuevo sale recto
+      for (let i = 0; i < an; i++) meter(ejeX, b.x + i, 'al muro', 0, 2)
+      for (let j = 0; j < al; j++) meter(ejeZ, b.z + j, 'al muro', 0, 2)
+      // y la casilla de al lado, que es por donde se continúa una esquina
+      meter(ejeX, b.x - 1, 'a la esquina', 1, 2); meter(ejeX, b.x + an, 'a la esquina', 1, 2)
+      meter(ejeZ, b.z - 1, 'a la esquina', 1, 2); meter(ejeZ, b.z + al, 'a la esquina', 1, 2)
+      continue
+    }
+    // la fachada de un edificio: la línea que lo roza sin pisarlo
+    meter(ejeX, b.x - 1, 'a la fachada', 3, 1); meter(ejeX, b.x + an, 'a la fachada', 3, 1)
+    meter(ejeZ, b.z - 1, 'a la fachada', 3, 1); meter(ejeZ, b.z + al, 'a la fachada', 3, 1)
+  }
+  const lim = limitesDelTerritorio(s)
+  meter(ejeX, lim.x0, 'a la linde', 2, 2); meter(ejeX, lim.x1, 'a la linde', 2, 2)
+  meter(ejeZ, lim.z0, 'a la linde', 2, 2); meter(ejeZ, lim.z1, 'a la linde', 2, 2)
+  guias = { firma, x: [...ejeX.values()], z: [...ejeZ.values()] }
+  return guias
+}
+
+const olvidarGuias = () => { guias = null }
+
+function imantar (x, z) {
+  const g = guiasDeImantado()
+  const cerca = (lista, v) => {
+    let mejor = null
+    for (const q of lista) {
+      const d = Math.abs(q.v - v)
+      if (d > q.tol) continue
+      if (!mejor || d < mejor.d || (d === mejor.d && q.peso < mejor.q.peso)) mejor = { d, q }
+    }
+    return mejor
+  }
+  const mx = cerca(g.x, x); const mz = cerca(g.z, z)
+  const que = []
+  if (mx) que.push(mx.q.que)
+  if (mz && (!mx || mz.q.que !== mx.q.que)) que.push(mz.q.que)
+  return { x: mx ? mx.q.v : x, z: mz ? mz.q.v : z, que: que.join(' y ') }
+}
+
+/**
+ * El punto de colocación va por encima del dedo. Se calcula en casillas a
+ * partir de la proyección de la cámara (dos casillas de muestra dan el paso en
+ * píxeles de cada eje), así el desplazamiento es el mismo se mire desde donde
+ * se mire y con el zoom que sea.
+ */
+function conPulgar (x, z) {
+  if (!puesta || !puesta.desplazar) return { x, z }
+  const cam = typeof window !== 'undefined' ? window.baluarteCamara : null
+  if (!cam || typeof cam.proyectar !== 'function') return { x, z }
+  const p0 = cam.proyectar(x, z)
+  const pX = cam.proyectar(x + 1, z)
+  const pZ = cam.proyectar(x, z + 1)
+  const ax = pX.x - p0.x; const ay = pX.y - p0.y
+  const bx = pZ.x - p0.x; const by = pZ.y - p0.y
+  const det = ax * by - ay * bx
+  if (!det || !Number.isFinite(det)) return { x, z }
+  const oy = -PX_PULGAR
+  const dx = (-oy * bx) / det
+  const dz = (ax * oy) / det
+  const nx = Math.round(x + dx); const nz = Math.round(z + dz)
+  return dentro(nx, nz) ? { x: nx, z: nz } : { x, z }
+}
+
+/* --- las casillas del trazo ----------------------------------------------- */
+
+function celdasDeTrazo (ancla, x, z, modo) {
+  const lista = []
+  if (modo === 'linea') {
+    // se bloquea el eje dominante: una línea a pulso nunca sale recta
+    if (Math.abs(x - ancla.x) >= Math.abs(z - ancla.z)) {
+      const p = Math.sign(x - ancla.x) || 1
+      for (let i = ancla.x; i !== x + p; i += p) lista.push({ x: i, z: ancla.z })
+    } else {
+      const p = Math.sign(z - ancla.z) || 1
+      for (let i = ancla.z; i !== z + p; i += p) lista.push({ x: ancla.x, z: i })
+    }
+    return lista
+  }
+  // rectángulo: solo el perímetro, que es lo que cierra un recinto de un gesto
+  const x0 = Math.min(ancla.x, x); const x1 = Math.max(ancla.x, x)
+  const z0 = Math.min(ancla.z, z); const z1 = Math.max(ancla.z, z)
+  for (let i = x0; i <= x1; i++) { lista.push({ x: i, z: z0 }); if (z1 !== z0) lista.push({ x: i, z: z1 }) }
+  for (let j = z0 + 1; j < z1; j++) { lista.push({ x: x0, z: j }); if (x1 !== x0) lista.push({ x: x1, z: j }) }
+  return lista
+}
+
+/** Lo marcado = lo que ya soltaste + el trazo que llevas en el dedo, sin repetir. */
+function celdasMarcadas () {
+  if (!puesta) return []
+  const vistas = new Set()
+  const salida = []
+  for (const c of puesta.trazado.concat(puesta.vivas)) {
+    const k = `${c.x},${c.z}`
+    if (vistas.has(k)) continue
+    vistas.add(k)
+    salida.push(c)
+  }
+  return salida
+}
+
+function empezarTrazo (x, z) {
+  if (!puesta) return
+  puesta.ancla = { x, z }
+  puesta.paso++
+  puesta.vivas = []
+  estirarTrazo(x, z)
+}
+
+function estirarTrazo (x, z) {
+  if (!puesta || !puesta.ancla) return
+  const modo = puesta.trazo
+  if (puesta.herramienta === 'quitar') { marcarParaQuitar(x, z); return }
+  if (modo === 'libre') {
+    if (!puesta.vivas.some(c => c.x === x && c.z === z)) {
+      puesta.vivas.push({ x, z, paso: puesta.paso, modo })
+    }
+  } else {
+    puesta.vivas = celdasDeTrazo(puesta.ancla, x, z, modo).map(c => ({ ...c, paso: puesta.paso, modo }))
+  }
+  if (puesta.trazado.length + puesta.vivas.length > COLA_MAX) {
+    puesta.vivas = puesta.vivas.slice(0, Math.max(0, COLA_MAX - puesta.trazado.length))
+  }
+  refrescarBarra()
+}
+
+function soltarTrazo () {
+  if (!puesta) return
+  if (puesta.vivas.length) {
+    puesta.trazado = puesta.trazado.concat(puesta.vivas)
+    puesta.vivas = []
+    navigator.vibrate?.(10)
+  }
+  puesta.arrastrando = false
+  puesta.ancla = null
+  refrescarBarra()
+}
+
+/** Cancela el trazo que va en el dedo (segundo dedo = manda la cámara). */
+function cancelarTrazoVivo () {
+  if (!puesta) return
+  puesta.vivas = []
+  puesta.arrastrando = false
+  puesta.ancla = null
+  refrescarBarra()
+}
+
+/** Deshacer: en libre, la última casilla; en línea y recinto, el último trazo. */
+function deshacerTramo () {
+  if (!puesta) return
+  if (puesta.herramienta === 'quitar') {
+    if (!puesta.quitar.length) { toast('No hay nada marcado', 'info', 1400); return }
+    puesta.quitar.pop()
+    refrescarBarra()
+    return
+  }
+  const t = puesta.trazado
+  if (!t.length) { toast('No hay trazado que deshacer', 'info', 1400); return }
+  const ultimo = t[t.length - 1]
+  if (ultimo.modo === 'libre') t.pop()
+  else while (t.length && t[t.length - 1].paso === ultimo.paso) t.pop()
+  navigator.vibrate?.(8)
+  refrescarBarra()
+}
+
+function borrarTrazado () {
+  if (!puesta) return
+  puesta.trazado = []; puesta.vivas = []; puesta.quitar = []; puesta.paso = 0
+  refrescarBarra()
+}
+
+function marcarParaQuitar (x, z) {
+  const b = simEdificioEn(x, z)
+  if (!b || !BORRABLE.has(b.tipo)) return
+  if (puesta.quitar.some(q => q.id === b.id)) return
+  puesta.quitar.push({ id: b.id, x: b.x, z: b.z, tipo: b.tipo })
+  navigator.vibrate?.(6)
+  refrescarBarra()
+}
+
+/** Cuentas del trazado marcado: cuántos caben, qué cuestan y qué falla. */
+function previaTrazado () {
+  const d = def(puesta.tipo)
+  if (puesta.herramienta === 'quitar') {
+    return { total: puesta.quitar.length, ok: puesta.quitar.length, malas: 0, motivo: '', coste: null }
+  }
+  const celdas = celdasMarcadas()
+  let ok = 0; let malas = 0; let motivo = ''
+  for (const c of celdas) {
+    if (sitioLibre(puesta.tipo, c.x, c.z).ok) ok++
+    else { malas++; if (!motivo) motivo = sitioLibre(puesta.tipo, c.x, c.z).motivo }
+  }
+  const c1 = d.coste(1)
+  const coste = {}
+  for (const r of RECURSOS) if (c1[r]) coste[r] = c1[r] * ok
+  return { total: celdas.length, ok, malas, motivo, coste }
+}
+
+/** El botón de confirmar: aquí y solo aquí se encarga obra. */
+function levantarTrazado () {
+  if (!puesta) return
+  if (puesta.herramienta === 'quitar') { quitarMarcados(); return }
+  const celdas = celdasMarcadas()
+  if (!celdas.length) { toast('Marca primero el trazado con el dedo', 'info'); return }
+  let pedidos = 0
+  for (const c of celdas) {
+    if (!sitioLibre(puesta.tipo, c.x, c.z).ok) continue
+    if (puesta.cola.some(q => q.x === c.x && q.z === c.z)) continue
+    if (puesta.cola.length >= COLA_MAX) break
+    puesta.cola.push({ x: c.x, z: c.z, rot: puesta.rot })
+    pedidos++
+  }
+  puesta.trazado = []; puesta.vivas = []; puesta.paso = 0
+  if (!pedidos) { toast('De ese trazado no cabe ni un tramo', 'mal'); refrescarBarra(); return }
+  navigator.vibrate?.(18)
+  toast(`${def(puesta.tipo).icono} ${pedidos} tramo${pedidos > 1 ? 's' : ''} encargado${pedidos > 1 ? 's' : ''}`, 'bien')
+  vaciarCola()
+}
+
+async function quitarMarcados () {
+  if (!puesta?.quitar.length) { toast('Barre los tramos que quieras quitar', 'info'); return }
+  const n = puesta.quitar.length
+  const si = await confirmar({
+    titulo: '¿Quitar?',
+    texto: `Se demolerán ${n} tramo${n > 1 ? 's' : ''}. Te devuelven la mitad de lo invertido.`,
+    si: 'Quitar', peligro: true
+  })
+  if (!si || !puesta) return
+  let fuera = 0
+  for (const q of puesta.quitar) if (simDemoler(q.id)) fuera++
+  puesta.quitar = []
+  olvidarGuias()
+  toast(`🧹 ${fuera} tramo${fuera === 1 ? '' : 's'} fuera`, 'bien')
+  refrescarBarra()
+}
+
+/**
+ * El atajo que ahorra el gesto entero: un rectángulo alrededor de todo lo
+ * construido, con dos casillas de aire y sin salirse de tu territorio.
+ */
+function rodearLaAldea () {
+  if (!puesta) return
+  const s = estado()
+  const dentroDelCerco = s.buildings.filter(b => !IMANTAN.has(b.tipo))
+  if (!dentroDelCerco.length) { toast('Todavía no hay aldea que rodear', 'info'); return }
+  let x0 = CONFIG.GRID; let z0 = CONFIG.GRID; let x1 = 0; let z1 = 0
+  for (const b of dentroDelCerco) {
+    x0 = Math.min(x0, b.x); z0 = Math.min(z0, b.z)
+    x1 = Math.max(x1, b.x + (b.ancho ?? 1) - 1); z1 = Math.max(z1, b.z + (b.alto ?? 1) - 1)
+  }
+  const lim = limitesDelTerritorio(s)
+  x0 = Math.max(lim.x0, x0 - MARGEN_RODEAR); z0 = Math.max(lim.z0, z0 - MARGEN_RODEAR)
+  x1 = Math.min(lim.x1, x1 + MARGEN_RODEAR); z1 = Math.min(lim.z1, z1 + MARGEN_RODEAR)
+  puesta.trazo = 'rect'
+  puesta.herramienta = 'poner'
+  puesta.paso++
+  puesta.vivas = []
+  puesta.trazado = celdasDeTrazo({ x: x0, z: z0 }, x1, z1, 'rect')
+    .map(c => ({ ...c, paso: puesta.paso, modo: 'rect' }))
+  const p = previaTrazado()
+  toast(`▭ Recinto propuesto: ${p.ok} tramos${p.malas ? ` · ${p.malas} no caben` : ''}`, 'info', 2600)
+  events.emit(EV.CAMERA_FOCUS, { x: Math.round((x0 + x1) / 2), z: Math.round((z0 + z1) / 2) })
+  refrescarBarra()
+}
+
+/* --- el dedo: principio y final del gesto los pone el puntero -------------- */
+
+const dedosTrazo = new Set()
+
+function escucharTrazo (activar) {
+  if (activar) {
+    window.addEventListener('pointerdown', alBajarTrazo, true)
+    window.addEventListener('pointerup', alSubirTrazo, true)
+    window.addEventListener('pointercancel', alSubirTrazo, true)
+  } else {
+    dedosTrazo.clear()
+    window.removeEventListener('pointerdown', alBajarTrazo, true)
+    window.removeEventListener('pointerup', alSubirTrazo, true)
+    window.removeEventListener('pointercancel', alSubirTrazo, true)
+  }
+}
+
+/** El HUD va por encima del lienzo: un dedo que empieza ahí no traza nada. */
+function sobreHudTrazo (e) {
+  const t = e.target
+  return !!(t && typeof t.closest === 'function' && t.closest('#hud, .panel, .hoja, .capa-hoja, .capa-dialogo, button, input, select, textarea, a'))
+}
+
+function alBajarTrazo (e) {
+  if (!puesta?.pintando) return
+  if (sobreHudTrazo(e)) return
+  dedosTrazo.add(e.pointerId)
+  if (dedosTrazo.size > 1) { cancelarTrazoVivo(); return }   // dos dedos: manda la cámara
+  if (puesta.desplazar == null) puesta.desplazar = e.pointerType !== 'mouse'
+  puesta.dedo = { x: e.clientX, y: e.clientY }
+  puesta.arrastrando = true
+  puesta.ancla = null            // la pone el primer GRID_TAP, que llega enseguida
+  puesta.vivas = []
+}
+
+function alSubirTrazo (e) {
+  dedosTrazo.delete(e.pointerId)
+  if (!puesta?.pintando || !puesta.arrastrando || dedosTrazo.size) return
+  soltarTrazo()
+  puesta.dedo = null
+}
+
+/** Una casilla más del gesto: imantada y por encima del pulgar. */
+function pasoDeTrazo (x, z) {
+  if (!puesta) return
+  const p = conPulgar(x, z)
+  const im = imantar(p.x, p.z)
+  puesta.imant = im.que
+  moverFantasma(im.x, im.z)
+  if (!puesta.arrastrando) return
+  if (!puesta.ancla) empezarTrazo(im.x, im.z)
+  else estirarTrazo(im.x, im.z)
+}
+
+/* --- la capa que dibuja el trazado sobre el suelo -------------------------- */
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+let capa = null              // { svg, verde, rojo, hilo, chip, firma, rafaga }
+
+function crearCapa () {
+  quitarCapa()
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('aria-hidden', 'true')
+  Object.assign(svg.style, {
+    position: 'fixed', left: '0', top: '0', width: '100%', height: '100%',
+    zIndex: '45', pointerEvents: 'none'
+  })
+  const camino = (relleno, borde) => {
+    const p = document.createElementNS(SVG_NS, 'path')
+    p.setAttribute('fill', relleno)
+    p.setAttribute('stroke', borde)
+    p.setAttribute('stroke-width', '1.5')
+    p.setAttribute('stroke-linejoin', 'round')
+    svg.appendChild(p)
+    return p
+  }
+  const verde = camino('rgba(96,190,104,.42)', 'rgba(32,96,40,.85)')
+  const rojo = camino('rgba(214,74,64,.42)', 'rgba(130,28,24,.9)')
+  const hilo = document.createElementNS(SVG_NS, 'line')
+  hilo.setAttribute('stroke', 'rgba(255,255,255,.75)')
+  hilo.setAttribute('stroke-width', '2')
+  hilo.setAttribute('stroke-dasharray', '5 5')
+  svg.appendChild(hilo)
+
+  const chip = el('div', {
+    clase: 'pequeño',
+    estilo: {
+      position: 'fixed', zIndex: '46', pointerEvents: 'none', display: 'none',
+      padding: '5px 10px', borderRadius: '999px', fontWeight: '900',
+      background: 'rgba(18,16,14,.86)', color: '#fff', whiteSpace: 'nowrap',
+      transform: 'translate(-50%,-100%)', boxShadow: 'var(--sombra-flotante)'
+    }
+  })
+  const raiz = document.getElementById('hud') || document.body
+  raiz.append(svg, chip)
+  capa = { svg, verde, rojo, hilo, chip, firma: '', rafaga: 0 }
+  capa.rafaga = requestAnimationFrame(pintarCapa)
+}
+
+function quitarCapa () {
+  if (!capa) return
+  cancelAnimationFrame(capa.rafaga)
+  capa.svg.remove()
+  capa.chip.remove()
+  capa = null
+}
+
+/**
+ * Se redibuja por frame porque la cámara se mueve bajo el trazado (dos dedos,
+ * arrastre de borde), pero solo se recalculan los caminos cuando cambia algo:
+ * la firma junta las casillas marcadas y la posición de la cámara.
+ */
+function pintarCapa () {
+  if (!capa || !puesta) return
+  capa.rafaga = requestAnimationFrame(pintarCapa)
+  const cam = typeof window !== 'undefined' ? window.baluarteCamara : null
+  if (!cam || typeof cam.proyectar !== 'function') return
+
+  const celdas = puesta.herramienta === 'quitar' ? puesta.quitar : celdasMarcadas()
+  const pos = typeof cam.posicion === 'function' ? cam.posicion().map(n => Math.round(n * 10)).join(',') : ''
+  const firma = `${celdas.length}:${puesta.herramienta}:${pos}:${puesta.dedo ? 1 : 0}:${puesta.x},${puesta.z}`
+  if (firma === capa.firma) return
+  capa.firma = firma
+
+  if (!celdas.length) {
+    capa.verde.setAttribute('d', ''); capa.rojo.setAttribute('d', '')
+    capa.chip.style.display = 'none'
+  } else {
+    const quitarTramos = puesta.herramienta === 'quitar'
+    let dBien = ''; let dMal = ''
+    let cima = { x: 0, y: Infinity }
+    for (const c of celdas) {
+      const esq = [
+        cam.proyectar(c.x - 0.45, c.z - 0.45), cam.proyectar(c.x + 0.45, c.z - 0.45),
+        cam.proyectar(c.x + 0.45, c.z + 0.45), cam.proyectar(c.x - 0.45, c.z + 0.45)
+      ]
+      if (esq.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y) || Math.abs(p.x) > 6000 || Math.abs(p.y) > 6000)) continue
+      const d = `M${esq.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join('L')}Z`
+      const bien = quitarTramos ? false : sitioLibre(puesta.tipo, c.x, c.z).ok
+      if (bien) dBien += d; else dMal += d
+      for (const p of esq) if (p.y < cima.y) cima = { x: p.x, y: p.y }
+    }
+    capa.verde.setAttribute('d', dBien)
+    capa.rojo.setAttribute('d', dMal)
+
+    // la cuenta va SOBRE el trazado, nunca bajo el dedo
+    const p = previaTrazado()
+    const texto = quitarTramos
+      ? `🧹 ${p.total} tramo${p.total === 1 ? '' : 's'}`
+      : `${def(puesta.tipo).icono} ${p.ok} tramo${p.ok === 1 ? '' : 's'}${p.malas ? ` · ${p.malas} ✖` : ''}`
+    capa.chip.textContent = texto
+    if (Number.isFinite(cima.y)) {
+      capa.chip.style.display = 'block'
+      capa.chip.style.left = `${Math.max(60, Math.min(window.innerWidth - 60, cima.x))}px`
+      capa.chip.style.top = `${Math.max(46, cima.y - 12)}px`
+    } else capa.chip.style.display = 'none'
+  }
+
+  // el hilo que une el dedo con el punto de colocación: sin él, el desplazamiento despista
+  if (puesta.dedo && puesta.desplazar && puesta.x != null) {
+    const g = cam.proyectar(puesta.x, puesta.z)
+    capa.hilo.setAttribute('x1', puesta.dedo.x); capa.hilo.setAttribute('y1', puesta.dedo.y)
+    capa.hilo.setAttribute('x2', g.x); capa.hilo.setAttribute('y2', g.y)
+    capa.hilo.setAttribute('opacity', '1')
+  } else capa.hilo.setAttribute('opacity', '0')
 }
 
 /* --- la barra de abajo --------------------------------------------------- */
@@ -1823,10 +2308,34 @@ function crearBarra () {
     costeTxt
   ]))
 
-  const girable = d.ancho !== d.alto
-  const fila = el('div', { estilo: { display: 'grid', gridTemplateColumns: girable ? 'auto auto 1fr' : 'auto 1fr', gap: '8px' } })
+  // --- los modos de trazado, solo para lo que se pinta arrastrando ---
+  let modos = null
+  if (puesta.pintando) {
+    modos = { fila: el('div', { estilo: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px', marginBottom: '8px' } }), botones: {} }
+    for (const t of TRAZOS) {
+      const b = el('button', {
+        clase: 'btn btn-piedra', type: 'button', texto: `${t.icono} ${t.texto}`,
+        estilo: { minHeight: '48px', fontSize: '.78em', fontWeight: '800' },
+        onclick: () => cambiarTrazo(t.id)
+      })
+      modos.botones[t.id] = b
+      modos.fila.appendChild(b)
+    }
+    const borrar = el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '🧹 Quitar',
+      estilo: { minHeight: '48px', fontSize: '.78em', fontWeight: '800' },
+      onclick: () => cambiarHerramienta(puesta.herramienta === 'quitar' ? 'poner' : 'quitar')
+    })
+    modos.botones.quitar = borrar
+    modos.fila.appendChild(borrar)
+    caja.appendChild(modos.fila)
+  }
 
-  if (girable) {
+  const girable = d.ancho !== d.alto
+  const columnas = puesta.pintando ? 'auto auto auto 1fr' : (girable ? 'auto auto 1fr' : 'auto 1fr')
+  const fila = el('div', { estilo: { display: 'grid', gridTemplateColumns: columnas, gap: '8px' } })
+
+  if (girable && !puesta.pintando) {
     fila.appendChild(el('button', {
       clase: 'btn btn-piedra', type: 'button', texto: '↻', 'aria-label': 'Girar',
       estilo: { minWidth: '56px', minHeight: '56px', fontSize: '1.3em' },
@@ -1843,17 +2352,48 @@ function crearBarra () {
     estilo: { minWidth: '56px', minHeight: '56px', fontSize: '1.2em' },
     onclick: () => salirDeColocacion()
   }))
+  let deshacerBtn = null
+  let pulgarBtn = null
+  if (puesta.pintando) {
+    deshacerBtn = el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '↶', 'aria-label': 'Deshacer el último tramo',
+      estilo: { minWidth: '56px', minHeight: '56px', fontSize: '1.3em' },
+      onclick: () => deshacerTramo()
+    })
+    fila.appendChild(deshacerBtn)
+    pulgarBtn = el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '👆', 'aria-label': 'Colocar por encima del dedo',
+      estilo: { minWidth: '56px', minHeight: '56px' },
+      onclick: () => {
+        puesta.desplazar = !puesta.desplazar
+        toast(puesta.desplazar ? '👆 El muro se coloca por encima del dedo' : '👆 El muro se coloca justo bajo el dedo', 'info', 1800)
+        refrescarBarra()
+      }
+    })
+    fila.appendChild(pulgarBtn)
+  }
   const confirmarBtn = el('button', {
     clase: 'btn btn-oro', type: 'button', texto: 'Construir aquí',
     datos: { tutorial: 'confirmar' },          // la guía pone aquí la mano
     estilo: { minHeight: '56px', width: '100%', fontSize: '1.02em' },
-    onclick: () => construirAqui()
+    onclick: () => (puesta.pintando ? levantarTrazado() : construirAqui())
   })
   fila.appendChild(confirmarBtn)
   caja.appendChild(fila)
 
+  // el atajo que cierra el recinto de dos toques (solo en modo recinto)
+  let extras = null
+  if (puesta.pintando) {
+    extras = el('button', {
+      clase: 'btn btn-fantasma', type: 'button', texto: '⭕ Rodear la aldea',
+      estilo: { minHeight: '48px', width: '100%', marginTop: '8px', fontSize: '.88em' },
+      onclick: () => rodearLaAldea()
+    })
+    caja.appendChild(extras)
+  }
+
   // pista y contador para el pintado de muros
-  const pista = el('div', { clase: 'pequeño tenue', estilo: { marginTop: '8px', display: puesta.encadena ? 'flex' : 'none', gap: '8px', alignItems: 'center' } })
+  const pista = el('div', { clase: 'pequeño tenue', estilo: { marginTop: '8px', display: (puesta.encadena && !puesta.pintando) ? 'flex' : 'none', gap: '8px', alignItems: 'center' } })
   const pistaTxt = el('span', { clase: 'crece' })
   const listo = el('button', {
     clase: 'btn btn-fantasma', type: 'button', texto: 'Listo',
@@ -1875,7 +2415,26 @@ function crearBarra () {
   caja.appendChild(aviso)
 
   raiz.appendChild(caja)
-  barra = { caja, estadoTxt, casillaTxt, confirmarBtn, pistaTxt, costeTxt, costeUno, firmaCoste: null, aviso, avisoTxt }
+  barra = { caja, estadoTxt, casillaTxt, confirmarBtn, deshacerBtn, pulgarBtn, pistaTxt, costeTxt, costeUno, firmaCoste: null, aviso, avisoTxt, modos, extras }
+  refrescarBarra()
+}
+
+function cambiarTrazo (modo) {
+  if (!puesta || puesta.trazo === modo) return
+  puesta.trazo = modo
+  puesta.herramienta = 'poner'
+  puesta.vivas = []
+  refrescarBarra()
+}
+
+function cambiarHerramienta (cual) {
+  if (!puesta) return
+  puesta.herramienta = cual
+  puesta.vivas = []
+  puesta.ancla = null
+  toast(cual === 'quitar'
+    ? '🧹 Barre los tramos que sobren y confirma abajo'
+    : `${def(puesta.tipo).icono} De vuelta a levantar muro`, 'info', 1800)
   refrescarBarra()
 }
 
@@ -1891,26 +2450,56 @@ function refrescarBarra () {
   // Todo lo que solo falla por manos o por caja se puede dejar encargado.
   const enEspera = !ev.ok && (ev.causa === 'obras' || ev.causa === 'recursos')
   const puedeYa = puesta.valido && (ev.ok || enEspera)
+  const previa = puesta.pintando ? previaTrazado() : null
 
-  const texto = sinSitio
-    ? '👆 Toca la aldea para colocarlo'
-    : !puesta.valido
-        ? `${puesta.causa === 'territorio' ? '🔒' : '⛔'} ${puesta.motivo}`
-        : ev.ok
-          ? '✅ Aquí cabe'
-          : ev.causa === 'obras'
-            ? '⏳ Constructores liados: queda encargado y entra solo'
-            : ev.causa === 'recursos'
-              ? `⏳ ${ev.motivo}: queda encargado y empieza al tenerlo`
-              : `⛔ ${ev.motivo}`
+  // --- los modos encendidos ---
+  if (barra.modos) {
+    for (const t of TRAZOS) {
+      const on = puesta.herramienta === 'poner' && puesta.trazo === t.id
+      const b = barra.modos.botones[t.id]
+      const clase = on ? 'btn btn-oro' : 'btn btn-piedra'
+      if (b.className !== clase) b.className = clase
+    }
+    const bq = barra.modos.botones.quitar
+    const claseQ = puesta.herramienta === 'quitar' ? 'btn btn-oro' : 'btn btn-piedra'
+    if (bq.className !== claseQ) bq.className = claseQ
+  }
+
+  const texto = puesta.herramienta === 'quitar'
+    ? (previa.total ? `🧹 ${previa.total} tramo${previa.total === 1 ? '' : 's'} marcados para quitar` : '👆 Barre los tramos que quieras quitar')
+    : previa && previa.total
+      ? `${puesta.arrastrando ? '✏️' : '📐'} ${previa.ok} tramo${previa.ok === 1 ? '' : 's'} marcados${previa.malas ? ` · ${previa.malas} no caben` : ''}`
+      : sinSitio
+        ? (puesta.pintando ? '👆 Arrastra el dedo: se marca, no se encarga' : '👆 Toca la aldea para colocarlo')
+        : !puesta.valido
+            ? `${puesta.causa === 'territorio' ? '🔒' : '⛔'} ${puesta.motivo}`
+            : ev.ok
+              ? '✅ Aquí cabe'
+              : ev.causa === 'obras'
+                ? '⏳ Constructores liados: queda encargado y entra solo'
+                : ev.causa === 'recursos'
+                  ? `⏳ ${ev.motivo}: queda encargado y empieza al tenerlo`
+                  : `⛔ ${ev.motivo}`
   if (barra.estadoTxt.textContent !== texto) barra.estadoTxt.textContent = texto
-  barra.estadoTxt.style.color = sinSitio ? '' : (puesta.valido && ev.ok) ? 'var(--verde-oscuro)' : puedeYa ? 'var(--madera)' : 'var(--rojo)'
+  barra.estadoTxt.style.color = (previa && previa.total)
+    ? (previa.malas ? 'var(--madera)' : 'var(--verde-oscuro)')
+    : sinSitio ? '' : (puesta.valido && ev.ok) ? 'var(--verde-oscuro)' : puedeYa ? 'var(--madera)' : 'var(--rojo)'
 
-  // el rojo del coste se enciende y se apaga mientras pintas muros
-  const firma = RECURSOS.map(r => (recursos()[r] || 0) >= (barra.costeUno[r] || 0) ? 1 : 0).join('')
-  if (firma !== barra.firmaCoste) { barra.firmaCoste = firma; barra.costeTxt.innerHTML = costeHTML(barra.costeUno) }
+  // el coste: el del trazado entero si hay trazado, y si no el de un tramo
+  const hayTrazado = !!(previa && previa.ok && puesta.herramienta === 'poner')
+  const firma = hayTrazado
+    ? `t${previa.ok}`
+    : RECURSOS.map(r => (recursos()[r] || 0) >= (barra.costeUno[r] || 0) ? 1 : 0).join('')
+  if (firma !== barra.firmaCoste) {
+    barra.firmaCoste = firma
+    barra.costeTxt.innerHTML = costeHTML(hayTrazado ? previa.coste : barra.costeUno)
+  }
 
-  const casilla = sinSitio ? '' : `Casilla ${puesta.x}, ${puesta.z}${puesta.rot ? ` · girado ${puesta.rot * 90}°` : ''}`
+  const casilla = puesta.herramienta === 'quitar'
+    ? 'Solo quita muros, puertas y fosos'
+    : previa && previa.total
+      ? (puesta.arrastrando ? 'Suelta el dedo: no se encarga nada todavía' : `Confirma abajo${puesta.imant ? ` · imantado ${puesta.imant}` : ''}`)
+      : sinSitio ? '' : `Casilla ${puesta.x}, ${puesta.z}${puesta.imant ? ` · imantado ${puesta.imant}` : ''}${puesta.rot ? ` · girado ${puesta.rot * 90}°` : ''}`
   if (barra.casillaTxt.textContent !== casilla) barra.casillaTxt.textContent = casilla
 
   // tierra que no es tuya: se dice cómo se consigue, no solo que no se puede
@@ -1920,25 +2509,44 @@ function refrescarBarra () {
     if (hayPista && barra.avisoTxt.textContent !== puesta.pista) barra.avisoTxt.textContent = puesta.pista
   }
 
-  barra.confirmarBtn.disabled = !puedeYa
-  const txtBoton = puesta.encadena
-    ? (puesta.cola.length ? 'Añadir tramo' : 'Poner tramo')
-    : enEspera ? 'Dejar encargado' : 'Construir aquí'
-  if (barra.confirmarBtn.textContent !== txtBoton) barra.confirmarBtn.textContent = txtBoton
+  if (barra.deshacerBtn) {
+    barra.deshacerBtn.disabled = puesta.herramienta === 'quitar' ? !puesta.quitar.length : !puesta.trazado.length
+  }
+  if (barra.extras) barra.extras.style.display = (puesta.herramienta === 'poner' && puesta.trazo === 'rect') ? 'block' : 'none'
+  if (barra.pulgarBtn) {
+    const claseP = puesta.desplazar ? 'btn btn-oro' : 'btn btn-piedra'
+    if (barra.pulgarBtn.className !== claseP) barra.pulgarBtn.className = claseP
+  }
+
+  // --- el botón grande: lo único que encarga obra ---
+  if (puesta.pintando) {
+    const n = previa.ok
+    barra.confirmarBtn.disabled = !n
+    barra.confirmarBtn.className = n ? 'btn btn-oro' : 'btn btn-piedra'
+    const txt = puesta.herramienta === 'quitar'
+      ? (n ? `🧹 Quitar ${n}` : 'Nada marcado')
+      : n ? `🧱 Levantar ${n} tramo${n === 1 ? '' : 's'}` : 'Marca el trazado'
+    if (barra.confirmarBtn.textContent !== txt) barra.confirmarBtn.textContent = txt
+  } else {
+    barra.confirmarBtn.disabled = !puedeYa
+    const txtBoton = puesta.encadena
+      ? (puesta.cola.length ? 'Añadir tramo' : 'Poner tramo')
+      : enEspera ? 'Dejar encargado' : 'Construir aquí'
+    if (barra.confirmarBtn.textContent !== txtBoton) barra.confirmarBtn.textContent = txtBoton
+  }
 
   if (puesta.encadena && barra.pistaTxt) {
-    const seguir = puesta.pintando ? 'sigue arrastrando el dedo' : 'pon la siguiente o pulsa Listo'
+    const seguir = puesta.pintando ? 'marca otro trazo o pulsa Listo' : 'pon la siguiente o pulsa Listo'
     const t = puesta.cola.length
       ? `${def(puesta.tipo).icono} ${puesta.puestos} levantados · ${puesta.cola.length} en cola (entran solos)`
       : puesta.puestos
         ? `${def(puesta.tipo).icono} ${puesta.puestos} levantados · ${seguir}`
         : puesta.pintando
-          ? '✏️ Arrastra el dedo para encadenar muros de un trazo'
+          ? '✏️ Nada se encarga hasta que pulses el botón de abajo'
           : '➕ Se colocan de una en una: no hay que volver a abrir el taller'
     if (barra.pistaTxt.textContent !== t) barra.pistaTxt.textContent = t
   }
 }
-
 /* ===========================================================================
    6. MODO DESPEJAR — pintar con el dedo lo que hay que talar
    =========================================================================== */
@@ -2354,7 +2962,10 @@ export function init () {
     if (!p) return
     if (despeje) { pintarDespeje(p.x | 0, p.z | 0); return }
     if (!puesta) return
-    moverFantasma(p.x | 0, p.z | 0)
+    // los muros van por el trazado (imantado y por encima del pulgar);
+    // lo demás sigue siendo un fantasma que sigue al dedo
+    if (puesta.pintando) pasoDeTrazo(p.x | 0, p.z | 0)
+    else moverFantasma(p.x | 0, p.z | 0)
   })
 
   // si otro módulo apaga el modo construcción, aquí se recoge la mesa
@@ -2378,7 +2989,7 @@ export function init () {
   for (const ev of [EV.BUILD_COMPLETED, EV.BUILD_UPGRADED, EV.BUILD_DEMOLISHED, EV.BUILD_PLACED,
     EV.TECH_RESEARCHED, EV.AGE_ADVANCED, EV.LEVEL_UP,
     EV.TERRITORIO_DISPONIBLE, EV.TERRITORIO_DESBLOQUEADO]) {
-    events.on(ev, () => reconstruir())
+    events.on(ev, () => { olvidarGuias(); reconstruir() })
   }
 
   document.addEventListener('keydown', (e) => {
@@ -2405,6 +3016,21 @@ export function init () {
         refrescarBarraDespeje()
         return despeje.previa
       },
+      // para las pruebas: marcar el trazado sin dedo y confirmarlo aparte
+      marcarTrazo: (ax, az, bx, bz, modo) => {
+        if (!puesta?.pintando) return null
+        if (modo) puesta.trazo = modo
+        puesta.arrastrando = true
+        empezarTrazo(ax, az)
+        estirarTrazo(bx, bz)
+        soltarTrazo()
+        return previaTrazado()
+      },
+      levantar: () => levantarTrazado(),
+      deshacer: () => deshacerTramo(),
+      rodear: () => rodearLaAldea(),
+      trazo: (modo) => cambiarTrazo(modo),
+      previa: () => (puesta?.pintando ? previaTrazado() : null),
       get modo () { return puesta },
       get despeje () { return despeje }
     }

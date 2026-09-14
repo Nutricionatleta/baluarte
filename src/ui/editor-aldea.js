@@ -52,13 +52,23 @@ const BORRABLE = new Set(['muralla', 'puerta', 'foso'])
 let activo = false
 let nodos = {}
 let herramienta = 'mover'        // mover | muralla | foso | quitar
-let trazo = 'libre'              // libre | linea | rect
+let trazo = 'linea'              // linea | rect | libre  (el mismo orden que el taller)
 const elegidos = new Set()
 
 let llevando = null              // pieza en el dedo: { id, tipo, ancho, alto, rot, x, z, valido, desdeCaja, grupo, agarre }
-let pintando = null              // { tipo, x0, z0, celdas }
+let pintando = null              // { tipo, x0, z0, celdas, paso }
 let quitando = null              // { ids:Set }
 let gesto = null                 // { casillas, movido }
+
+// El trazado se MARCA con el dedo y se encarga con un botón aparte: igual que en
+// el taller. Soltar el dedo no levanta nada, que era la forma de gastar piedra
+// por un roce.
+let marcado = []                 // [{ x, z, tipo, paso, modo }] tramos marcados
+let marcadoQuitar = []           // [{ id, x, z, tipo }] tramos marcados para demoler
+let paso = 0
+let desplazar = null             // colocar por encima del dedo (null: lo decide el puntero)
+let dedoPx = null                // dónde está el dedo, para el hilo del fantasma
+let puntoUltimo = null           // última casilla apuntada (ya imantada y desplazada)
 
 const pila = []                  // fotos para deshacer/rehacer
 let pilaPos = -1
@@ -178,6 +188,197 @@ function alineacion (x, z, ancho, alto) {
 }
 
 /* ===========================================================================
+   Precisión: imantado, desplazamiento del pulgar y la capa del trazado
+   ---------------------------------------------------------------------------
+   Es la misma ayuda que el taller (ui/build-panel.js) usa al levantar muralla:
+   el trazo se pega a lo que ya hay, el punto de colocación va por encima del
+   dedo y lo marcado se ve sobre el suelo con su cuenta. Si algún día se toca
+   una de las dos, hay que tocar la otra: son una sola forma de colocar.
+   =========================================================================== */
+
+const PX_PULGAR = 92
+const IMANTAN = new Set(['muralla', 'puerta', 'foso'])
+let guias = null                 // { firma, x:[{v,que,tol}], z:[...] }
+
+const olvidarGuias = () => { guias = null }
+
+/** Las líneas a las que tira el imán: muros, esquinas, la linde y las fachadas. */
+function guiasDeImantado () {
+  const s = estado()
+  const firma = `${s.buildings.length}:${Object.keys(s.territorio?.parcelas || {}).length}`
+  if (guias && guias.firma === firma) return guias
+  const ejeX = new Map(); const ejeZ = new Map()
+  const meter = (m, v, que, peso, tol) => {
+    if (!Number.isFinite(v) || v < 0 || v >= G) return
+    const hay = m.get(v)
+    if (!hay || peso < hay.peso) m.set(v, { v, que, peso, tol })
+  }
+  for (const b of edificios()) {
+    const an = b.ancho ?? 1; const al = b.alto ?? 1
+    if (IMANTAN.has(b.tipo)) {
+      for (let i = 0; i < an; i++) meter(ejeX, b.x + i, 'al muro', 0, 2)
+      for (let j = 0; j < al; j++) meter(ejeZ, b.z + j, 'al muro', 0, 2)
+      meter(ejeX, b.x - 1, 'a la esquina', 1, 2); meter(ejeX, b.x + an, 'a la esquina', 1, 2)
+      meter(ejeZ, b.z - 1, 'a la esquina', 1, 2); meter(ejeZ, b.z + al, 'a la esquina', 1, 2)
+      continue
+    }
+    meter(ejeX, b.x - 1, 'a la fachada', 3, 1); meter(ejeX, b.x + an, 'a la fachada', 3, 1)
+    meter(ejeZ, b.z - 1, 'a la fachada', 3, 1); meter(ejeZ, b.z + al, 'a la fachada', 3, 1)
+  }
+  const lim = limitesDelTerritorio(estado())
+  meter(ejeX, lim.x0, 'a la linde', 2, 2); meter(ejeX, lim.x1, 'a la linde', 2, 2)
+  meter(ejeZ, lim.z0, 'a la linde', 2, 2); meter(ejeZ, lim.z1, 'a la linde', 2, 2)
+  guias = { firma, x: [...ejeX.values()], z: [...ejeZ.values()] }
+  return guias
+}
+
+let imantadoA = ''
+
+function imantar (x, z) {
+  const g = guiasDeImantado()
+  const cerca = (lista, v) => {
+    let mejor = null
+    for (const q of lista) {
+      const d = Math.abs(q.v - v)
+      if (d > q.tol) continue
+      if (!mejor || d < mejor.d || (d === mejor.d && q.peso < mejor.q.peso)) mejor = { d, q }
+    }
+    return mejor
+  }
+  const mx = cerca(g.x, x); const mz = cerca(g.z, z)
+  const que = []
+  if (mx) que.push(mx.q.que)
+  if (mz && (!mx || mz.q.que !== mx.q.que)) que.push(mz.q.que)
+  imantadoA = que.join(' y ')
+  return { x: mx ? mx.q.v : x, z: mz ? mz.q.v : z }
+}
+
+/**
+ * El punto de colocación, unos 90 píxeles por encima del dedo. Se pasa de
+ * píxeles a casillas con la proyección de la cámara, así vale con cualquier
+ * giro y cualquier zoom.
+ */
+function conPulgar (x, z) {
+  if (!desplazar) return { x, z }
+  const cam = typeof window !== 'undefined' ? window.baluarteCamara : null
+  if (!cam || typeof cam.proyectar !== 'function') return { x, z }
+  const p0 = cam.proyectar(x, z)
+  const pX = cam.proyectar(x + 1, z)
+  const pZ = cam.proyectar(x, z + 1)
+  const ax = pX.x - p0.x; const ay = pX.y - p0.y
+  const bx = pZ.x - p0.x; const by = pZ.y - p0.y
+  const det = ax * by - ay * bx
+  if (!det || !Number.isFinite(det)) return { x, z }
+  const oy = -PX_PULGAR
+  const nx = Math.round(x + (-oy * bx) / det)
+  const nz = Math.round(z + (ax * oy) / det)
+  return dentro(nx, nz) ? { x: nx, z: nz } : { x, z }
+}
+
+/* --- la capa que dibuja lo marcado sobre el suelo -------------------------- */
+
+const SVG_NS = 'http://www.w3.org/2000/svg'
+let capa = null
+
+function crearCapa () {
+  quitarCapa()
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('aria-hidden', 'true')
+  Object.assign(svg.style, {
+    position: 'fixed', left: '0', top: '0', width: '100%', height: '100%',
+    zIndex: '30', pointerEvents: 'none'
+  })
+  const camino = (relleno, borde) => {
+    const p = document.createElementNS(SVG_NS, 'path')
+    p.setAttribute('fill', relleno)
+    p.setAttribute('stroke', borde)
+    p.setAttribute('stroke-width', '1.5')
+    p.setAttribute('stroke-linejoin', 'round')
+    svg.appendChild(p)
+    return p
+  }
+  const verde = camino('rgba(96,190,104,.42)', 'rgba(32,96,40,.85)')
+  const rojo = camino('rgba(214,74,64,.42)', 'rgba(130,28,24,.9)')
+  const hilo = document.createElementNS(SVG_NS, 'line')
+  hilo.setAttribute('stroke', 'rgba(255,255,255,.75)')
+  hilo.setAttribute('stroke-width', '2')
+  hilo.setAttribute('stroke-dasharray', '5 5')
+  svg.appendChild(hilo)
+  const chip = el('div', {
+    clase: 'pequeño',
+    estilo: {
+      position: 'fixed', zIndex: '31', pointerEvents: 'none', display: 'none',
+      padding: '5px 10px', borderRadius: '999px', fontWeight: '900',
+      background: 'rgba(18,16,14,.86)', color: '#fff', whiteSpace: 'nowrap',
+      transform: 'translate(-50%,-100%)', boxShadow: 'var(--sombra-flotante)'
+    }
+  })
+  const raiz = document.getElementById('hud') || document.body
+  raiz.append(svg, chip)
+  capa = { svg, verde, rojo, hilo, chip, firma: '', rafaga: 0 }
+  capa.rafaga = requestAnimationFrame(pintarCapa)
+}
+
+function quitarCapa () {
+  if (!capa) return
+  cancelAnimationFrame(capa.rafaga)
+  capa.svg.remove(); capa.chip.remove()
+  capa = null
+}
+
+/** Se redibuja por frame (la cámara se mueve), pero solo se recalcula si cambió algo. */
+function pintarCapa () {
+  if (!capa) return
+  capa.rafaga = requestAnimationFrame(pintarCapa)
+  const cam = typeof window !== 'undefined' ? window.baluarteCamara : null
+  if (!cam || typeof cam.proyectar !== 'function') return
+  const quitarTramos = herramienta === 'quitar'
+  const celdas = quitarTramos ? marcadoQuitar : celdasMarcadas()
+  const pos = typeof cam.posicion === 'function' ? cam.posicion().map(n => Math.round(n * 10)).join(',') : ''
+  const firma = `${celdas.length}:${herramienta}:${pos}:${dedoPx ? 1 : 0}:${puntoUltimo ? `${puntoUltimo.x},${puntoUltimo.z}` : ''}`
+  if (firma === capa.firma) return
+  capa.firma = firma
+
+  if (!celdas.length) {
+    capa.verde.setAttribute('d', ''); capa.rojo.setAttribute('d', '')
+    capa.chip.style.display = 'none'
+  } else {
+    const m = mapaOcupado(null)
+    let dBien = ''; let dMal = ''
+    let cima = { x: 0, y: Infinity }
+    for (const c of celdas) {
+      const esq = [
+        cam.proyectar(c.x - 0.45, c.z - 0.45), cam.proyectar(c.x + 0.45, c.z - 0.45),
+        cam.proyectar(c.x + 0.45, c.z + 0.45), cam.proyectar(c.x - 0.45, c.z + 0.45)
+      ]
+      if (esq.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y) || Math.abs(p.x) > 6000 || Math.abs(p.y) > 6000)) continue
+      const d = `M${esq.map(p => `${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join('L')}Z`
+      if (!quitarTramos && cabeEn(m, c.x, c.z, 1, 1)) dBien += d
+      else dMal += d
+      for (const p of esq) if (p.y < cima.y) cima = { x: p.x, y: p.y }
+    }
+    capa.verde.setAttribute('d', dBien)
+    capa.rojo.setAttribute('d', dMal)
+    const p = previaMarcado()
+    capa.chip.textContent = quitarTramos
+      ? `🧹 ${p.total} tramo${p.total === 1 ? '' : 's'}`
+      : `${def(herramienta)?.icono || '🧱'} ${p.ok} tramo${p.ok === 1 ? '' : 's'}${p.malas ? ` · ${p.malas} ✖` : ''}`
+    if (Number.isFinite(cima.y)) {
+      capa.chip.style.display = 'block'
+      capa.chip.style.left = `${Math.max(60, Math.min(window.innerWidth - 60, cima.x))}px`
+      capa.chip.style.top = `${Math.max(46, cima.y - 12)}px`
+    } else capa.chip.style.display = 'none'
+  }
+
+  if (dedoPx && desplazar && puntoUltimo) {
+    const g = cam.proyectar(puntoUltimo.x, puntoUltimo.z)
+    capa.hilo.setAttribute('x1', dedoPx.x); capa.hilo.setAttribute('y1', dedoPx.y)
+    capa.hilo.setAttribute('x2', g.x); capa.hilo.setAttribute('y2', g.y)
+    capa.hilo.setAttribute('opacity', '1')
+  } else capa.hilo.setAttribute('opacity', '0')
+}
+
+/* ===========================================================================
    Gestos: el dedo sobre la aldea
    =========================================================================== */
 
@@ -193,12 +394,15 @@ function alBajarDedo (e) {
   if (!activo) return
   if (sobreInterfaz(e)) return
   dedos.add(e.pointerId)
-  if (dedos.size > 1) { gesto = null; return }     // pinza: la cámara, no la pieza
+  if (dedos.size > 1) { gesto = null; pintando = null; dedoPx = null; refrescar(); return }  // pinza: la cámara, no la pieza
+  if (desplazar == null) desplazar = e.pointerType !== 'mouse'
+  dedoPx = { x: e.clientX, y: e.clientY }
   gesto = { casillas: 0, movido: false, suelo: null, celda: null }
 }
 
 function alSubirDedo (e) {
   dedos.delete(e.pointerId)
+  dedoPx = null
   if (!activo || !gesto || dedos.size) return
   const g = gesto
   gesto = null
@@ -225,7 +429,16 @@ function alTocarCasilla (p) {
   // al levantar el dedo, y sin esta guarda el edificio que acabas de soltar se
   // quedaría otra vez pegado al dedo.
   if (!gesto) return
-  const x = p.x | 0; const z = p.z | 0
+  let x = p.x | 0; let z = p.z | 0
+  // muro, foso y borrador van con las ayudas de precisión: por encima del dedo
+  // e imantados a lo que ya hay. Mover una casa no las lleva: ahí el dedo tiene
+  // que caer sobre el edificio que quieres coger.
+  if (herramienta !== 'mover') {
+    const p2 = conPulgar(x, z)
+    const q = imantar(p2.x, p2.z)
+    x = q.x; z = q.z
+    puntoUltimo = { x, z }
+  }
   gesto.casillas++
   // «Movido» es haber cambiado de CASILLA, no haber recibido dos eventos: al
   // levantar el dedo, render/scene.js vuelve a emitir la misma casilla y un
@@ -234,7 +447,7 @@ function alTocarCasilla (p) {
   else if (gesto.celda !== `${x},${z}`) gesto.movido = true
 
   if (herramienta === 'muralla' || herramienta === 'foso') {
-    if (!pintando) pintando = { tipo: herramienta, x0: x, z0: z, celdas: [] }
+    if (!pintando) { paso++; pintando = { tipo: herramienta, x0: x, z0: z, celdas: [], paso } }
     pintando.celdas = celdasDelTrazo(pintando, x, z)
     const m = mapaOcupado(null)
     fantasma(pintando.tipo, x, z, 1, 1, 0, cabeEn(m, x, z, 1, 1))
@@ -244,7 +457,11 @@ function alTocarCasilla (p) {
   if (herramienta === 'quitar') {
     if (!quitando) quitando = { ids: new Set() }
     const b = edificioEn(x, z)
-    if (b && BORRABLE.has(b.tipo)) quitando.ids.add(b.id)
+    if (b && BORRABLE.has(b.tipo) && !marcadoQuitar.some(q => q.id === b.id)) {
+      quitando.ids.add(b.id)
+      marcadoQuitar.push({ id: b.id, x: b.x, z: b.z, tipo: b.tipo })
+      navigator.vibrate?.(6)
+    }
     refrescar()
     return
   }
@@ -413,34 +630,106 @@ function celdasDelTrazo (a, x, z) {
   return lista
 }
 
+/** Soltar el dedo NO encarga nada: solo guarda el trazo en lo marcado. */
 function soltarPincel () {
   const p = pintando
   pintando = null
   events.emit(EV.BUILD_MODE, { activo: true, tipo: null })
   if (!p || !p.celdas.length) { refrescar(); return }
+  for (const c of p.celdas) {
+    if (marcado.some(q => q.x === c.x && q.z === c.z && q.tipo === p.tipo)) continue
+    marcado.push({ x: c.x, z: c.z, tipo: p.tipo, paso: p.paso, modo: trazo })
+  }
+  navigator.vibrate?.(10)
+  refrescar()
+}
 
+/** Lo marcado ahora mismo: lo soltado más el trazo que va en el dedo. */
+function celdasMarcadas () {
+  const vivas = pintando
+    ? pintando.celdas.map(c => ({ x: c.x, z: c.z, tipo: pintando.tipo, paso: pintando.paso, modo: trazo }))
+    : []
+  const vistas = new Set(); const salida = []
+  for (const c of marcado.concat(vivas)) {
+    const k = `${c.x},${c.z}`
+    if (vistas.has(k)) continue
+    vistas.add(k); salida.push(c)
+  }
+  return salida
+}
+
+/** Cuántos tramos caben de lo marcado y qué cuestan. */
+function previaMarcado () {
+  if (herramienta === 'quitar') {
+    return { total: marcadoQuitar.length, ok: marcadoQuitar.length, malas: 0, piedra: 0 }
+  }
+  const celdas = celdasMarcadas()
+  const m = mapaOcupado(null)
+  let ok = 0; let malas = 0; let piedra = 0
+  for (const c of celdas) {
+    if (cabeEn(m, c.x, c.z, 1, 1)) { ok++; piedra += def(c.tipo)?.coste(1)?.piedra || 0 } else malas++
+  }
+  return { total: celdas.length, ok, malas, piedra }
+}
+
+/** El botón: aquí y solo aquí se encarga obra. */
+function levantarMarcado () {
+  const celdas = celdasMarcadas()
+  if (!celdas.length) { toast('Marca primero el trazado con el dedo', 'info', 1800); return }
   const hueco = huecosEnCola()
   const m = mapaOcupado(null)
   let puestos = 0; let sinCola = 0; let sinSitio = 0
-  for (const c of p.celdas) {
+  const restan = []
+  for (const c of celdas) {
     if (!cabeEn(m, c.x, c.z, 1, 1)) { sinSitio++; continue }
-    if (puestos >= hueco) { sinCola++; continue }
-    const b = OBRA.colocar(p.tipo, c.x, c.z, 0)
-    if (!b) { sinCola++; continue }
+    if (puestos >= hueco) { sinCola++; restan.push(c); continue }
+    const b = OBRA.colocar(c.tipo, c.x, c.z, 0)
+    if (!b) { sinCola++; restan.push(c); continue }
     m[c.z * G + c.x] = 1
     puestos++
   }
-  if (puestos) toast(`${def(p.tipo).icono} ${puestos} encargado${puestos > 1 ? 's' : ''}`, 'bien', 1800)
-  if (sinCola) toast(`${sinCola} tramos no caben hoy en la cola de obras. Vuelve cuando se vacíe.`, 'info', 4200)
+  // lo que no cupo en la cola se queda marcado para encargarlo en cuanto haya sitio
+  marcado = restan
+  pintando = null
+  if (puestos) toast(`${def(celdas[0].tipo).icono} ${puestos} encargado${puestos > 1 ? 's' : ''}`, 'bien', 1800)
+  if (sinCola) toast(`${sinCola} tramos no caben hoy en la cola de obras: siguen marcados`, 'info', 4200)
   else if (!puestos && sinSitio) toast('Ahí no cabe ni un tramo', 'mal', 1800)
+  olvidarGuias()
   apuntar()
 }
 
-async function soltarQuitar () {
-  const q = quitando
+/** Deshacer mientras dibujas: en libre la última casilla, en línea y recinto el trazo. */
+function deshacerTramo () {
+  if (herramienta === 'quitar') {
+    if (!marcadoQuitar.length) { toast('No hay nada marcado', 'info', 1400); return }
+    const q = marcadoQuitar.pop()
+    quitando?.ids.delete(q.id)
+    refrescar()
+    return
+  }
+  if (!marcado.length) { toast('No hay trazado que deshacer', 'info', 1400); return }
+  const ultimo = marcado[marcado.length - 1]
+  if (ultimo.modo === 'libre') marcado.pop()
+  else while (marcado.length && marcado[marcado.length - 1].paso === ultimo.paso) marcado.pop()
+  navigator.vibrate?.(8)
+  refrescar()
+}
+
+function borrarMarcado () {
+  marcado = []; marcadoQuitar = []; pintando = null; quitando = null; paso = 0
+  refrescar()
+}
+
+/** El borrador tampoco quita al levantar el dedo: marca y se confirma abajo. */
+function soltarQuitar () {
   quitando = null
-  if (!q || !q.ids.size) { toast('El borrador solo quita muros, puertas y fosos', 'info', 2200); refrescar(); return }
-  const n = q.ids.size
+  if (!marcadoQuitar.length) { toast('El borrador solo quita muros, puertas y fosos', 'info', 2200) }
+  refrescar()
+}
+
+async function quitarMarcados () {
+  if (!marcadoQuitar.length) { toast('Barre los tramos que quieras quitar', 'info', 1800); return }
+  const n = marcadoQuitar.length
   const si = await confirmar({
     titulo: '¿Quitar?',
     texto: `Se demolerán ${n} tramo${n > 1 ? 's' : ''}. Te devuelven la mitad de lo invertido. Esto no se puede deshacer.`,
@@ -448,7 +737,9 @@ async function soltarQuitar () {
   })
   if (!si) { refrescar(); return }
   let fuera = 0
-  for (const id of q.ids) if (OBRA.demoler(id)) fuera++
+  for (const q of marcadoQuitar) if (OBRA.demoler(q.id)) fuera++
+  marcadoQuitar = []
+  olvidarGuias()
   toast(`🧹 ${fuera} tramo${fuera > 1 ? 's' : ''} fuera`, 'bien', 1600)
   apuntar()
 }
@@ -787,9 +1078,9 @@ const HERRAMIENTAS = [
 ]
 
 const TRAZOS = [
-  { id: 'libre', texto: '✏️ Libre' },
   { id: 'linea', texto: '📏 Línea' },
-  { id: 'rect', texto: '⬛ Recinto' }
+  { id: 'rect', texto: '▭ Recinto' },
+  { id: 'libre', texto: '✏️ Libre' }
 ]
 
 function asegurarCss () {
@@ -815,6 +1106,7 @@ function botonHerramienta (h) {
       if (h.id === 'mas') { abrirMas(); return }
       herramienta = h.id
       cancelarLlevar()
+      borrarMarcado()               // cambiar de herramienta no arrastra marcas de la anterior
       if (h.id !== 'mover') elegidos.clear()
       events.emit(EV.BUILD_MODE, { activo: true, tipo: null })
       refrescar()
@@ -936,17 +1228,51 @@ function refrescar () {
   // --- la tira contextual ---
   const ctx = nodos.contexto
   vaciar(ctx)
+  ctx.style.flexDirection = 'row'
   const pintaMuro = PINTABLES.has(herramienta)
-  if (pintaMuro) {
+  const previa = (pintaMuro || herramienta === 'quitar') ? previaMarcado() : null
+  if (pintaMuro || herramienta === 'quitar') {
     ctx.style.display = 'flex'
-    for (const t of TRAZOS) {
-      const on = trazo === t.id
-      ctx.appendChild(el('button', {
-        clase: 'btn btn-piedra', type: 'button', texto: t.texto,
-        estilo: { flex: '1', minHeight: '44px', fontSize: '.78em', background: on ? 'linear-gradient(180deg,var(--oro-claro),var(--oro))' : '', borderColor: on ? 'var(--oro-oscuro)' : '' },
-        onclick: () => { trazo = t.id; refrescar() }
-      }))
+    ctx.style.flexDirection = 'column'
+    ctx.style.alignItems = 'stretch'
+    if (pintaMuro) {
+      const modos = el('div', { estilo: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' } })
+      for (const t of TRAZOS) {
+        const on = trazo === t.id
+        modos.appendChild(el('button', {
+          clase: 'btn btn-piedra', type: 'button', texto: t.texto,
+          estilo: { minHeight: '48px', fontSize: '.78em', fontWeight: '800', background: on ? 'linear-gradient(180deg,var(--oro-claro),var(--oro))' : '', borderColor: on ? 'var(--oro-oscuro)' : '' },
+          onclick: () => { trazo = t.id; refrescar() }
+        }))
+      }
+      ctx.appendChild(modos)
     }
+    const acciones = el('div', { estilo: { display: 'grid', gridTemplateColumns: 'auto auto 1fr', gap: '6px', marginTop: '6px' } })
+    acciones.appendChild(el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '↶', 'aria-label': 'Deshacer el último tramo',
+      estilo: { minWidth: '48px', minHeight: '48px', fontSize: '1.2em' },
+      onclick: () => deshacerTramo()
+    }))
+    acciones.appendChild(el('button', {
+      clase: 'btn btn-piedra', type: 'button', texto: '👆', 'aria-label': 'Colocar por encima del dedo',
+      estilo: { minWidth: '48px', minHeight: '48px', background: desplazar ? 'linear-gradient(180deg,var(--oro-claro),var(--oro))' : '', borderColor: desplazar ? 'var(--oro-oscuro)' : '' },
+      onclick: () => {
+        desplazar = !desplazar
+        toast(desplazar ? '👆 Se coloca por encima del dedo' : '👆 Se coloca bajo el dedo', 'info', 1600)
+        refrescar()
+      }
+    }))
+    const n = previa.ok
+    acciones.appendChild(el('button', {
+      clase: n ? 'btn btn-oro' : 'btn btn-piedra', type: 'button',
+      texto: herramienta === 'quitar'
+        ? (n ? `🧹 Quitar ${n}` : 'Nada marcado')
+        : n ? `🧱 Levantar ${n}` : 'Marca el trazado',
+      estilo: { minHeight: '48px', fontWeight: '900', fontSize: '.9em' },
+      disabled: !n,
+      onclick: () => (herramienta === 'quitar' ? quitarMarcados() : levantarMarcado())
+    }))
+    ctx.appendChild(acciones)
   } else if (llevando && llevando.desdeCaja) {
     ctx.style.display = 'flex'
     ctx.appendChild(el('button', {
@@ -986,18 +1312,17 @@ function refrescar () {
       ? `✅ Cabe aquí${a ? ` · a escuadra con ${a} vecino${a > 1 ? 's' : ''}` : ''}`
       : `⛔ ${llevando.motivo || 'Ahí no cabe'}`
     color = llevando.valido ? 'var(--verde-oscuro)' : 'var(--rojo)'
-  } else if (pintando) {
-    const n = pintando.celdas.length
-    const c = def(pintando.tipo)?.coste(1)?.piedra || 0
-    txt = `${def(pintando.tipo).icono} ${n} tramo${n > 1 ? 's' : ''} · 🪨 ${formatoNumero(n * c)}`
-  } else if (quitando) {
-    txt = `🧹 ${quitando.ids.size} tramo${quitando.ids.size === 1 ? '' : 's'} marcados`
+  } else if (previa && previa.total) {
+    txt = herramienta === 'quitar'
+      ? `🧹 ${previa.total} tramo${previa.total === 1 ? '' : 's'} marcados · confirma abajo`
+      : `${def(herramienta).icono} ${previa.ok} tramo${previa.ok === 1 ? '' : 's'} marcados · 🪨 ${formatoNumero(previa.piedra)}${previa.malas ? ` · ${previa.malas} no caben` : ''}${imantadoA ? ` · imantado ${imantadoA}` : ''}`
+    color = previa.malas ? 'var(--madera)' : 'var(--verde-oscuro)'
   } else if (herramienta === 'mover') {
     txt = 'Arrastra un edificio para moverlo: gratis y sin esperas. Dos dedos mueven la cámara.'
   } else if (pintaMuro) {
-    txt = `Arrastra para pintar ${def(herramienta).nombre.toLowerCase()}. Caben ${huecosEnCola()} encargos más.`
+    txt = `Arrastra para marcar ${def(herramienta).nombre.toLowerCase()}: nada se encarga hasta el botón. Caben ${huecosEnCola()} encargos más.`
   } else {
-    txt = 'Barre los muros o fosos que quieras quitar.'
+    txt = 'Barre los muros o fosos que sobren y confirma abajo.'
   }
   if (nodos.aviso.textContent !== txt) nodos.aviso.textContent = txt
   nodos.aviso.style.color = color || 'var(--tinta-suave)'
@@ -1053,9 +1378,11 @@ export function abrir () {
 
   activo = true
   herramienta = 'mover'
-  trazo = 'libre'
+  trazo = 'linea'
   elegidos.clear()
   llevando = null; pintando = null; quitando = null; gesto = null
+  marcado = []; marcadoQuitar = []; paso = 0; puntoUltimo = null; dedoPx = null
+  olvidarGuias()
   huecoMirado = 0
 
   OBRA.iniciarReorganizacion()
@@ -1072,6 +1399,7 @@ export function abrir () {
   events.emit(EV.BUILD_MODE, { activo: true, tipo: null })
 
   montar()
+  crearCapa()
   verBoton(false)
   analizar()
   refrescar()
@@ -1082,6 +1410,8 @@ export function cerrar (guardado = false) {
   if (!activo) return
   activo = false
   llevando = null; pintando = null; quitando = null; gesto = null
+  marcado = []; marcadoQuitar = []; paso = 0; puntoUltimo = null; dedoPx = null
+  quitarCapa()
   elegidos.clear()
   pila.length = 0
   pilaPos = -1
@@ -1141,8 +1471,19 @@ export function init () {
       get llevando () { return llevando },
       get elegidos () { return [...elegidos] },
       get analisis () { return analisis },
-      herramienta: (h) => { herramienta = h; refrescar() },
-      trazo: (t) => { trazo = t; refrescar() }
+      herramienta: (h) => { herramienta = h; borrarMarcado(); refrescar() },
+      trazo: (t) => { trazo = t; refrescar() },
+      // para las pruebas: marcar sin dedo, deshacer y confirmar aparte
+      marcar: (ax, az, bx, bz) => {
+        paso++
+        pintando = { tipo: herramienta, x0: ax, z0: az, celdas: [], paso }
+        pintando.celdas = celdasDelTrazo(pintando, bx, bz)
+        soltarPincel()
+        return previaMarcado()
+      },
+      levantar: () => levantarMarcado(),
+      deshacerTramo: () => deshacerTramo(),
+      previa: () => previaMarcado()
     }
   }
 }
