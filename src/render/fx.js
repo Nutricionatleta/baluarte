@@ -861,6 +861,7 @@ function montarNubes (scene) {
 }
 
 function colocarNubes () {
+  if (!mallaNubes) return          // las nubes ya no se montan: ver montarNubes
   for (let i = 0; i < nubes.length; i++) {
     const n = nubes[i]
     for (let j = 0; j < 3; j++) {
@@ -1119,7 +1120,11 @@ export function init () {
       if (!scene.background || !scene.background.isColor) scene.background = new THREE.Color(PALETA.cielo)
       montarCielo(scene)
       montarLucesNoche(scene)
-      if (ambiente) { montarNubes(scene); montarPajaros(scene); montarMariposas(scene) }
+      // Las nubes, FUERA. Volaban a 11-15 de altura y la cámara está a 27: se
+      // cruzaban por delante de la aldea y, sin la niebla que antes las
+      // disimulaba, tapaban media pantalla con una lámina blanca. Pájaros y
+      // mariposas se quedan: vuelan bajos y no estorban.
+      if (ambiente) { montarPajaros(scene); montarMariposas(scene) }
     }
 
     recolocarMariposas()

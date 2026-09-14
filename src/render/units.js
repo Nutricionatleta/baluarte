@@ -41,21 +41,53 @@ const geoL = (clave, crear) => {
   if (!geoCache.has(clave)) geoCache.set(clave, crear())
   return geoCache.get(clave)
 }
+/**
+ * Prisma de cantos verticales redondeados. Es el volumen con el que está hecha
+ * toda la gente del juego: una caja pelada se ve tosca a cualquier tamaño y un
+ * cilindro no tiene "frente". Con los cuatro cantos cortados la figura se ve
+ * modelada y no pierde ni una cara plana.
+ * Cuesta 28 triángulos en vez de 12, así que se reserva para los VOLÚMENES
+ * grandes (cabeza, torso, muslos); los detallitos siguen con `G.caja`.
+ */
+function prismaR (chaflan) {
+  const h = 0.5
+  const c = Math.min(0.45, chaflan)
+  const s = new THREE.Shape()
+  s.moveTo(-h + c, -h); s.lineTo(h - c, -h); s.lineTo(h, -h + c); s.lineTo(h, h - c)
+  s.lineTo(h - c, h); s.lineTo(-h + c, h); s.lineTo(-h, h - c); s.lineTo(-h, -h + c)
+  s.closePath()
+  const g = new THREE.ExtrudeGeometry(s, { depth: 1, bevelEnabled: false, curveSegments: 1, steps: 1 })
+  g.rotateX(-Math.PI / 2)      // la extrusión sale en Z; la altura la queremos en Y
+  g.translate(0, -0.5, 0)      // centrado en el origen como el resto de geometrías
+  g.computeVertexNormals()
+  return g
+}
+
 const GL = {
-  /** Tronco de cono suave: faldones de túnica, capuchas, capacetes. */
+  /** El volumen de siempre: caja con los cantos comidos. Torso, cabeza, muslos. */
+  get cajaR () { return geoL('cajaR', () => prismaR(0.17)) },
+  /** Chaflán exagerado: casi un tonel. Fardos, sacos y cabezas muy redondas. */
+  /** Cabeza: el chaflán más marcado, que es lo que más se mira. */
+  get cabezaR () { return geoL('cabezaR', () => prismaR(0.24)) },
+  get bloqueR () { return geoL('bloqueR', () => prismaR(0.3)) },
+  /** Tronco de cono suave: faldones pequeños, capuchas, capacetes. */
   get campana () { return geoL('campana', () => new THREE.CylinderGeometry(0.40, 0.5, 1, 6)) },
+  /** El mismo faldón con ocho caras: el que se ve de cerca, ya redondo. */
+  get campana8 () { return geoL('campana8', () => new THREE.CylinderGeometry(0.40, 0.5, 1, 8)) },
   /** Campana muy abierta: el hábito del monje y el ala de los sombreros. */
   get campanaAncha () { return geoL('campanaAncha', () => new THREE.CylinderGeometry(0.26, 0.5, 1, 8)) },
-  /** Cúpula: cascos redondeados. */
-  get cupula () { return geoL('cupula', () => new THREE.SphereGeometry(0.5, 6, 4, 0, TAU, 0, Math.PI / 2)) },
+  /** Cúpula de ocho gajos: cascos, hombros y remates. Redonda y barata. */
+  get cupula () { return geoL('cupula', () => new THREE.SphereGeometry(0.5, 8, 2, 0, TAU, 0, Math.PI / 2)) },
   /** Arco del arquero: un toro abierto, la silueta más reconocible que hay. */
-  get arco () { return geoL('arco', () => new THREE.TorusGeometry(0.5, 0.05, 3, 8, Math.PI * 0.95)) },
+  get arco () { return geoL('arco', () => new THREE.TorusGeometry(0.5, 0.075, 3, 8, Math.PI * 0.95)) },
   /** Aro fino: la corona de pelo del monje. */
   get aro () { return geoL('aro', () => new THREE.TorusGeometry(0.5, 0.09, 3, 8)) },
   /** Llanta de hierro: fina, o la rueda parece un neumático. */
   get llanta () { return geoL('llanta', () => new THREE.TorusGeometry(0.5, 0.045, 3, 8)) },
   /** Rueda de carro: cilindro tumbado con radios ya insinuados por las caras. */
-  get rueda () { return geoL('rueda', () => new THREE.CylinderGeometry(0.5, 0.5, 1, 8)) }
+  get rueda () { return geoL('rueda', () => new THREE.CylinderGeometry(0.5, 0.5, 1, 8)) },
+  /** Disco de ocho caras: escudos redondos. Tumbado con rz = PI/2. */
+  get disco () { return geoL('disco', () => new THREE.CylinderGeometry(0.5, 0.5, 1, 8)) }
 }
 
 // ── librea: los materiales que cambian de una figura a otra ────────────────
@@ -64,9 +96,13 @@ function paletas () {
   if (libreas) return libreas
   libreas = {
     piel: [mat(PALETA.pielClara), mat(PALETA.pielMedia), mat(PALETA.pielTostada), mat(PALETA.pielOscura)],
+    // OJO: esta variedad es SOLO para el aldeano sin oficio. Va toda en tonos
+    // apagados y terrosos a propósito: los colores saturados están reservados a
+    // los gremios (ver COLOR_OFICIO), y si un paisano se vistiera de morado
+    // pasaría por minero desde la cámara del juego.
     ropa: [
-      mat(PALETA.ropaAldeano), mat(PALETA.ropaAldeana), mat(PALETA.ropaVerde),
-      mat(PALETA.ropaOcre), mat(PALETA.ropaAzulon), mat(PALETA.ropaGranate), mat(PALETA.ropaCruda)
+      mat(PALETA.ropaCruda), mat(PALETA.ropaAldeano), mat(PALETA.cueroClaro),
+      mat(PALETA.calzas), mat(PALETA.paja), mat(PALETA.adobe), mat(PALETA.tierra)
     ],
     ropaOsc: [
       mat(PALETA.cuero), mat(PALETA.calzas), mat(PALETA.copaPino),
@@ -74,9 +110,24 @@ function paletas () {
     ],
     pelo: [mat(PALETA.pelo), mat(PALETA.peloClaro), mat(PALETA.peloCano), mat(PALETA.tejadoOscuro)],
     bando: { jugador: mat(PALETA.estandarte), enemigo: mat(PALETA.enemigo) },
-    bandoOsc: { jugador: mat(PALETA.tejadoAzul), enemigo: mat(PALETA.tejadoOscuro) }
+    bandoOsc: { jugador: mat(PALETA.tejadoAzul), enemigo: mat(PALETA.enemigoOscuro) }
   }
   return libreas
+}
+
+/**
+ * CÓDIGO DE COLOR POR OFICIO. Lo primero que se lee desde la cámara del juego
+ * no es la cara ni la herramienta: es la mancha de color de la túnica. Cada
+ * oficio tiene la suya, siempre la misma, y ninguna es azul ni roja porque esos
+ * dos son los bandos de la tropa. La variedad de cada aldeano se va a la piel,
+ * al pelo y a las calzas, que no llevan información.
+ */
+const COLOR_OFICIO = {
+  lenador: PALETA.oficioLena,        // verde bosque + hacha al hombro
+  cantero: PALETA.oficioPiedra,      // gris cantera + pico en alto
+  granjero: PALETA.oficioComida,     // amarillo mies + sombrero de paja
+  minero: PALETA.oficioOro,          // marrón galería + casco y candil
+  constructor: PALETA.oficioObra     // naranja de obra + escalera al hombro
 }
 
 /** Malla con "rol": el rol dice qué materiales se le cambian a cada clon. */
@@ -99,26 +150,31 @@ const hueso = (nombre, x, y, z) => {
 // ════════════════════════════════════════════════════════════════════════
 
 /**
- * Esqueleto común de todo bípedo: piernas con botas, cuerpo con faldón,
- * cabeza cabezona y dos brazos con su mano. Devuelve los grupos para que
- * cada unidad le cuelgue lo suyo.
+ * Esqueleto común de todo bípedo.
+ *
+ * PROPORCIÓN DE JUGUETE (Clash of Clans pasado por Stellar Settlers): cabezón,
+ * de hombros redondos y anchos, sin cuello, con manos de bola y botas grandes.
+ * No es capricho: a 35 píxeles de alto lo único que se lee de una figura es la
+ * relación entre tres manchas —cabeza, tronco y lo que lleva en las manos—, y
+ * cuanto más grandes son la cabeza y las manos, más se lee. Estilizarla la
+ * convierte en un palo.
  */
 function esqueleto (cfg = {}) {
   const raiz = new THREE.Group()
   const mCalza = cfg.calza || mat(PALETA.calzas)
   const mBota = cfg.bota || mat(PALETA.cuero)
   const mTorso = cfg.torso || mat(PALETA.ropaAldeano)
+  const mPiel = cfg.piel || mat(PALETA.pielClara)
   const rolTorso = cfg.rolTorso === null ? null : (cfg.rolTorso || 'ropa')
   const rolBrazo = cfg.rolBrazo === null ? null : (cfg.rolBrazo || rolTorso)
 
-  // Proporción de muñeco: ancho de hombros casi la mitad de la altura y
-  // cabezón. Si se estiliza, desde la cámara del juego parece un palo.
-  const piernaI = hueso('piernaI', -0.075, CADERA, 0)
-  const piernaD = hueso('piernaD', 0.075, CADERA, 0)
+  const piernaI = hueso('piernaI', -0.082, CADERA, 0)
+  const piernaD = hueso('piernaD', 0.082, CADERA, 0)
   if (!cfg.sinPiernas) {
     for (const g of [piernaI, piernaD]) {
-      g.add(trozo(G.caja, mCalza, { y: -0.12, sx: 0.095, sy: 0.24, sz: 0.1 }))
-      g.add(trozo(G.caja, mBota, { y: -0.271, z: 0.026, sx: 0.108, sy: 0.058, sz: 0.15 }))
+      g.add(trozo(G.caja, mCalza, { y: -0.115, sx: 0.105, sy: 0.23, sz: 0.11 }, cfg.rolCalza || null))
+      // botaza: el pie marcado es lo que impide que el paso parezca un patín
+      g.add(trozo(G.caja, mBota, { y: -0.258, z: 0.028, sx: 0.125, sy: 0.07, sz: 0.165 }))
     }
   }
   raiz.add(piernaI, piernaD)
@@ -126,42 +182,55 @@ function esqueleto (cfg = {}) {
   const cuerpo = hueso('cuerpo', 0, CADERA, 0)
   raiz.add(cuerpo)
 
-  const torso = trozo(G.caja, mTorso, { y: 0.175, sx: 0.31, sy: 0.215, sz: 0.2 }, rolTorso)
+  const torso = trozo(GL.cajaR, mTorso, { y: 0.165, sx: 0.315, sy: 0.22, sz: 0.215 }, rolTorso)
   torso.name = 'torso'
   cuerpo.add(torso)
+  // hombros de cúpula: el remate redondo que convierte la caja en un muñeco.
+  // Es además lo primero que se ve desde arriba, así que va del color de la ropa.
+  if (cfg.hombros !== false) {
+    cuerpo.add(trozo(GL.cupula, cfg.hombroMat || mTorso,
+      { y: 0.275, sx: 0.365, sy: 0.105, sz: 0.245 }, cfg.rolHombro ?? rolTorso))
+  }
 
   // faldón: lo que convierte un muñeco en un medieval con túnica
   if (cfg.faldon !== false) {
     const alto = cfg.faldonAlto ?? 0.2
     cuerpo.add(trozo(GL.campana, cfg.faldonMat || mTorso,
-      { y: 0.07 - alto / 2, sx: 0.34, sy: alto, sz: 0.27 }, cfg.rolFaldon ?? rolTorso))
+      { y: 0.07 - alto / 2, sx: 0.37, sy: alto, sz: 0.3 }, cfg.rolFaldon ?? rolTorso))
   }
   if (cfg.cinturon !== false) {
     cuerpo.add(trozo(G.caja, cfg.cinturonMat || mat(PALETA.cuero),
-      { y: 0.072, sx: 0.345, sy: 0.038, sz: 0.235 }, cfg.rolCinturon || null))
-    cuerpo.add(trozo(G.caja, cfg.cinturonMat || mat(PALETA.oro),
-      { y: 0.072, z: 0.12, sx: 0.055, sy: 0.048, sz: 0.02, detalle: true }))
+      { y: 0.068, sx: 0.36, sy: 0.042, sz: 0.25 }, cfg.rolCinturon || null))
   }
 
-  const cabeza = hueso('cabeza', 0, 0.3, 0)
+  // sin cuello a propósito: la cabeza descansa sobre los hombros redondos, que
+  // es lo que hace la cara de juguete. Un cuello estiliza, y aquí no interesa.
+  const cabeza = hueso('cabeza', 0, 0.325, 0)
   cuerpo.add(cabeza)
-  // cuello: un dedo de piel entre el cuerpo y la cabeza. Sin él, la figura
-  // es una columna de un solo bloque y desde arriba no se le ve la cabeza.
-  cuerpo.add(trozo(G.caja, cfg.piel || mat(PALETA.pielClara),
-    { y: 0.275, sx: 0.11, sy: 0.06, sz: 0.11, detalle: true }, 'piel'))
-  const craneo = trozo(G.caja, cfg.piel || mat(PALETA.pielClara),
-    { y: 0.1, sx: 0.235, sy: 0.205, sz: 0.215 }, 'piel')
+  // LA CABEZA ES UNA CARETA. El cráneo lleva el color del TOCADO (capucha, pelo,
+  // almófar) y la cara es un panel de piel pegado delante. Se hace así porque la
+  // cámara mira desde arriba: una capucha puesta encima de una cabeza de carne
+  // tapa justo la coronilla y deja un ladrillo de piel del ancho del cuerpo, y
+  // la figura se lee como un tótem. Con la careta se ve tocado Y cara, y encima
+  // cuesta ochenta triángulos menos que modelar la capucha hueca.
+  const craneo = trozo(GL.cabezaR, cfg.craneoMat || mPiel,
+    { y: 0.125, sx: 0.295, sy: 0.275, sz: 0.28 }, cfg.rolCraneo === null ? null : (cfg.rolCraneo || 'piel'))
   craneo.name = 'craneo'
   cabeza.add(craneo)
-  cabeza.add(trozo(G.caja, cfg.piel || mat(PALETA.pielClara),
-    { y: 0.09, z: 0.12, sx: 0.05, sy: 0.046, sz: 0.04, detalle: true }, 'piel'))
+  cabeza.add(trozo(G.caja, mPiel, { y: 0.09, z: 0.145, sx: 0.2, sy: 0.175, sz: 0.03 }, 'piel'))
+  // dos ojos: desde la cámara del juego no se ven, pero de cerca son lo que hace
+  // que el muñeco MIRE. Van como detalle: en calidad baja ni se generan.
+  for (const x of [-0.052, 0.052]) {
+    cabeza.add(trozo(G.caja, mat(PALETA.carbon), { x, y: 0.125, z: 0.162, sx: 0.034, sy: 0.05, sz: 0.016, detalle: true }))
+  }
 
-  const brazoI = hueso('brazoI', -0.185, 0.245, 0)
-  const brazoD = hueso('brazoD', 0.185, 0.245, 0)
+  const brazoI = hueso('brazoI', -0.2, 0.265, 0)
+  const brazoD = hueso('brazoD', 0.2, 0.265, 0)
   for (const b of [brazoI, brazoD]) {
-    b.add(trozo(G.caja, cfg.brazoMat || mTorso, { y: -0.1, sx: 0.085, sy: 0.2, sz: 0.095 }, rolBrazo))
+    b.add(trozo(G.caja, cfg.brazoMat || mTorso, { y: -0.095, sx: 0.088, sy: 0.19, sz: 0.098 }, rolBrazo))
     const mano = hueso(b === brazoI ? 'manoI' : 'manoD', 0, -0.215, 0)
-    mano.add(trozo(G.caja, cfg.piel || mat(PALETA.pielClara), { sx: 0.088, sy: 0.078, sz: 0.095 }, 'piel'))
+    // manopla de bola: se ve a cualquier distancia y da el aire de juguete
+    mano.add(trozo(G.esfera, mPiel, { sx: 0.125, sy: 0.115, sz: 0.125 }, 'piel'))
     b.add(mano)
   }
   cuerpo.add(brazoI, brazoD)
@@ -171,70 +240,101 @@ function esqueleto (cfg = {}) {
 }
 
 /** Caperuza puntiaguda: la firma del aldeano medieval. */
-function caperuza (cabeza, material, rol = 'ropaOsc') {
-  cabeza.add(trozo(GL.campana, material, { y: 0.215, sx: 0.275, sy: 0.115, sz: 0.275 }, rol))
+/**
+ * El pico y la esclavina de la capucha. El casquete en sí es el propio cráneo
+ * (ver esqueleto): aquí solo va lo que sobresale de la cabeza, que es lo que
+ * de verdad dibuja la silueta.
+ */
+function caperuza (cabeza, material, rol = null) {
+  const m = material || mat(PALETA.cuero)
   // el pico cae hacia atrás: si apunta al cielo, el aldeano parece un duende
-  cabeza.add(trozo(G.cono6, material, { y: 0.265, z: -0.07, rx: 0.85, sx: 0.17, sy: 0.18, sz: 0.17 }, rol))
+  cabeza.add(trozo(G.cono6, m, { y: 0.26, z: -0.15, rx: 1.0, sx: 0.17, sy: 0.28, sz: 0.17 }, rol))
   // esclavina: la capita corta que cae sobre los hombros
-  cabeza.add(trozo(GL.campana, material, { y: -0.04, sx: 0.31, sy: 0.065, sz: 0.28, detalle: true }, rol))
+  cabeza.add(trozo(GL.campana, m, { y: -0.045, sx: 0.35, sy: 0.08, sz: 0.32 }, rol))
 }
 
 /** Melena sencilla para los que van descubiertos. */
+/** Melena que asoma por los lados: el cráneo ya va teñido de pelo. */
 function pelambre (cabeza) {
-  cabeza.add(trozo(G.caja, mat(PALETA.pelo), { y: 0.185, sx: 0.245, sy: 0.065, sz: 0.23 }, 'pelo'))
-  cabeza.add(trozo(G.caja, mat(PALETA.pelo), { y: 0.1, z: -0.108, sx: 0.235, sy: 0.14, sz: 0.035 }, 'pelo'))
+  for (const x of [-0.14, 0.14]) {
+    cabeza.add(trozo(G.caja, mat(PALETA.pelo), { x, y: 0.045, z: 0.01, sx: 0.045, sy: 0.13, sz: 0.2 }, 'pelo'))
+  }
 }
 
 // ── herramientas de oficio ────────────────────────────────────────────────
-/** Hacha de leñador: mango largo y hoja ancha de hierro. */
+// Desde arriba, la herramienta es la MITAD de la silueta: por eso van todas
+// grandes, altas y asomando por fuera del contorno del cuerpo.
+
+/** Hacha al hombro: mango largo caído hacia atrás y hoja ancha de hierro arriba. */
 function hacha (mano) {
-  mano.add(trozo(G.cilindro6, mat(PALETA.madera), { y: -0.04, rx: 0.25, sx: 0.03, sy: 0.42, sz: 0.03 }))
-  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: 0.16, z: -0.048, sx: 0.04, sy: 0.12, sz: 0.1 }))
-  mano.add(trozo(G.cono, mat(PALETA.hierro), { y: 0.165, z: -0.11, rx: Math.PI / 2, rz: Math.PI / 4, sx: 0.13, sy: 0.07, sz: 0.13 }))
+  mano.add(trozo(G.cilindro6, mat(PALETA.madera), { y: 0.2, z: -0.13, rx: -0.55, sx: 0.036, sy: 0.68, sz: 0.036 }))
+  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: 0.5, z: -0.33, rx: -0.55, sx: 0.05, sy: 0.23, sz: 0.15 }))
+  mano.add(trozo(G.cono, mat(PALETA.aceroClaro),
+    { y: 0.5, z: -0.42, rx: Math.PI / 2 - 0.55, rz: Math.PI / 4, sx: 0.2, sy: 0.09, sz: 0.2 }))
 }
 
-/** Pico de cantero: cabeza estrecha y cruzada. */
+/** Pico de cantero, en alto: la cabeza cruza el aire por encima del hombro. */
 function pico (mano) {
-  mano.add(trozo(G.cilindro6, mat(PALETA.madera), { y: -0.02, rx: 0.2, sx: 0.028, sy: 0.36, sz: 0.028 }))
-  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: 0.155, rz: 0.25, sx: 0.3, sy: 0.035, sz: 0.04 }))
+  mano.add(trozo(G.cilindro6, mat(PALETA.madera), { y: 0.18, z: -0.1, rx: -0.45, sx: 0.034, sy: 0.6, sz: 0.034 }))
+  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: 0.46, z: -0.24, rz: 0.28, sx: 0.44, sy: 0.045, sz: 0.05 }))
+  mano.add(trozo(G.cono6, mat(PALETA.aceroClaro),
+    { x: 0.21, y: 0.52, z: -0.24, rz: -1.28, sx: 0.055, sy: 0.12, sz: 0.055, detalle: true }))
 }
 
-/** Hoz: media luna de hierro. Con el sombrero de paja no hay confusión posible. */
+/** Hoz: media luna de hierro bien ancha. Con el sombrero no hay confusión posible. */
 function hoz (mano) {
-  mano.add(trozo(G.cilindro6, mat(PALETA.madera), { y: -0.06, sx: 0.03, sy: 0.16, sz: 0.03 }))
-  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: 0.02, z: 0.07, rx: 0.9, sx: 0.03, sy: 0.16, sz: 0.02 }))
-  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: 0.05, z: 0.16, rx: 1.7, sx: 0.03, sy: 0.14, sz: 0.02 }))
+  mano.add(trozo(G.caja, mat(PALETA.madera), { y: -0.07, sx: 0.038, sy: 0.18, sz: 0.04 }))
+  mano.add(trozo(G.caja, mat(PALETA.aceroClaro), { y: 0.0, z: 0.11, rx: 0.95, sx: 0.035, sy: 0.24, sz: 0.03 }))
+  mano.add(trozo(G.caja, mat(PALETA.aceroClaro), { y: 0.06, z: 0.25, rx: 1.75, sx: 0.035, sy: 0.2, sz: 0.03 }))
 }
 
-/** Candil del minero: la única luz de la mina. */
+/** Candil del minero: la mancha amarilla que lo delata en la boca de la mina. */
 function candil (mano) {
-  mano.add(trozo(G.cilindro6, mat(PALETA.hierro), { y: -0.07, sx: 0.02, sy: 0.1, sz: 0.02 }))
-  mano.add(trozo(G.caja, mat(PALETA.oro, { emisivo: 0x554400 }), { y: -0.15, sx: 0.075, sy: 0.09, sz: 0.075 }))
-  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: -0.205, sx: 0.09, sy: 0.02, sz: 0.09, detalle: true }))
+  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: -0.08, sx: 0.022, sy: 0.12, sz: 0.022, detalle: true }))
+  mano.add(trozo(G.caja, mat(PALETA.brasa), { y: -0.18, sx: 0.11, sy: 0.13, sz: 0.11 }))
 }
 
-/** Martillo y escuadra: el constructor se reconoce por la escuadra al cinto. */
+/** Martillo de constructor: mazo gordo, que se vea el golpe. */
 function martillo (mano) {
-  mano.add(trozo(G.cilindro6, mat(PALETA.madera), { y: -0.09, sx: 0.028, sy: 0.2, sz: 0.028 }))
-  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: -0.195, sx: 0.06, sy: 0.06, sz: 0.12 }))
+  mano.add(trozo(G.cilindro6, mat(PALETA.madera), { y: -0.1, sx: 0.032, sy: 0.24, sz: 0.032 }))
+  mano.add(trozo(G.caja, mat(PALETA.hierro), { y: -0.23, sx: 0.075, sy: 0.085, sz: 0.17 }))
 }
 
-/** Sombrero de paja de ala ancha: se ve desde arriba, que es lo que importa. */
+/**
+ * Escalera al hombro. Es la silueta más clara que existe desde arriba: dos
+ * largueros y tres peldaños cruzando por fuera del cuerpo. Va colgada del
+ * torso, no de la mano, para que no baile con el braceo.
+ */
+function escalera (cuerpo) {
+  const g = hueso('escalera', -0.2, 0.26, -0.02)
+  g.rotation.z = 0.42
+  g.rotation.x = -0.22
+  const mMad = mat(PALETA.tronco)
+  for (const x of [-0.11, 0.11]) g.add(trozo(G.caja, mMad, { x, sx: 0.05, sy: 0.92, sz: 0.05 }))
+  for (const y of [-0.26, 0, 0.26]) g.add(trozo(G.caja, mMad, { y, sx: 0.24, sy: 0.04, sz: 0.04, detalle: true }))
+  cuerpo.add(g)
+}
+
+/** Sombrero de paja de ala ancha: un disco que se ve desde arriba, que es lo que importa. */
 function sombreroPaja (cabeza) {
-  cabeza.add(trozo(GL.campanaAncha, mat(PALETA.paja), { y: 0.205, sx: 0.42, sy: 0.05, sz: 0.42 }))
-  cabeza.add(trozo(G.cono8, mat(PALETA.paja), { y: 0.26, sx: 0.22, sy: 0.14, sz: 0.22 }))
+  cabeza.add(trozo(GL.campanaAncha, mat(PALETA.paja), { y: 0.265, sx: 0.6, sy: 0.055, sz: 0.6 }))
+  cabeza.add(trozo(G.cono8, mat(PALETA.paja), { y: 0.33, sx: 0.24, sy: 0.15, sz: 0.24 }))
 }
 
-/** Fardo de carga: aparece en las manos cuando el aldeano acarrea algo. */
+/**
+ * La carga, AL HOMBRO. Antes iba delante del pecho y desde la cámara la tapaba
+ * la propia cabeza: el aldeano cargado se veía igual que el vacío. Encima del
+ * hombro y cruzada, asoma por los dos costados y se lee de lejos.
+ */
 function fardo (cuerpo) {
-  const g = hueso('fardo', 0, 0.16, 0.2)
-  const saco = trozo(GL.campana, mat(PALETA.paja), { sx: 0.19, sy: 0.2, sz: 0.17 })
+  const g = hueso('fardo', 0.0, 0.4, -0.21)
+  const saco = trozo(GL.campana8, mat(PALETA.paja), { x: -0.02, sx: 0.27, sy: 0.28, sz: 0.24 })
   saco.name = 'saco'
-  const t1 = trozo(G.cilindro6, mat(PALETA.tronco), { y: 0.02, rz: Math.PI / 2, sx: 0.07, sy: 0.34, sz: 0.07 })
+  const t1 = trozo(G.cilindro6, mat(PALETA.tronco), { y: 0.03, rz: Math.PI / 2, sx: 0.085, sy: 0.62, sz: 0.085 })
   t1.name = 'tronco1'
-  const t2 = trozo(G.cilindro6, mat(PALETA.tronco), { y: -0.06, rz: Math.PI / 2, rx: 0.15, sx: 0.07, sy: 0.3, sz: 0.07 })
+  const t2 = trozo(G.cilindro6, mat(PALETA.tronco), { y: -0.06, z: 0.04, rz: Math.PI / 2, rx: 0.2, sx: 0.085, sy: 0.54, sz: 0.085 })
   t2.name = 'tronco2'
-  const roca = trozo(G.esfera, mat(PALETA.piedra), { sx: 0.24, sy: 0.2, sz: 0.22 })
+  const roca = trozo(G.esfera, mat(PALETA.piedra), { sx: 0.32, sy: 0.27, sz: 0.29 })
   roca.name = 'roca'
   g.add(saco, t1, t2, roca)
   g.visible = false
@@ -244,45 +344,58 @@ function fardo (cuerpo) {
 
 // ── ALDEANO ───────────────────────────────────────────────────────────────
 function crearAldeano (oficio) {
-  // faldón corto a propósito: si tapa las piernas, el paso no se ve y parece
-  // que el aldeano flota en vez de andar
-  // mangas de otro tono: es lo que separa los brazos del torso a lo lejos
-  const e = esqueleto({ faldonAlto: 0.16, rolBrazo: 'ropaOsc', brazoMat: mat(PALETA.cuero) })
+  const color = COLOR_OFICIO[oficio]
+  // túnica, mangas y faldón del MISMO color: a 35 píxeles la figura tiene que
+  // ser UNA mancha de color, no un arlequín. Lo que varía de un aldeano a otro
+  // son las calzas, la piel y el pelo, que no dicen a qué se dedica.
+  const mRopa = mat(color || PALETA.ropaCruda)
+  const rolRopa = color ? null : 'ropa'
+  // el tocado manda en el cráneo (ver esqueleto): capucha de cuero en casi
+  // todos, melena bajo el sombrero de la granjera y cabeza al aire en el minero,
+  // que ya lleva casco. El cuero oscuro despega la cabeza del cuerpo desde arriba.
+  const capucha = oficio !== 'granjero' && oficio !== 'minero'
+  const e = esqueleto({
+    torso: mRopa, rolTorso: rolRopa, brazoMat: mRopa, rolBrazo: rolRopa,
+    faldonAlto: 0.17, rolCalza: 'ropaOsc',
+    craneoMat: oficio === 'granjero' ? mat(PALETA.pelo) : (capucha ? mat(PALETA.cuero) : null),
+    rolCraneo: oficio === 'granjero' ? 'pelo' : (capucha ? null : 'piel')
+  })
   const { cuerpo, cabeza, manoD, manoI } = e
 
   // delantal: el detalle que lo separa de un soldado de un vistazo
-  cuerpo.add(trozo(G.caja, mat(PALETA.delantal), { y: -0.005, z: 0.122, sx: 0.17, sy: 0.24, sz: 0.02, detalle: true }))
-  // zurrón cruzado al hombro
-  cuerpo.add(trozo(G.caja, mat(PALETA.cuero), { y: 0.16, rz: 0.6, sx: 0.33, sy: 0.035, sz: 0.2, detalle: true }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.delantal), { y: -0.01, z: 0.125, sx: 0.19, sy: 0.26, sz: 0.02, detalle: true }))
 
   const meta = { familia: 'bipedo', cadera: CADERA, gesto: 'generico', ritmo: 7.2, amplitud: 0.62, poseD: 0, poseI: 0 }
 
-  if (oficio === 'lenador' || oficio === 'leñador' || oficio === 'madera') {
-    caperuza(cabeza, mat(PALETA.cuero), 'ropaOsc')
+  if (oficio === 'lenador') {
+    caperuza(cabeza, mat(PALETA.cuero))
     hacha(manoD)
-    meta.gesto = 'hachazo'; meta.poseD = -0.55; meta.poseI = -0.25; meta.ritmo = 5.6
-  } else if (oficio === 'cantero' || oficio === 'piedra') {
-    caperuza(cabeza, mat(PALETA.piedraOscura), null)
+    meta.gesto = 'hachazo'; meta.poseD = -0.15; meta.poseI = -0.2; meta.ritmo = 5.4
+  } else if (oficio === 'cantero') {
+    // visera de cuero: gorro plano, ni capucha ni casco, para no confundirlo
+    cabeza.add(trozo(G.caja, mat(PALETA.cuero), { y: 0.21, z: 0.11, sx: 0.28, sy: 0.035, sz: 0.11 }))
     pico(manoD)
-    meta.gesto = 'picar'; meta.poseD = -0.5; meta.poseI = -0.35; meta.ritmo = 6.4
-  } else if (oficio === 'granjero' || oficio === 'comida' || oficio === 'molinero') {
+    // sillar bajo el brazo: el minero también pica, y esto es lo que los separa
+    // de silueta cuando el color no basta (a contraluz, o sobre piedra)
+    manoI.add(trozo(GL.cajaR, mat(PALETA.piedra), { x: -0.07, y: -0.02, sx: 0.17, sy: 0.19, sz: 0.21 }))
+    meta.gesto = 'picar'; meta.poseD = -0.2; meta.poseI = -0.55; meta.ritmo = 6.4
+  } else if (oficio === 'granjero') {
     pelambre(cabeza)          // melena asomando bajo el ala del sombrero
     sombreroPaja(cabeza)
     hoz(manoD)
     meta.gesto = 'segar'; meta.poseD = -0.35; meta.poseI = -0.2; meta.ritmo = 5.0
-  } else if (oficio === 'minero' || oficio === 'oro') {
-    cabeza.add(trozo(GL.cupula, mat(PALETA.hierro), { y: 0.2, sx: 0.275, sy: 0.17, sz: 0.275 }))
+  } else if (oficio === 'minero') {
+    cabeza.add(trozo(GL.cupula, mat(PALETA.hierro), { y: 0.225, z: -0.01, sx: 0.3, sy: 0.2, sz: 0.3 }))
     pico(manoD); candil(manoI)
-    meta.gesto = 'picar'; meta.poseD = -0.5; meta.poseI = -0.15; meta.ritmo = 6.8
-  } else if (oficio === 'constructor' || oficio === 'obra') {
-    caperuza(cabeza, mat(PALETA.ropaOcre), null)
+    meta.gesto = 'picar'; meta.poseD = -0.2; meta.poseI = -0.1; meta.ritmo = 6.8
+  } else if (oficio === 'constructor') {
+    // gorro con vuelta: el cráneo ya es el gorro, esto es el remate naranja
+    cabeza.add(trozo(GL.campana, mat(PALETA.oficioObra), { y: 0.255, sx: 0.26, sy: 0.1, sz: 0.26 }))
     martillo(manoD)
-    // escuadra colgada del cinto: un ángulo recto de madera, inconfundible
-    cuerpo.add(trozo(G.caja, mat(PALETA.maderaClara), { x: -0.14, y: 0.0, z: 0.06, sx: 0.02, sy: 0.16, sz: 0.03, detalle: true }))
-    cuerpo.add(trozo(G.caja, mat(PALETA.maderaClara), { x: -0.1, y: -0.07, z: 0.06, sx: 0.1, sy: 0.02, sz: 0.03, detalle: true }))
-    meta.gesto = 'martillar'; meta.poseD = -0.6; meta.poseI = -0.3; meta.ritmo = 8.4
+    escalera(cuerpo)
+    meta.gesto = 'martillar'; meta.poseD = -0.5; meta.poseI = -0.75; meta.ritmo = 8.4
   } else {
-    caperuza(cabeza, mat(PALETA.ropaAldeano), 'ropaOsc')
+    caperuza(cabeza, mat(PALETA.cuero))
     meta.gesto = 'generico'
   }
 
@@ -292,37 +405,48 @@ function crearAldeano (oficio) {
 }
 
 // ── TROPA A PIE ───────────────────────────────────────────────────────────
-/** Escudo redondeado de madera con refuerzo y color del bando. */
+/**
+ * Escudo REDONDO con el tablero ENTERO del color del bando. Bajo la cámara del
+ * juego un escudo es un disco de veinte píxeles: pintarlo todo del color de la
+ * casa vale más que cualquier emblema, y encima cuesta menos.
+ */
 function escudo (mano, heraldico) {
-  const g = hueso('escudo', -0.02, -0.05, 0.05)
-  g.add(trozo(G.caja, mat(PALETA.madera), { sx: 0.045, sy: 0.3, sz: 0.24 }))
+  const g = hueso('escudo', -0.04, -0.06, 0.06)
+  g.add(trozo(GL.disco, mat(PALETA.estandarte), { rz: Math.PI / 2, sx: 0.36, sy: 0.05, sz: 0.36 }, 'bando'))
   if (heraldico) {
-    g.add(trozo(G.caja, mat(PALETA.estandarte), { x: 0.03, sx: 0.02, sy: 0.26, sz: 0.2 }, 'bando'))
-    g.add(trozo(G.caja, mat(PALETA.oro), { x: 0.045, sx: 0.015, sy: 0.2, sz: 0.05, detalle: true }))
-    g.add(trozo(G.caja, mat(PALETA.oro), { x: 0.045, sx: 0.015, sy: 0.05, sz: 0.17, detalle: true }))
+    g.add(trozo(G.caja, mat(PALETA.oro), { x: 0.04, sx: 0.02, sy: 0.3, sz: 0.07, detalle: true }))
+    g.add(trozo(G.caja, mat(PALETA.oro), { x: 0.04, sx: 0.02, sy: 0.07, sz: 0.26, detalle: true }))
   } else {
-    g.add(trozo(G.caja, mat(PALETA.hierro), { x: 0.03, sx: 0.02, sy: 0.05, sz: 0.22, detalle: true }))
-    g.add(trozo(G.esfera, mat(PALETA.hierro), { x: 0.04, sx: 0.05, sy: 0.09, sz: 0.09, detalle: true }))
+    g.add(trozo(G.esfera, mat(PALETA.aceroClaro), { x: 0.04, sx: 0.07, sy: 0.11, sz: 0.11 }))
   }
   g.rotation.z = -0.15
   mano.add(g)
 }
 
+/**
+ * DISTINTIVO DE BANDO. El penacho es la marca que mejor funciona desde la
+ * cámara del juego: va en lo alto del casco, o sea en el punto más alto de la
+ * figura, y no lo tapa nada. Azul heráldico los tuyos, granate los suyos.
+ */
+function penacho (cabeza, y = 0.36) {
+  cabeza.add(trozo(G.cono6, mat(PALETA.estandarte), { y, z: -0.02, rx: -0.35, sx: 0.11, sy: 0.19, sz: 0.11 }, 'bando'))
+}
+
 function crearLancero () {
   const e = esqueleto({
-    torso: mat(PALETA.ropaOcre), rolTorso: 'ropaOsc', faldonAlto: 0.17,
+    torso: mat(PALETA.ropaOcre), rolTorso: null, rolBrazo: null, faldonAlto: 0.17,
     calza: mat(PALETA.calzas), bota: mat(PALETA.cuero)
   })
   const { cuerpo, cabeza, manoD, manoI } = e
-  // sobreveste con el color del bando: se ve el bando desde arriba
-  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.175, z: 0.094, sx: 0.19, sy: 0.25, sz: 0.02 }, 'bando'))
-  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.175, z: -0.094, sx: 0.19, sy: 0.25, sz: 0.02 }, 'bando'))
-  // casco sencillo de cuenco con nasal
-  cabeza.add(trozo(GL.cupula, mat(PALETA.metalTropa), { y: 0.19, sx: 0.275, sy: 0.18, sz: 0.275 }))
-  cabeza.add(trozo(G.caja, mat(PALETA.metalTropa), { y: 0.125, z: 0.115, sx: 0.032, sy: 0.11, sz: 0.03, detalle: true }))
-  // lanza larga: la silueta del lancero es una raya vertical altísima
-  manoD.add(trozo(G.cilindro6, mat(PALETA.madera), { y: 0.16, sx: 0.026, sy: 0.95, sz: 0.026 }))
-  manoD.add(trozo(G.cono6, mat(PALETA.hierro), { y: 0.7, sx: 0.06, sy: 0.15, sz: 0.06 }))
+  // sobreveste con el color del bando, por delante y por detrás
+  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.175, z: 0.108, sx: 0.21, sy: 0.26, sz: 0.02 }, 'bando'))
+  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.175, z: -0.108, sx: 0.21, sy: 0.26, sz: 0.02 }, 'bando'))
+  // casco de cuenco con nasal, y penacho del bando encima
+  cabeza.add(trozo(GL.cupula, mat(PALETA.metalTropa), { y: 0.22, sx: 0.315, sy: 0.19, sz: 0.315 }))
+  penacho(cabeza, 0.37)
+  // LANZA: una raya vertical que dobla la altura de la figura. Es la silueta.
+  manoD.add(trozo(G.cilindro6, mat(PALETA.madera), { y: 0.24, sx: 0.028, sy: 1.2, sz: 0.028 }))
+  manoD.add(trozo(G.cono6, mat(PALETA.aceroClaro), { y: 0.92, sx: 0.07, sy: 0.19, sz: 0.07 }))
   escudo(manoI, false)
   e.raiz.userData.meta = { familia: 'bipedo', cadera: CADERA, gesto: 'lanzazo', ritmo: 6.0, amplitud: 0.5, poseD: -0.2, poseI: -0.5 }
   return e.raiz
@@ -331,20 +455,21 @@ function crearLancero () {
 function crearEspadachin () {
   const e = esqueleto({
     torso: mat(PALETA.cotaMalla), rolTorso: null, rolBrazo: null, faldonAlto: 0.16,
-    faldonMat: mat(PALETA.cotaMalla), brazoMat: mat(PALETA.cotaMalla), calza: mat(PALETA.calzas)
+    faldonMat: mat(PALETA.cotaMalla), brazoMat: mat(PALETA.cotaMalla), calza: mat(PALETA.calzas),
+    hombroMat: mat(PALETA.acero), rolHombro: null,
+    craneoMat: mat(PALETA.cotaMalla), rolCraneo: null
   })
   const { cuerpo, cabeza, manoD, manoI } = e
   // cota de malla asomando bajo un tabardo heráldico
-  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.185, sx: 0.245, sy: 0.24, sz: 0.19 }, 'bando'))
-  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.08, sx: 0.26, sy: 0.03, sz: 0.2, detalle: true }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.185, sx: 0.26, sy: 0.24, sz: 0.21 }, 'bando'))
+  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.078, sx: 0.28, sy: 0.032, sz: 0.225, detalle: true }))
   // almófar (capucha de malla) y capacete encima
-  cabeza.add(trozo(GL.campana, mat(PALETA.cotaMalla), { y: 0.06, sx: 0.285, sy: 0.245, sz: 0.285 }))
-  cabeza.add(trozo(GL.cupula, mat(PALETA.acero), { y: 0.185, sx: 0.29, sy: 0.2, sz: 0.29 }))
-  cabeza.add(trozo(G.caja, mat(PALETA.acero), { y: 0.205, z: 0.125, sx: 0.3, sy: 0.032, sz: 0.06, detalle: true }))
-  // espada corta: hoja, guarda y pomo
-  manoD.add(trozo(G.caja, mat(PALETA.cuero), { y: -0.05, sx: 0.03, sy: 0.1, sz: 0.03 }))
-  manoD.add(trozo(G.caja, mat(PALETA.acero), { y: 0.01, sx: 0.16, sy: 0.025, sz: 0.035 }))
-  manoD.add(trozo(G.caja, mat(PALETA.aceroClaro), { y: 0.17, sx: 0.045, sy: 0.3, sz: 0.02 }))
+  cabeza.add(trozo(GL.cupula, mat(PALETA.acero), { y: 0.21, sx: 0.31, sy: 0.21, sz: 0.31 }))
+  penacho(cabeza, 0.4)
+  // espadón: hoja ancha, guarda y pomo
+  manoD.add(trozo(G.caja, mat(PALETA.cuero), { y: -0.05, sx: 0.032, sy: 0.11, sz: 0.032 }))
+  manoD.add(trozo(G.caja, mat(PALETA.acero), { y: 0.015, sx: 0.19, sy: 0.028, sz: 0.038 }))
+  manoD.add(trozo(G.caja, mat(PALETA.aceroClaro), { y: 0.21, sx: 0.06, sy: 0.38, sz: 0.024 }))
   escudo(manoI, true)
   e.raiz.userData.meta = { familia: 'bipedo', cadera: CADERA, gesto: 'tajo', ritmo: 6.6, amplitud: 0.46, poseD: -0.75, poseI: -0.55 }
   return e.raiz
@@ -354,26 +479,30 @@ function crearArquero () {
   const e = esqueleto({
     torso: mat(PALETA.capuchaVerde), rolTorso: null, rolBrazo: null,
     brazoMat: mat(PALETA.capuchaVerde), faldonAlto: 0.15, faldonMat: mat(PALETA.capuchaVerde),
-    calza: mat(PALETA.ropaOcre)
+    calza: mat(PALETA.ropaOcre), craneoMat: mat(PALETA.capuchaVerde), rolCraneo: null
   })
   const { cuerpo, cabeza, manoI, manoD } = e
   caperuza(cabeza, mat(PALETA.capuchaVerde), null)
+  // banda del bando cruzada al pecho: sin casco no hay penacho donde marcarlo
+  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.17, rz: 0.62, sx: 0.4, sy: 0.07, sz: 0.235 }, 'bando'))
   // carcaj a la espalda con las plumas asomando
-  const carcaj = trozo(G.cilindro6, mat(PALETA.cuero), { x: -0.1, y: 0.17, z: -0.12, rx: -0.3, rz: 0.35, sx: 0.1, sy: 0.3, sz: 0.1 })
-  cuerpo.add(carcaj)
+  cuerpo.add(trozo(G.cilindro6, mat(PALETA.cuero), { x: -0.11, y: 0.18, z: -0.14, rx: -0.3, rz: 0.35, sx: 0.11, sy: 0.32, sz: 0.11 }))
   for (let i = 0; i < 3; i++) {
     cuerpo.add(trozo(G.caja, mat(PALETA.florBlanca),
-      { x: -0.14 + i * 0.03, y: 0.33, z: -0.15, rz: 0.35, sx: 0.018, sy: 0.1, sz: 0.018, detalle: true }))
+      { x: -0.15 + i * 0.03, y: 0.35, z: -0.17, rz: 0.35, sx: 0.018, sy: 0.11, sz: 0.018, detalle: true }))
   }
-  // arco: el toro abierto, de canto y con la panza hacia delante. Desde
-  // arriba y de perfil es una C con cuerda: no hay silueta más clara.
-  const arco = hueso('arco', -0.03, 0.08, 0.04)
-  arco.rotation.y = -Math.PI / 2
-  arco.add(trozo(GL.arco, mat(PALETA.madera), { rz: -Math.PI * 0.475, sx: 0.46, sy: 0.46, sz: 0.46 }))
-  arco.add(trozo(G.caja, mat(PALETA.ropaCruda), { x: 0.018, sx: 0.012, sy: 0.455, sz: 0.012, detalle: true }))
+  // ARCO: el toro abierto, de canto y con la panza hacia delante. Grande, que
+  // es lo único que separa a un arquero de un lancero desde la cámara.
+  const arco = hueso('arco', -0.06, 0.06, 0.04)
+  // el arco se lleva SESGADO, ni de frente ni de perfil: de perfil puro es una
+  // raya igual que una lanza, y de frente parece que lleve un aro. A 50 grados
+  // se ve la C desde casi cualquier posición de la cámara.
+  arco.rotation.y = -0.9
+  arco.add(trozo(GL.arco, mat(PALETA.madera), { rz: -Math.PI * 0.475, sx: 0.62, sy: 0.62, sz: 0.62 }))
+  arco.add(trozo(G.caja, mat(PALETA.ropaCruda), { x: 0.025, sx: 0.012, sy: 0.6, sz: 0.012, detalle: true }))
   manoI.add(arco)
   // flecha en la diestra
-  manoD.add(trozo(G.caja, mat(PALETA.madera), { rz: Math.PI / 2, sx: 0.014, sy: 0.34, sz: 0.014, detalle: true }))
+  manoD.add(trozo(G.caja, mat(PALETA.madera), { rz: Math.PI / 2, sx: 0.014, sy: 0.36, sz: 0.014, detalle: true }))
   e.raiz.userData.meta = { familia: 'bipedo', cadera: CADERA, gesto: 'disparar', ritmo: 5.4, amplitud: 0.55, poseD: -0.4, poseI: -0.3 }
   return e.raiz
 }
@@ -382,24 +511,23 @@ function crearBallestero () {
   const e = esqueleto({
     torso: mat(PALETA.cuero), rolTorso: null, rolBrazo: null,
     brazoMat: mat(PALETA.ropaAzulon), faldonAlto: 0.15, faldonMat: mat(PALETA.ropaAzulon),
-    calza: mat(PALETA.calzas)
+    calza: mat(PALETA.calzas), hombroMat: mat(PALETA.acero), rolHombro: null
   })
   const { cuerpo, cabeza, manoD } = e
   // brigantina: cuero con placas remachadas
   for (let i = 0; i < 3; i++) {
     cuerpo.add(trozo(G.caja, mat(PALETA.acero),
-      { x: -0.08 + i * 0.08, y: 0.18, z: 0.092, sx: 0.06, sy: 0.19, sz: 0.02, detalle: true }))
+      { x: -0.085 + i * 0.085, y: 0.18, z: 0.105, sx: 0.065, sy: 0.2, sz: 0.02, detalle: true }))
   }
-  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.275, sx: 0.27, sy: 0.05, sz: 0.19 }, 'bando'))
-  // capacete de ala ancha
-  cabeza.add(trozo(GL.campanaAncha, mat(PALETA.acero), { y: 0.19, sx: 0.4, sy: 0.045, sz: 0.4 }))
-  cabeza.add(trozo(GL.cupula, mat(PALETA.acero), { y: 0.21, sx: 0.28, sy: 0.18, sz: 0.28 }))
-  // ballesta: una CRUZ horizontal. No se confunde con el arco ni queriendo.
-  const bal = hueso('ballesta', -0.05, -0.06, 0.1)
-  bal.add(trozo(G.caja, mat(PALETA.madera), { z: 0.06, sx: 0.05, sy: 0.045, sz: 0.4 }))
-  bal.add(trozo(G.caja, mat(PALETA.hierro), { z: 0.2, sx: 0.44, sy: 0.03, sz: 0.035 }))
-  bal.add(trozo(G.caja, mat(PALETA.ropaCruda), { z: 0.1, sx: 0.4, sy: 0.014, sz: 0.014, detalle: true }))
-  bal.add(trozo(G.caja, mat(PALETA.maderaClara), { y: -0.05, z: -0.08, rx: 0.4, sx: 0.04, sy: 0.11, sz: 0.04, detalle: true }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.276, sx: 0.29, sy: 0.055, sz: 0.2 }, 'bando'))
+  // capacete de ala ancha: el sombrero de hierro es SU silueta
+  cabeza.add(trozo(GL.campanaAncha, mat(PALETA.acero), { y: 0.225, sx: 0.46, sy: 0.05, sz: 0.46 }))
+  cabeza.add(trozo(GL.cupula, mat(PALETA.acero), { y: 0.245, sx: 0.32, sy: 0.18, sz: 0.32 }))
+  // BALLESTA: una CRUZ horizontal. No se confunde con el arco ni queriendo.
+  const bal = hueso('ballesta', -0.05, -0.06, 0.12)
+  bal.add(trozo(G.caja, mat(PALETA.madera), { z: 0.06, sx: 0.055, sy: 0.05, sz: 0.44 }))
+  bal.add(trozo(G.caja, mat(PALETA.hierro), { z: 0.22, sx: 0.5, sy: 0.034, sz: 0.04 }))
+  bal.add(trozo(G.caja, mat(PALETA.ropaCruda), { z: 0.11, sx: 0.46, sy: 0.014, sz: 0.014, detalle: true }))
   manoD.add(bal)
   e.raiz.userData.meta = { familia: 'bipedo', cadera: CADERA, gesto: 'ballesta', ritmo: 4.6, amplitud: 0.44, poseD: -1.35, poseI: -1.2 }
   return e.raiz
@@ -408,22 +536,22 @@ function crearBallestero () {
 function crearMonje () {
   const e = esqueleto({
     sinPiernas: true, torso: mat(PALETA.habito), rolTorso: null, rolBrazo: null,
-    brazoMat: mat(PALETA.habito), cinturon: false, faldon: false
+    brazoMat: mat(PALETA.habito), cinturon: false, faldon: false, hombros: false
   })
   const { cuerpo, cabeza, brazoI, brazoD } = e
   // hábito hasta el suelo: sin piernas a la vista, silueta de campana
-  cuerpo.add(trozo(GL.campanaAncha, mat(PALETA.habito), { y: -0.145, sx: 0.44, sy: 0.36, sz: 0.4 }))
-  cuerpo.add(trozo(G.caja, mat(PALETA.habito), { y: 0.06, sx: 0.3, sy: 0.1, sz: 0.24 }))
+  cuerpo.add(trozo(GL.campanaAncha, mat(PALETA.habito), { y: -0.145, sx: 0.46, sy: 0.38, sz: 0.42 }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.habito), { y: 0.06, sx: 0.31, sy: 0.1, sz: 0.25 }))
   // cordón con los dos cabos colgando
-  cuerpo.add(trozo(G.caja, mat(PALETA.paja), { y: 0.055, sx: 0.3, sy: 0.03, sz: 0.23 }))
-  cuerpo.add(trozo(G.caja, mat(PALETA.paja), { x: 0.09, y: -0.05, z: 0.11, sx: 0.022, sy: 0.19, sz: 0.022, detalle: true }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.paja), { y: 0.055, sx: 0.31, sy: 0.03, sz: 0.24 }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.paja), { x: 0.09, y: -0.05, z: 0.12, sx: 0.022, sy: 0.19, sz: 0.022, detalle: true }))
   // capucha caída sobre la espalda
-  cuerpo.add(trozo(GL.campana, mat(PALETA.habito), { y: 0.26, z: -0.11, rx: -0.35, sx: 0.26, sy: 0.2, sz: 0.16 }))
+  cuerpo.add(trozo(GL.campana, mat(PALETA.habito), { y: 0.28, z: -0.12, rx: -0.35, sx: 0.28, sy: 0.22, sz: 0.17 }))
   // tonsura: corona de pelo y coronilla al aire
-  cabeza.add(trozo(GL.aro, mat(PALETA.pelo), { y: 0.115, rx: Math.PI / 2, sx: 0.275, sy: 0.275, sz: 0.275 }, 'pelo'))
+  cabeza.add(trozo(GL.campana8, mat(PALETA.pelo), { y: 0.155, sx: 0.29, sy: 0.075, sz: 0.29 }, 'pelo'))
   // cruz de madera colgada al pecho
-  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.14, z: 0.1, sx: 0.03, sy: 0.11, sz: 0.02 }))
-  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.16, z: 0.1, sx: 0.08, sy: 0.03, sz: 0.02, detalle: true }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.14, z: 0.11, sx: 0.032, sy: 0.12, sz: 0.02 }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.165, z: 0.11, sx: 0.085, sy: 0.032, sz: 0.02, detalle: true }))
   brazoI.rotation.x = -1.25; brazoI.rotation.z = -0.45
   brazoD.rotation.x = -1.25; brazoD.rotation.z = 0.45
   e.raiz.userData.meta = { familia: 'monje', cadera: CADERA, gesto: 'rezar', ritmo: 3.2, amplitud: 0, poseD: -1.25, poseI: -1.25 }
@@ -434,19 +562,19 @@ function crearExplorador () {
   const e = esqueleto({
     torso: mat(PALETA.ropaVerde), rolTorso: null, rolBrazo: null,
     brazoMat: mat(PALETA.ropaVerde), faldonAlto: 0.14, faldonMat: mat(PALETA.ropaVerde),
-    calza: mat(PALETA.cuero)
+    calza: mat(PALETA.cuero), hombros: false,
+    craneoMat: mat(PALETA.tejadoAzul), rolCraneo: 'bandoOsc'
   })
   const { cuerpo, cabeza, manoI } = e
   // capa larga: el bulto que lo distingue de un arquero desde arriba
-  cuerpo.add(trozo(GL.campana, mat(PALETA.tejadoOscuro), { y: 0.0, z: -0.115, sx: 0.36, sy: 0.42, sz: 0.16 }, 'bandoOsc'))
-  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.28, z: -0.06, sx: 0.06, sy: 0.05, sz: 0.06, detalle: true }))
-  caperuza(cabeza, mat(PALETA.tejadoOscuro), null)
+  cuerpo.add(trozo(GL.campana8, mat(PALETA.tejadoAzul), { y: 0.0, z: -0.12, sx: 0.4, sy: 0.46, sz: 0.18 }, 'bandoOsc'))
+  cuerpo.add(trozo(G.caja, mat(PALETA.oro), { y: 0.3, z: -0.07, sx: 0.07, sy: 0.055, sz: 0.07, detalle: true }))
+  caperuza(cabeza, mat(PALETA.tejadoAzul), 'bandoOsc')
   // zurrón bien gordo al costado
-  cuerpo.add(trozo(G.caja, mat(PALETA.cuero), { x: 0.16, y: 0.0, z: 0.02, sx: 0.13, sy: 0.15, sz: 0.13 }))
-  cuerpo.add(trozo(G.caja, mat(PALETA.cueroClaro), { y: 0.16, rz: -0.6, sx: 0.34, sy: 0.04, sz: 0.21, detalle: true }))
+  cuerpo.add(trozo(G.caja, mat(PALETA.cuero), { x: 0.18, y: 0.0, z: 0.02, sx: 0.14, sy: 0.16, sz: 0.14 }))
   // bastón nudoso, más alto que él y sin punta de hierro
-  manoI.add(trozo(G.cilindro6, mat(PALETA.tronco), { y: 0.14, rz: 0.06, sx: 0.028, sy: 0.85, sz: 0.028 }))
-  manoI.add(trozo(G.esfera, mat(PALETA.tronco), { y: 0.55, sx: 0.075, sy: 0.075, sz: 0.075, detalle: true }))
+  manoI.add(trozo(G.cilindro6, mat(PALETA.tronco), { y: 0.18, rz: 0.06, sx: 0.03, sy: 0.95, sz: 0.03 }))
+  manoI.add(trozo(G.esfera, mat(PALETA.tronco), { y: 0.62, sx: 0.085, sy: 0.085, sz: 0.085, detalle: true }))
   e.raiz.userData.meta = { familia: 'bipedo', cadera: CADERA, gesto: 'otear', ritmo: 8.4, amplitud: 0.72, poseD: 0, poseI: -0.2 }
   return e.raiz
 }
@@ -457,24 +585,24 @@ function caballo (pelaje, gualdrapa) {
   const g = hueso('caballo', 0, 0, 0)
   const mPelo = mat(pelaje)
   const mCrin = mat(PALETA.caballoOscuro)
-  g.add(trozo(G.caja, mPelo, { y: 0.44, sx: 0.28, sy: 0.26, sz: 0.62 }))
-  g.add(trozo(G.caja, mPelo, { y: 0.56, z: 0.3, rx: -0.55, sx: 0.19, sy: 0.3, sz: 0.18 }))
-  g.add(trozo(G.caja, mPelo, { y: 0.68, z: 0.41, rx: 0.35, sx: 0.16, sy: 0.14, sz: 0.26 }))
-  g.add(trozo(G.caja, mCrin, { y: 0.63, z: 0.26, rx: -0.55, sx: 0.08, sy: 0.26, sz: 0.14, detalle: true }))
-  g.add(trozo(G.caja, mCrin, { y: 0.47, z: -0.33, rx: 0.5, sx: 0.07, sy: 0.26, sz: 0.08 }))
+  g.add(trozo(GL.cajaR, mPelo, { y: 0.44, sx: 0.3, sy: 0.28, sz: 0.66 }))
+  g.add(trozo(G.caja, mPelo, { y: 0.58, z: 0.31, rx: -0.55, sx: 0.2, sy: 0.32, sz: 0.19 }))
+  g.add(trozo(G.caja, mPelo, { y: 0.71, z: 0.43, rx: 0.35, sx: 0.17, sy: 0.15, sz: 0.28 }))
+  g.add(trozo(G.caja, mCrin, { y: 0.66, z: 0.27, rx: -0.55, sx: 0.08, sy: 0.28, sz: 0.15, detalle: true }))
+  g.add(trozo(G.caja, mCrin, { y: 0.47, z: -0.35, rx: 0.5, sx: 0.07, sy: 0.28, sz: 0.08 }))
   const patas = []
-  for (const [nombre, x, z] of [['pataFI', -0.1, 0.2], ['pataFD', 0.1, 0.2], ['pataTI', -0.1, -0.21], ['pataTD', 0.1, -0.21]]) {
+  for (const [nombre, x, z] of [['pataFI', -0.11, 0.21], ['pataFD', 0.11, 0.21], ['pataTI', -0.11, -0.22], ['pataTD', 0.11, -0.22]]) {
     const p = hueso(nombre, x, 0.36, z)
-    p.add(trozo(G.caja, mPelo, { y: -0.17, sx: 0.085, sy: 0.34, sz: 0.1 }))
-    p.add(trozo(G.caja, mat(PALETA.caballoOscuro), { y: -0.345, sx: 0.095, sy: 0.05, sz: 0.12, detalle: true }))
+    p.add(trozo(G.caja, mPelo, { y: -0.17, sx: 0.09, sy: 0.34, sz: 0.1 }))
+    p.add(trozo(G.caja, mat(PALETA.caballoOscuro), { y: -0.345, sx: 0.1, sy: 0.055, sz: 0.125, detalle: true }))
     g.add(p); patas.push(p)
   }
   if (gualdrapa) {
-    g.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.4, sx: 0.31, sy: 0.3, sz: 0.5 }, 'bando'))
-    g.add(trozo(G.caja, mat(PALETA.oro), { y: 0.26, sx: 0.33, sy: 0.04, sz: 0.5, detalle: true }))
-    g.add(trozo(GL.cupula, mat(PALETA.aceroClaro), { y: 0.7, z: 0.42, rx: 1.2, sx: 0.17, sy: 0.16, sz: 0.17 }))
+    g.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.4, sx: 0.33, sy: 0.32, sz: 0.54 }, 'bando'))
+    g.add(trozo(G.caja, mat(PALETA.oro), { y: 0.245, sx: 0.35, sy: 0.045, sz: 0.54, detalle: true }))
+    g.add(trozo(GL.cupula, mat(PALETA.aceroClaro), { y: 0.73, z: 0.44, rx: 1.2, sx: 0.18, sy: 0.17, sz: 0.18 }))
   } else {
-    g.add(trozo(G.caja, mat(PALETA.cuero), { y: 0.58, sx: 0.3, sy: 0.06, sz: 0.22 }))
+    g.add(trozo(G.caja, mat(PALETA.cuero), { y: 0.6, sx: 0.32, sy: 0.06, sz: 0.24 }))
   }
   return { grupo: g, patas }
 }
@@ -485,55 +613,56 @@ function crearJinete (esCaballero) {
   const cab = caballo(esCaballero ? PALETA.caballoClaro : PALETA.caballoCastaño, esCaballero)
   raiz.add(cab.grupo)
 
-  const jinete = hueso('cuerpo', 0, 0.62, -0.02)
+  const jinete = hueso('cuerpo', 0, 0.64, -0.02)
   raiz.add(jinete)
   const mCuerpo = esCaballero ? mat(PALETA.aceroClaro) : mat(PALETA.cotaMalla)
-  jinete.add(trozo(G.caja, mCuerpo, { y: 0.1, sx: 0.26, sy: 0.24, sz: 0.18 }))
-  jinete.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.1, z: 0.095, sx: 0.2, sy: 0.22, sz: 0.02 }, 'bando'))
+  jinete.add(trozo(GL.cajaR, mCuerpo, { y: 0.1, sx: 0.28, sy: 0.26, sz: 0.2 }))
+  jinete.add(trozo(G.caja, mat(PALETA.estandarte), { y: 0.1, z: 0.105, sx: 0.22, sy: 0.24, sz: 0.02 }, 'bando'))
   // piernas a horcajadas: fijas, el que se mueve es el caballo
   for (const lado of [-1, 1]) {
     jinete.add(trozo(G.caja, esCaballero ? mCuerpo : mat(PALETA.calzas),
-      { x: lado * 0.14, y: -0.06, z: 0.02, rz: lado * 0.35, sx: 0.09, sy: 0.26, sz: 0.1 }))
-    jinete.add(trozo(G.caja, mat(PALETA.cuero), { x: lado * 0.17, y: -0.19, z: 0.06, sx: 0.09, sy: 0.05, sz: 0.13, detalle: true }))
+      { x: lado * 0.14, y: -0.06, z: 0.02, rz: lado * 0.35, sx: 0.095, sy: 0.26, sz: 0.105 }))
+    jinete.add(trozo(G.caja, mat(PALETA.cuero), { x: lado * 0.17, y: -0.19, z: 0.06, sx: 0.1, sy: 0.055, sz: 0.14, detalle: true }))
   }
-  const cabeza = hueso('cabeza', 0, 0.24, 0)
+  const cabeza = hueso('cabeza', 0, 0.28, 0)
   jinete.add(cabeza)
-  cabeza.add(trozo(G.caja, mat(PALETA.pielClara), { y: 0.095, sx: 0.215, sy: 0.19, sz: 0.2 }, 'piel'))
+  cabeza.add(trozo(GL.cabezaR, mat(esCaballero ? PALETA.aceroClaro : PALETA.pielClara),
+    { y: 0.1, sx: 0.245, sy: 0.225, sz: 0.235 }, esCaballero ? null : 'piel'))
+  if (!esCaballero) cabeza.add(trozo(G.caja, mat(PALETA.pielClara), { y: 0.075, z: 0.125, sx: 0.16, sy: 0.14, sz: 0.03 }, 'piel'))
   if (esCaballero) {
     // yelmo cerrado con penacho: armadura clara, penacho al viento
-    cabeza.add(trozo(G.caja, mat(PALETA.aceroClaro), { y: 0.105, sx: 0.235, sy: 0.21, sz: 0.225 }))
-    cabeza.add(trozo(G.caja, mat(PALETA.acero), { y: 0.095, z: 0.115, sx: 0.15, sy: 0.03, sz: 0.02, detalle: true }))
-    const pen = hueso('penacho', 0, 0.2, -0.02)
-    pen.add(trozo(G.cono6, mat(PALETA.penacho), { y: 0.06, rx: -0.5, sx: 0.09, sy: 0.28, sz: 0.09 }))
+    cabeza.add(trozo(G.caja, mat(PALETA.acero), { y: 0.1, z: 0.128, sx: 0.16, sy: 0.032, sz: 0.02, detalle: true }))
+    const pen = hueso('penacho', 0, 0.22, -0.02)
+    pen.add(trozo(G.cono6, mat(PALETA.estandarte), { y: 0.08, rx: -0.5, sx: 0.11, sy: 0.32, sz: 0.11 }, 'bando'))
     cabeza.add(pen)
   } else {
-    cabeza.add(trozo(GL.cupula, mat(PALETA.metalTropa), { y: 0.185, sx: 0.255, sy: 0.16, sz: 0.255 }))
-    cabeza.add(trozo(G.caja, mat(PALETA.metalTropa), { y: 0.115, z: 0.105, sx: 0.032, sy: 0.1, sz: 0.03, detalle: true }))
+    cabeza.add(trozo(GL.cupula, mat(PALETA.metalTropa), { y: 0.205, sx: 0.28, sy: 0.17, sz: 0.28 }))
+    cabeza.add(trozo(G.cono6, mat(PALETA.estandarte), { y: 0.33, z: -0.02, rx: -0.35, sx: 0.1, sy: 0.17, sz: 0.1 }, 'bando'))
   }
   // brazo de la lanza: el único articulado del jinete
-  const brazoD = hueso('brazoD', 0.155, 0.19, 0)
-  brazoD.add(trozo(G.caja, mCuerpo, { y: -0.09, sx: 0.075, sy: 0.2, sz: 0.08 }))
+  const brazoD = hueso('brazoD', 0.165, 0.2, 0)
+  brazoD.add(trozo(G.caja, mCuerpo, { y: -0.09, sx: 0.08, sy: 0.2, sz: 0.085 }))
   const manoD = hueso('manoD', 0, -0.2, 0)
-  manoD.add(trozo(G.caja, mat(PALETA.pielClara), { sx: 0.078, sy: 0.07, sz: 0.085 }, 'piel'))
-  manoD.add(trozo(G.cilindro6, mat(PALETA.madera), { y: 0.1, rx: 0.35, sx: 0.03, sy: 1.0, sz: 0.03 }))
-  manoD.add(trozo(G.cono6, mat(PALETA.hierro), { y: 0.58, z: 0.21, rx: 0.35, sx: 0.07, sy: 0.16, sz: 0.07 }))
+  manoD.add(trozo(G.esfera, mat(PALETA.pielClara), { sx: 0.11, sy: 0.1, sz: 0.11 }, 'piel'))
+  manoD.add(trozo(G.cilindro6, mat(PALETA.madera), { y: 0.12, rx: 0.35, sx: 0.032, sy: 1.15, sz: 0.032 }))
+  manoD.add(trozo(G.cono6, mat(PALETA.aceroClaro), { y: 0.67, z: 0.245, rx: 0.35, sx: 0.075, sy: 0.18, sz: 0.075 }))
   if (esCaballero) {
     // banderín en la lanza: remata la silueta y marca el bando de lejos
-    manoD.add(trozo(G.caja, mat(PALETA.estandarte), { x: 0.09, y: 0.42, z: 0.15, sx: 0.16, sy: 0.12, sz: 0.02 }, 'bando'))
+    manoD.add(trozo(G.caja, mat(PALETA.estandarte), { x: 0.1, y: 0.46, z: 0.17, sx: 0.18, sy: 0.14, sz: 0.02 }, 'bando'))
   }
   brazoD.add(manoD)
   jinete.add(brazoD)
-  const brazoI = hueso('brazoI', -0.155, 0.19, 0)
-  brazoI.add(trozo(G.caja, mCuerpo, { y: -0.09, sx: 0.075, sy: 0.2, sz: 0.08 }))
+  const brazoI = hueso('brazoI', -0.165, 0.2, 0)
+  brazoI.add(trozo(G.caja, mCuerpo, { y: -0.09, sx: 0.08, sy: 0.2, sz: 0.085 }))
   const manoI = hueso('manoI', 0, -0.2, 0)
-  manoI.add(trozo(G.caja, mat(PALETA.pielClara), { sx: 0.078, sy: 0.07, sz: 0.085 }, 'piel'))
+  manoI.add(trozo(G.esfera, mat(PALETA.pielClara), { sx: 0.11, sy: 0.1, sz: 0.11 }, 'piel'))
   escudo(manoI, esCaballero)
   brazoI.add(manoI)
   jinete.add(brazoI)
   brazoI.rotation.x = -0.45
 
   raiz.userData.meta = {
-    familia: 'jinete', cadera: 0.62, gesto: 'lanzazo', ritmo: 6.4, amplitud: 0.55,
+    familia: 'jinete', cadera: 0.64, gesto: 'lanzazo', ritmo: 6.4, amplitud: 0.55,
     poseD: -0.3, poseI: -0.45, patas: ['pataFI', 'pataFD', 'pataTI', 'pataTD']
   }
   return raiz
@@ -1078,20 +1207,25 @@ function animarBipedo (f, t) {
   if (s === 'andando' || s === 'cargando') {
     const carga = s === 'cargando'
     const paso = Math.sin(ph)
-    const amp = f.amplitud * (carga ? 0.72 : 1)
+    const amp = f.amplitud * (carga ? 0.68 : 1)
     if (p.piernaI) p.piernaI.rotation.x = -paso * amp
     if (p.piernaD) p.piernaD.rotation.x = paso * amp
     if (p.cuerpo) {
-      p.cuerpo.position.y = f.cadera + Math.abs(Math.cos(ph)) * 0.028
-      p.cuerpo.rotation.z = paso * 0.055
-      p.cuerpo.rotation.x = carga ? 0.3 : 0.05
-      p.cuerpo.rotation.y = -paso * 0.1
+      // el rebote va al DOBLE de ritmo que la zancada (sube en cada pisada) y
+      // la figura entera sube con él: sin eso el paso parece de patinete
+      p.cuerpo.position.y = f.cadera + Math.abs(Math.cos(ph)) * (carga ? 0.022 : 0.042)
+      p.cuerpo.rotation.z = paso * (carga ? 0.03 : 0.07)
+      // el que va cargado se dobla hacia delante y se contonea menos
+      p.cuerpo.rotation.x = carga ? 0.26 : 0.05
+      p.cuerpo.rotation.y = -paso * 0.12
       p.cuerpo.position.z = 0
     }
+    f.salto = carga ? 0 : Math.max(0, Math.cos(ph)) * 0.012
     if (!f.simple) {
-      if (p.brazoD) { p.brazoD.rotation.x = carga ? -1.35 : f.poseD + paso * 0.5; p.brazoD.rotation.y = 0; p.brazoD.rotation.z = 0 }
-      if (p.brazoI) { p.brazoI.rotation.x = carga ? -1.35 : f.poseI - paso * 0.5; p.brazoI.rotation.y = 0; p.brazoI.rotation.z = 0 }
-      if (p.cabeza) { p.cabeza.rotation.x = carga ? -0.22 : 0; p.cabeza.rotation.y = -paso * 0.06 }
+      // cargando: un brazo sujeta el fardo del hombro y el otro hace contrapeso
+      if (p.brazoD) { p.brazoD.rotation.x = carga ? -2.25 : f.poseD + paso * 0.55; p.brazoD.rotation.z = carga ? -0.25 : 0; p.brazoD.rotation.y = 0 }
+      if (p.brazoI) { p.brazoI.rotation.x = carga ? -0.9 : f.poseI - paso * 0.55; p.brazoI.rotation.z = carga ? 0.2 : 0; p.brazoI.rotation.y = 0 }
+      if (p.cabeza) { p.cabeza.rotation.x = carga ? -0.18 : 0; p.cabeza.rotation.y = -paso * 0.07 }
     }
     return
   }
@@ -1120,20 +1254,24 @@ function animarBipedo (f, t) {
       if (p.brazoI) p.brazoI.rotation.x = -1.1 - r * 0.35
       return
     }
-    // hachazo, picar, martillar: todo golpe, cambia el brío
+    // hachazo, picar, martillar: todo golpe, cambia el brío.
+    // El alza sube despacio (anticipación), cae de golpe y descansa: eso es lo
+    // que le da PESO. El tronco gira con el brazo y la cabeza mira al tajo.
     const alza = cicloGolpe(ph)
     const aDos = g !== 'martillar'
     if (p.cuerpo) {
-      p.cuerpo.rotation.x = 0.16 + (1 - alza) * 0.2
-      p.cuerpo.position.y = f.cadera - (1 - alza) * 0.018
-      p.cuerpo.rotation.y = 0
-      p.cuerpo.rotation.z = 0
+      p.cuerpo.rotation.x = 0.18 + (1 - alza) * 0.26
+      p.cuerpo.position.y = f.cadera - (1 - alza) * 0.03
+      p.cuerpo.rotation.y = alza * (aDos ? 0.2 : 0.1)
+      p.cuerpo.rotation.z = -alza * 0.1
+      p.cuerpo.position.z = 0
     }
-    if (p.brazoD) { p.brazoD.rotation.x = -0.15 - alza * 2.25; p.brazoD.rotation.y = 0; p.brazoD.rotation.z = 0 }
-    if (p.brazoI) { p.brazoI.rotation.x = aDos ? -0.1 - alza * 1.9 : f.poseI; p.brazoI.rotation.y = 0 }
-    if (p.piernaI) p.piernaI.rotation.x = -0.16
-    if (p.piernaD) p.piernaD.rotation.x = 0.16
-    if (p.cabeza) p.cabeza.rotation.x = -0.18 - alza * 0.15
+    if (p.brazoD) { p.brazoD.rotation.x = -0.15 - alza * 2.35; p.brazoD.rotation.y = 0; p.brazoD.rotation.z = 0 }
+    if (p.brazoI) { p.brazoI.rotation.x = aDos ? -0.1 - alza * 2.0 : f.poseI; p.brazoI.rotation.y = 0; p.brazoI.rotation.z = 0 }
+    // las piernas se afianzan: la de atrás se estira en el golpe
+    if (p.piernaI) p.piernaI.rotation.x = -0.18 - alza * 0.1
+    if (p.piernaD) p.piernaD.rotation.x = 0.18
+    if (p.cabeza) p.cabeza.rotation.x = -0.28 - alza * 0.12
     return
   }
 
@@ -1199,14 +1337,41 @@ function animarBipedo (f, t) {
     return
   }
 
+  if (s === 'charlando') {
+    // DOS QUE SE PARAN A HABLAR. Uno lleva la voz cantante y el otro asiente:
+    // el desfase de la semilla hace que nunca gesticulen a la vez.
+    const habla = Math.sin(ph * 0.55)
+    const gesto = Math.max(0, habla)
+    if (p.cuerpo) {
+      p.cuerpo.position.y = f.cadera + Math.sin(t * 1.6 + f.fase) * 0.008
+      p.cuerpo.rotation.y = habla * 0.12
+      p.cuerpo.rotation.x = 0.04
+      p.cuerpo.rotation.z = 0
+      p.cuerpo.position.z = 0
+    }
+    if (p.piernaI) p.piernaI.rotation.x = 0.05
+    if (p.piernaD) p.piernaD.rotation.x = -0.05
+    if (!f.simple) {
+      if (p.brazoD) { p.brazoD.rotation.x = f.poseD - 0.5 - gesto * 0.75; p.brazoD.rotation.z = -0.35 - gesto * 0.2 }
+      if (p.brazoI) { p.brazoI.rotation.x = f.poseI - 0.15; p.brazoI.rotation.z = 0.2 }
+      // asiente al ritmo de lo que dice el otro
+      if (p.cabeza) { p.cabeza.rotation.x = Math.sin(ph * 1.1) * 0.12; p.cabeza.rotation.y = habla * 0.15 }
+    }
+    return
+  }
+
   if (s === 'cayendo') return   // lo gobierna la batalla
 
-  // parado: respira y echa un vistazo alrededor
+  // parado: respira, echa un vistazo alrededor y de vez en cuando se despereza
   const resp = Math.sin(t * 1.7 + f.fase)
+  // el descanso sale de la propia fase, sin estado ni temporizador: cada figura
+  // se estira en un momento distinto y no cuesta ni una variable más
+  const pausa = Math.sin(t * 0.21 + f.fase * 2.7)
+  const estira = pausa > 0.965 ? (pausa - 0.965) / 0.035 : 0
   if (p.cuerpo) {
-    p.cuerpo.position.y = f.cadera + resp * 0.007
+    p.cuerpo.position.y = f.cadera + resp * 0.007 + estira * 0.03
     p.cuerpo.position.z = 0
-    p.cuerpo.rotation.set(0, 0, 0)
+    p.cuerpo.rotation.set(-estira * 0.18, 0, 0)
   }
   if (p.piernaI) p.piernaI.rotation.x = 0
   if (p.piernaD) p.piernaD.rotation.x = 0
@@ -1216,10 +1381,10 @@ function animarBipedo (f, t) {
       const giro = Math.sin(t * 0.37 + f.fase)
       // pausa-giro-pausa: un seno pelado parecería un ventilador
       p.cabeza.rotation.y = Math.sign(giro) * Math.pow(Math.abs(giro), 0.35) * 0.5
-      p.cabeza.rotation.x = resp * 0.03
+      p.cabeza.rotation.x = resp * 0.03 - estira * 0.3
     }
-    if (p.brazoD) { p.brazoD.rotation.x = f.poseD + resp * 0.04; p.brazoD.rotation.y = 0; p.brazoD.rotation.z = 0 }
-    if (p.brazoI) { p.brazoI.rotation.x = f.poseI - resp * 0.04; p.brazoI.rotation.y = 0; p.brazoI.rotation.z = 0 }
+    if (p.brazoD) { p.brazoD.rotation.x = f.poseD + resp * 0.04 - estira * 2.3; p.brazoD.rotation.y = 0; p.brazoD.rotation.z = -estira * 0.3 }
+    if (p.brazoI) { p.brazoI.rotation.x = f.poseI - resp * 0.04 - estira * 2.3; p.brazoI.rotation.y = 0; p.brazoI.rotation.z = estira * 0.3 }
   }
 }
 
@@ -1566,6 +1731,18 @@ function crearEstandarteBatalla () {
   return g
 }
 
+/** Banderola de formación: palo, moharra y paño del bando, que ondea. */
+function banderola () {
+  const g = new THREE.Group()
+  g.add(pieza(G.cilindro6, mat(PALETA.madera), { y: 0.7, sx: 0.055, sy: 1.4, sz: 0.055 }))
+  g.add(pieza(G.cono6, mat(PALETA.oro), { y: 1.48, sx: 0.1, sy: 0.18, sz: 0.1 }))
+  const pano = pieza(G.caja, mat(PALETA.estandarte), { x: 0.19, y: 1.13, sx: 0.38, sy: 0.42, sz: 0.025 })
+  pano.name = 'pano'
+  g.add(pano)
+  banderas.push({ malla: pano, fase: banderas.length * 1.7 })
+  return g
+}
+
 function limpiarGuarnicion () {
   for (const f of guarnicion) olvidar(f)
   guarnicion.length = 0
@@ -1598,15 +1775,44 @@ export function mostrarGuarnicion (tropas) {
   if (!plan) return
   reunion = { x: plan.reunion.x, z: plan.reunion.z }
 
+  // TODOS MIRANDO AL MISMO LADO. Antes cada uno se torcía un poco "para que no
+  // pareciera de cartón" y el resultado era justo lo contrario: un corrillo. Una
+  // tropa formada impone porque está alineada, así que se calcula UN rumbo —el
+  // que va del centro de la formación al estandarte— y lo copian todos.
+  let mx = 0; let mz = 0
+  for (const q of plan.puestos) { mx += q.x; mz += q.z }
+  if (plan.puestos.length) { mx /= plan.puestos.length; mz /= plan.puestos.length }
+  const e0 = plan.estandarte || plan.reunion
+  let rumbo = Math.atan2(e0.x - mx, e0.z - mz)
+  if (!plan.puestos.length || (Math.abs(e0.x - mx) < 0.2 && Math.abs(e0.z - mz) < 0.2)) rumbo = 0
+
   for (let i = 0; i < plan.puestos.length; i++) {
     const q = plan.puestos[i]
     const fig = crearUnidad(q.tipo, { bando: 'jugador', semilla: i * 37 + 11 })
     const f = animar(fig, { estado: 'parado' })
     f.siempreVisible = true
     const w = gridAMundo(q.x, q.z)
-    plantar(f, w.x, sueloEn(q.x, q.z), w.z, 0.02 * ((i % 3) - 1))
+    plantar(f, w.x, sueloEn(q.x, q.z), w.z, rumbo)
     ;(raizTropa || ctx.raizAldea).add(fig)
     guarnicion.push(f)
+  }
+
+  // dos banderolas en los extremos de la primera fila: enmarcan la formación y
+  // le dan el aire de desfile que no dan los soldados solos
+  if (plan.puestos.length >= 3) {
+    let minX = Infinity; let maxX = -Infinity; let zFrente = Infinity
+    for (const q of plan.puestos) {
+      if (q.x < minX) minX = q.x
+      if (q.x > maxX) maxX = q.x
+      if (q.z < zFrente) zFrente = q.z
+    }
+    for (const gx of [minX - 0.9, maxX + 0.9]) {
+      const w = gridAMundo(gx, zFrente)
+      const b = banderola()
+      b.position.set(w.x, sueloEn(gx, zFrente), w.z)
+      b.rotation.y = rumbo
+      ;(raizTropa || ctx.raizAldea).add(b)
+    }
   }
 
   // el estandarte va SIEMPRE, aunque no haya tropa: es el mando del ejército
@@ -1783,13 +1989,13 @@ function avanzarBatalla (dt, t) {
  * se presta el muñeco con sus animaciones y su desplome.
  *
  * @param {string} tipo unidad del catálogo
- * @param {{bando?:'jugador'|'enemigo', semilla?:number, padre?:THREE.Object3D}} [o]
+ * @param {{bando?:'jugador'|'enemigo', semilla?:number, oficio?:string, padre?:THREE.Object3D}} [o]
  * @returns {{raiz:THREE.Group, x:number, y:number, z:number, viva:boolean,
  *            plantar:Function, ir:Function, mirar:Function, estado:Function,
  *            caer:Function, quitar:Function}}
  */
 export function crearActor (tipo, o = {}) {
-  const fig = crearUnidad(tipo, { bando: o.bando, semilla: o.semilla })
+  const fig = crearUnidad(tipo, { bando: o.bando, semilla: o.semilla, oficio: o.oficio })
   const f = animar(fig, { estado: 'parado' })
   f.siempreVisible = true          // el tope de figuras es para la aldea, no para la batalla
   f.esActor = true
@@ -1904,7 +2110,44 @@ function sincronizar () {
     if (f.estado !== 'cayendo') f.estado = e
   }
   for (const id of [...porAldeano.keys()]) if (!vistos.has(id)) morirAldeano(id)
+
+  if (--relojCharla <= 0) { relojCharla = 8; repartirCharlas() }   // cada dos segundos
 }
+
+/**
+ * DOS QUE SE PARAN A CHARLAR. Una aldea donde todo el mundo está firme parece
+ * un belén; en cuanto dos vecinos se giran el uno hacia el otro y gesticulan,
+ * parece un pueblo. Se busca pareja cada dos segundos y solo entre los que no
+ * tienen faena, así que con sesenta aldeanos son cuatro cuentas.
+ */
+function repartirCharlas () {
+  const libres = []
+  for (const f of porAldeano.values()) {
+    if (f.estadoBase === 'parado' && f.estado === 'parado' && f.tEstado <= 0 && !f.oculto) libres.push(f)
+  }
+  for (let i = 0; i < libres.length; i++) {
+    const a = libres[i]
+    if (a.tEstado > 0) continue
+    for (let j = i + 1; j < libres.length; j++) {
+      const b = libres[j]
+      if (b.tEstado > 0) continue
+      const dx = b.x - a.x
+      const dz = b.z - a.z
+      const d2 = dx * dx + dz * dz
+      if (d2 > 3.2 || d2 < 0.05) continue
+      const ang = Math.atan2(dx, dz)
+      a.angObj = ang                    // se miran a la cara, que es de lo que va
+      b.angObj = ang + Math.PI
+      const dur = 4 + Math.random() * 5
+      gestoPasajero(a, 'charlando', dur)
+      gestoPasajero(b, 'charlando', dur)
+      break
+    }
+  }
+}
+
+/** Cuenta atrás de ticks para la siguiente ronda de charlas. */
+let relojCharla = 8
 
 /** Estado temporal: dura `segundos` y luego vuelve a lo que tocara. */
 function gestoPasajero (f, estado, segundos) {

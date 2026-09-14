@@ -103,6 +103,9 @@ export const PALETA = {
   tejadoAzulOscuro: 0x35547e,
   cobre: 0x4f9e8b,         // cúpulas oxidadas de universidad y monasterio
   carbon: 0x3b3f42,        // madera quemada: ruinas y chimeneas
+  humo: 0xd8d2c8,           // penacho de la fragua y de las chimeneas
+  polvo: 0xdcc9a6,          // el golpe de la mejora al asentarse
+  vidriera: 0x5aa8e0,       // ventanales que brillan de noche en los niveles altos
   ceniza: 0x6b7176,
   fuego: 0xff7043,         // llama de fragua y hoguera
   brasa: 0xffca28,
@@ -128,6 +131,16 @@ export const PALETA = {
   ropaAldeano: 0x8d6e63,
   ropaAldeana: 0x7e57c2,
   metalTropa: 0x9e9e9e,
+  // CÓDIGO DE COLOR POR OFICIO (lo usa render/units.js). Desde la cámara del
+  // juego una figura mide 35 píxeles: la cara no se ve, el color de la ropa sí.
+  // Seis tonos bien separados en la rueda y ninguno azul ni rojo, que están
+  // reservados a los dos bandos de la tropa.
+  oficioLena: 0x35682f,      // leñador: verde bosque OSCURO (sobre la hierba, el verde claro desaparecía)
+  oficioPiedra: 0x8c9aa6,    // cantero: gris azulado de cantera
+  oficioComida: 0xe3bc5a,    // granjera: amarillo de mies
+  oficioOro: 0x7a5ba3,       // minero: morado de mina (el marrón se confundía con el cuero)
+  oficioObra: 0xd87c2e,      // constructor: naranja de obra
+  enemigoOscuro: 0x5c1d1d,   // el granate del enemigo, apagado
   estandarte: 0x1e88e5,
   enemigo: 0x8e2b2b,
   // ropa de aldeano teñida: la variedad es lo que evita el ejército de clones

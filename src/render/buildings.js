@@ -6,7 +6,7 @@ import { game } from '../core/state.js'
 import { gridAMundo, huecoLibre } from '../core/grid.js'
 import { def } from '../data/buildings.js'
 import { ctx, aEscena, onFrame, cuandoListo } from './ctx.js'
-import { mat, M, G, pieza, geoCajaCh } from './mats.js'
+import { mat, M, G, pieza, geoCajaCh, geoTejado2, geoHastial, geoTejado4, geoAguja, geoBulbo, geoZocalo } from './mats.js'
 
 /**
  * EL ASPECTO DE LA ALDEA.
@@ -32,15 +32,26 @@ const PI = Math.PI
 /** 0..3 según la edad (lo manda EV.EDAD_VISUAL). Reviste la aldea entera. */
 let edadVisual = 0
 
-/** Escalón visual: 0 madera y paja, 1 piedra y teja, 2 pizarra y oro. */
-function escalon (nivel, maxNivel = 8) {
+/**
+ * TONO 0..4: la categoría de los materiales. Sube CUATRO veces a lo largo de
+ * la vida del edificio (al 25%, 50%, 75% y 100% de sus niveles) y cada subida
+ * cambia el color del muro Y el del tejado. Es el cambio de nivel más barato
+ * que existe —no añade ni un triángulo— y el que más se ve de lejos.
+ */
+function tonoDe (nivel, maxNivel = 8) {
   const n = Math.max(1, nivel)
-  if (maxNivel <= 1) return edadVisual >= 2 ? 1 : 0
+  if (maxNivel <= 1) return edadVisual >= 2 ? 2 : 1
   const r = (n - 1) / Math.max(1, maxNivel - 1)
-  let e = r >= 0.62 ? 2 : r >= 0.28 ? 1 : 0
-  if (edadVisual >= 3 && e < 2) e++
+  let e = Math.min(4, Math.floor(r * 4.999))
+  if (edadVisual >= 3 && e < 4) e++
   return e
 }
+
+/**
+ * Escalón ESTRUCTURAL 0..2 (empalizada / sillería / almenas). Manda en la
+ * FORMA, no en el color, así que va aparte del tono y cambia menos veces.
+ */
+const escalonDeTono = (tono) => (tono >= 3 ? 2 : tono >= 2 ? 1 : 0)
 
 /**
  * FAMILIA VISUAL de cada edificio: es el código de color que hace que la aldea
@@ -66,13 +77,17 @@ const FAMILIA = {
   muralla: 'defensa', puerta: 'defensa'
 }
 
-/** Tejado y acento de cada familia en los tres escalones. */
+/**
+ * Tejado de cada familia en los CINCO tonos. La familia manda en el color
+ * (verde para recursos, granate para militar…) y el tono en su categoría:
+ * paja -> tablilla -> teja -> teja vieja -> pizarra.
+ */
 const TONOS = {
-  centro: { techo: [PALETA.paja, PALETA.tejado, PALETA.tejadoOscuro], acento: PALETA.telaAzul },
-  recursos: { techo: [PALETA.paja, PALETA.tejaMadera, PALETA.tejaMaderaOscura], acento: PALETA.telaVerde },
-  militar: { techo: [PALETA.cuero, PALETA.tejadoOscuro, PALETA.tejadoOscuro], acento: PALETA.tela },
-  noble: { techo: [PALETA.tejado, PALETA.tejadoAzul, PALETA.tejadoAzulOscuro], acento: PALETA.cobre },
-  defensa: { techo: [PALETA.piedraOscura, PALETA.pizarraClara, PALETA.pizarra], acento: PALETA.telaAzul }
+  centro: { techo: [PALETA.paja, PALETA.tejaMadera, PALETA.tejado, PALETA.tejadoOscuro, PALETA.pizarra], acento: PALETA.telaAzul },
+  recursos: { techo: [PALETA.paja, PALETA.tejaMadera, PALETA.tejaMaderaOscura, PALETA.pizarraClara, PALETA.pizarra], acento: PALETA.telaVerde },
+  militar: { techo: [PALETA.cuero, PALETA.tejaMaderaOscura, PALETA.tejado, PALETA.tejadoOscuro, PALETA.pizarra], acento: PALETA.tela },
+  noble: { techo: [PALETA.tejado, PALETA.tejadoAzul, PALETA.tejadoAzulOscuro, PALETA.cobre, PALETA.pizarra], acento: PALETA.cobre },
+  defensa: { techo: [PALETA.tejaMaderaOscura, PALETA.piedraOscura, PALETA.pizarraClara, PALETA.pizarra, PALETA.tejadoAzulOscuro], acento: PALETA.telaAzul }
 }
 
 const cachePaleta = new Map()
@@ -104,27 +119,39 @@ function paletaDe (t, familia = 'centro') {
     paja: M.paja,
     andamio: M.andamio
   }
-  const e = Math.min(2, Math.max(0, t))
+  const e = Math.min(4, Math.max(0, t))
+  const est = escalonDeTono(e)
   // La defensa es de cantería desde el primer día: una torre de adobe no cuela.
   const esDefensa = familia === 'defensa'
-  const porEscalon = [
+  // El muro sube de categoría en cada tono: adobe crudo, adobe encalado, yeso,
+  // sillería y sillería de buena piedra. Cuatro saltos de color, gratis.
+  const porTono = [
     { muro: esDefensa ? M.piedra : mat(PALETA.adobe), muroAlt: esDefensa ? M.piedraOscura : M.madera, zocalo: M.piedraOscura, suelo: M.tierra },
+    { muro: esDefensa ? M.piedra : mat(PALETA.telaCruda), muroAlt: esDefensa ? M.piedraOscura : M.madera, zocalo: M.piedraOscura, suelo: M.tierra },
     { muro: esDefensa ? M.piedra : M.yeso, muroAlt: esDefensa ? M.piedraOscura : mat(PALETA.adobe), zocalo: M.piedra, suelo: M.camino },
+    { muro: M.piedra, muroAlt: esDefensa ? M.piedraOscura : mat(PALETA.adobe), zocalo: M.piedra, suelo: M.camino },
     { muro: M.piedra, muroAlt: M.piedraOscura, zocalo: M.piedraOscura, suelo: M.camino }
   ][e]
   const tono = TONOS[familia] || TONOS.centro
   const p = {
     ...comun,
-    ...porEscalon,
+    ...porTono,
     techo: mat(tono.techo[e]),
-    techoAlt: mat(e === 2 ? PALETA.pizarraClara : tono.techo[Math.min(2, e + 1)]),
+    techoAlt: mat(tono.techo[Math.min(4, e + 1)]),
     // El acento es LA seña de color de la familia: banderas, toldos, remates.
     acento: mat(tono.acento),
     // Un único tono oscuro por edificio (vigas, herrajes, huecos): así los
     // detalles no multiplican las llamadas de dibujo.
     oscuro: familia === 'militar' || familia === 'defensa' ? M.hierro : mat(PALETA.entramado),
-    remate: e === 2 ? M.oro : (esDefensa ? M.piedra : M.madera),
-    t: e,
+    // Los remates (bolas, faroles, pináculos, filos) son de madera hasta que el
+    // edificio entra en el último cuarto de sus niveles: ahí se vuelven de ORO
+    // sin una línea de código más. Es el premio visual de llegar al tope.
+    remate: e >= 3 ? M.oro : (esDefensa ? M.piedra : M.madera),
+    // Vidriera: apagada en los tonos bajos, encendida cuando el edificio ya es
+    // de piedra. De noche es lo único que brilla en la aldea.
+    vidrio: mat(PALETA.vidriera, { emisivo: e >= 3 ? 0x1d3a52 : 0x000000 }),
+    t: est,
+    tono: e,
     fam: familia
   }
   cachePaleta.set(clave, p)
@@ -156,23 +183,29 @@ const lenoX = (m, x, y, z, d, largo) => pieza(G.tronco, m, { x, y: y + d / 2, z,
 const lenoZ = (m, x, y, z, d, largo) => pieza(G.tronco, m, { x, y: y + d / 2, z, sx: d, sy: largo, sz: d, rx: PI / 2 })
 const roca = (m, x, y, z, d, ry = 0) => pieza(G.esfera, m, { x, y: y + d * 0.32, z, sx: d, sy: d * 0.8, sz: d, ry })
 
-/** Tejado piramidal de base cuadrada (torres y torreones). */
-const techo4 = (m, x, y, z, lado, alt) =>
-  pieza(G.piramide, m, { x, y: y + alt / 2, z, sx: lado * 1.4143, sy: alt, sz: lado * 1.4143 })
+/**
+ * TEJADOS. Todos nacen del mismo perfil curvo: empinado en la cumbrera,
+ * tendido en el alero y volando por fuera del muro. Es lo que da el aire de
+ * juguete de Clash of Clans sin renunciar a la cara plana de Stellar Settlers.
+ * La `y` que reciben sigue siendo el arranque (la línea del alero).
+ */
+/** Capirote cónico con panza y alero: la silueta que dice "torreón" desde lejos. */
+const techoCono = (m, x, y, z, d, alt, lados = 8) => pieza(geoAguja(lados), m, { x, y, z, sx: d, sy: alt, sz: d })
 
-/** Tejado cónico: la silueta que dice "torreón" desde lejos. */
-const techoCono = (m, x, y, z, d, alt) => pieza(G.cono8, m, { x, y: y + alt / 2, z, sx: d, sy: alt, sz: d })
-
-/** Tejado a CUATRO AGUAS (pirámide sobre rectángulo): silueta compacta, sin hastiales. */
+/**
+ * Cuatro aguas sobre rectángulo: silueta compacta, sin hastiales. Se le sube
+ * una PENDIENTE MÍNIMA: a cuatro aguas el faldón se ve mucho más tumbado que a
+ * dos, y con la altura que pedían los edificios el tejado quedaba de plato.
+ */
 const techo4Aguas = (m, x, y, z, ancho, prof, alt) =>
-  pieza(G.piramide, m, { x, y: y + alt / 2, z, sx: ancho * 1.4143, sy: alt, sz: prof * 1.4143 })
+  pieza(geoTejado4(), m, { x, y, z, sx: ancho * 1.4143, sy: Math.max(alt * 1.12, Math.min(ancho, prof) * 0.42), sz: prof * 1.4143 })
 
 /** Triángulo del hastial: un cono de 4 lados aplastado en Z es exactamente eso. */
 const hastial = (m, x, y, z, ancho, alt, gro = 0.16) =>
   pieza(G.cono, m, { x, y: y + alt / 2, z, sx: ancho, sy: alt, sz: gro })
 
 /**
- * ARCO DE MEDIO PUNTO. Medio cilindro de 10 caras: puertas, ventanas, arquerías
+ * ARCO DE MEDIO PUNTO. Medio cilindro de ocho caras: puertas, ventanas, arquerías
  * y soportales. Es lo que separa un edificio "de verdad" de una caja con un
  * rectángulo oscuro pintado. `y` es el arranque del arco (la línea de imposta).
  */
@@ -187,26 +220,22 @@ function hueco (l, m, x, y, z, luz, alto, gro = 0.06) {
 /** Bóveda de cañón: el mismo medio cilindro, pero a tamaño de tejado. */
 const boveda = (m, x, y, z, ancho, prof) => pieza(G.arco, m, { x, y, z, sx: ancho, sy: ancho, sz: prof })
 
-/** Cúpula facetada: remate noble de torres (universidad, monasterio, concejo). */
-const cupula = (m, x, y, z, d, alt) => pieza(G.cupula, m, { x, y, z, sx: d, sy: alt * 2, sz: d })
-
 /**
  * Tejado a dos aguas: dos losas inclinadas con vuelo, CABALLETE redondeado y
  * canto de alero. El caballete corre en Z, así que los hastiales miran a ±Z.
  * El cilindro de la cumbrera es barato y es lo que da el aire de teja curva.
  */
-function techo2Aguas (m, x, y, z, ancho, prof, alt, vuelo = 0.16) {
-  const g = new THREE.Group()
-  const ang = Math.atan2(alt, ancho / 2)
-  const largo = Math.hypot(ancho / 2, alt) + vuelo
-  const gro = 0.11
-  const fondo = prof + vuelo * 2
-  g.add(pieza(G.caja, m, { x: -ancho / 4, y: alt / 2, z: 0, sx: largo, sy: gro, sz: fondo, rz: ang }))
-  g.add(pieza(G.caja, m, { x: ancho / 4, y: alt / 2, z: 0, sx: largo, sy: gro, sz: fondo, rz: -ang }))
-  g.add(pieza(G.cilindro6, m, { x: 0, y: alt + gro * 0.3, z: 0, sx: 0.17, sy: fondo, sz: 0.17, rx: PI / 2 }))
-  g.position.set(x, y, z)
-  return g
-}
+const techo2Aguas = (m, x, y, z, ancho, prof, alt, vuelo = 0.16) =>
+  pieza(geoTejado2(ancho, prof, alt, vuelo), m, { x, y, z })
+
+/** Testero del tejado a dos aguas: MISMO perfil que el faldón, encaja al milímetro. */
+const fronton = (m, x, y, z, ancho, alt, gro = 0.14) => pieza(geoHastial(ancho, alt, gro), m, { x, y, z })
+
+/** Cúpula bulbosa (de cebolla): el remate que más carácter da a un edificio noble. */
+const bulbo = (m, x, y, z, d, alt) => pieza(geoBulbo(10), m, { x, y, z, sx: d, sy: alt, sz: d })
+
+/** Plinto con TODOS los cantos matados: lo que asienta el edificio en el suelo. */
+const plinto = (m, x, y, z, sx, sy, sz, ch = 0.1) => pieza(geoZocalo(sx, sy, sz, ch), m, { x, y: y + sy / 2, z })
 
 /** Cornisa: una losa fina que vuela sobre el muro. Da sombra y "acaba" el edificio. */
 const cornisa = (m, x, y, z, sx, sz, gro = 0.09) => cajaR(m, x, y, z, sx, gro, sz, 0, 0.05)
@@ -229,7 +258,9 @@ function almenas (l, m, x, y, z, largo, prof, paso = 0.36, alt = 0.2, enZ = fals
   const d = largo / n
   for (let i = 0; i < n; i += 2) {
     const o = -largo / 2 + d / 2 + i * d
-    l.push(enZ ? cajaR(m, x, y, z + o, prof, alt, d * 0.92, 0, 0.05) : cajaR(m, x + o, y, z, d * 0.92, alt, prof, 0, 0.05))
+    // Merlón con caja simple: a este tamaño el chaflán no se distingue y son
+    // 16 triángulos menos POR MERLÓN, y un castillo lleva cuarenta.
+    l.push(enZ ? caja(m, x, y, z + o, prof, alt, d * 0.92) : caja(m, x + o, y, z, d * 0.92, alt, prof))
   }
 }
 
@@ -321,7 +352,7 @@ function fAyuntamiento ({ p, n, t, det }) {
   const ht = 1.0 + 0.05 * n
   l.push(cajaR(p.muro, 0, yt, -0.6, 1.0, ht, 1.0, 0, 0.12))
   l.push(cornisa(p.muroAlt, 0, yt + ht, -0.6, 1.2, 1.2, 0.12))
-  l.push(cupula(p.oro, 0, yt + ht + 0.12, -0.6, 1.12, 0.6))
+  l.push(bulbo(p.oro, 0, yt + ht + 0.12, -0.6, 1.12, 0.78))
   l.push(caja(p.oro, 0, yt + ht + 0.7, -0.6, 0.07, 0.36, 0.07))
   l.push(pieza(G.esfera, p.oro, { x: 0, y: yt + ht + 1.14, z: -0.6, sx: 0.17, sy: 0.21, sz: 0.17 }))
   // dos esferas de reloj, a las dos caras que mira la cámara del juego
@@ -349,8 +380,8 @@ function fCasa ({ p, n, t, det }) {
   l.push(cajaR(p.muro, 0, y, 0, 1.42, h, 1.32, 0, 0.1))
   if (t < 2) entramado(l, p, 0, y, 0, 1.42, h, 1.32)
   l.push(techo2Aguas(p.techo, 0, y + h, 0, 1.68, 1.48, ht))
-  l.push(hastial(p.muroAlt, 0, y + h, 0.71, 1.68, ht))
-  l.push(hastial(p.muroAlt, 0, y + h, -0.71, 1.68, ht))
+  l.push(fronton(p.muroAlt, 0, y + h, 0.71, 1.68, ht))
+  l.push(fronton(p.muroAlt, 0, y + h, -0.71, 1.68, ht))
   hueco(l, p.madera, -0.3, y, 0.67, 0.4, 0.4, 0.07)
   hueco(l, p.oscuro, 0.34, y + 0.28, 0.67, 0.32, 0.18, 0.05)
   // CHIMENEA REDONDA: en toda la aldea solo la casa tiene tubo cilíndrico
@@ -585,9 +616,21 @@ function fGranero ({ p, n, t, det }) {
   }
   l.push(cornisa(p.muroAlt, 0, y + 0.53 + h, 0, 2.3, 2.05, 0.11))
   l.push(techo4Aguas(p.techo, 0, y + 0.64 + h, 0, 2.3, 2.05, 1.25))
-  // VELETA dorada en la cumbre: remate inconfundible desde arriba
+  // VELETA dorada en la cumbre: remate inconfundible desde arriba, y a
+  // calidad alta gira a rachas, como si soplara el viento de verdad
   l.push(caja(p.remate, 0, y + 1.89 + h, 0, 0.06, 0.34, 0.06))
-  l.push(pieza(G.cono6, p.oro, { x: 0.13, y: y + 2.12 + h, z: 0, sx: 0.3, sy: 0.26, sz: 0.06, rz: -PI / 2 }))
+  const gallo = pieza(G.cono6, p.oro, { x: 0.13, y: y + 2.12 + h, z: 0, sx: 0.3, sy: 0.26, sz: 0.06, rz: -PI / 2 })
+  if (ctx.calidad === 'alto') {
+    const eje = new THREE.Group()
+    eje.position.set(0, y + 2.12 + h, 0)
+    gallo.position.set(0.13, 0, 0)
+    eje.add(gallo)
+    eje.add(caja(p.oro, -0.11, -0.03, 0, 0.2, 0.05, 0.05))
+    eje.userData.anim = 'veleta'
+    l.push(eje)
+  } else {
+    l.push(gallo)
+  }
   hueco(l, p.madera, 0, y + 0.53, 0.9, 0.72, 0.6, 0.07)
   // GAVILLAS DE TRIGO al pie: el grano se ve, no hace falta leer el cartel
   l.push(roca(p.trigo, 1.18, y, 1.05, 0.5))
@@ -825,6 +868,21 @@ function fHerreria ({ p, n, t, det }) {
     l.push(cajaR(p.madera, 1.3, y, -0.2, 0.52, 0.42, 0.52, 0, 0.06))
     l.push(caja(mat(PALETA.agua), 1.3, y + 0.38, -0.2, 0.44, 0.06, 0.44))
     l.push(roca(p.carbon, -1.35, y, 0.85, 0.46))
+    // FUELLE: el cuero respira y mueve la fragua. Una malla, un seno.
+    const fuelle = caja(p.madera, 0.05, y + 0.16, 0.95, 0.3, 0.26, 0.52)
+    fuelle.userData.anim = 'fuelle'
+    l.push(fuelle)
+  }
+  // PENACHO DE HUMO saliendo de la chimenea. Cuesta una llamada de dibujo, y
+  // solo hay una herrería por aldea, pero se reserva a calidad alta igual.
+  if (ctx.calidad === 'alto') {
+    const humo = pieza(G.esfera, mat(PALETA.humo, { transparente: 0.5 }), {
+      x: -0.8, y: y + hc + 0.35, z: 0.3, sx: 0.62, sy: 0.56, sz: 0.62
+    })
+    humo.userData.anim = 'humo'
+    humo.castShadow = false
+    humo.receiveShadow = false
+    l.push(humo)
   }
   return l
 }
@@ -844,15 +902,15 @@ function fUniversidad ({ p, n, t, det }) {
   l.push(cornisa(p.muroAlt, 0, y + 0.24 + h * 0.72 + 0.35, 0.95, 2.45, 0.55, 0.14))
   l.push(cornisa(p.muroAlt, 0, y + 0.24 + h, -0.25, 2.55, 2.2, 0.13))
   l.push(techo2Aguas(p.techo, 0, y + 0.37 + h, -0.25, 2.55, 2.2, 0.82))
-  l.push(hastial(p.muroAlt, 0, y + 0.37 + h, 0.85, 2.55, 0.82))
-  l.push(hastial(p.muroAlt, 0, y + 0.37 + h, -1.35, 2.55, 0.82))
+  l.push(fronton(p.muroAlt, 0, y + 0.37 + h, 0.85, 2.55, 0.82))
+  l.push(fronton(p.muroAlt, 0, y + 0.37 + h, -1.35, 2.55, 0.82))
   // VENTANALES ALTOS con arco: tres huecos azules muy verticales
-  for (const x of [-0.72, 0, 0.72]) hueco(l, p.telaAzul, x, y + 0.24 + h * 0.3, -1.24, 0.28, h * 0.45, 0.06)
+  for (const x of [-0.72, 0, 0.72]) hueco(l, p.vidrio, x, y + 0.24 + h * 0.3, -1.24, 0.28, h * 0.45, 0.06)
   // TORRE DEL ESCRIBANO con CÚPULA DE COBRE: el remate verde que la identifica
   const ht = h + 0.75
   l.push(cil12(p.muro, 1.08, y + 0.24, -1.08, 0.72, ht))
   l.push(cil12(p.muroAlt, 1.08, y + 0.24 + ht, -1.08, 0.86, 0.12))
-  l.push(cupula(p.acento, 1.08, y + 0.36 + ht, -1.08, 0.86, 0.52))
+  l.push(bulbo(p.acento, 1.08, y + 0.36 + ht, -1.08, 0.9, 0.72))
   l.push(caja(p.oro, 1.08, y + 0.88 + ht, -1.08, 0.06, 0.3, 0.06))
   l.push(pieza(G.esfera, p.oro, { x: 1.08, y: y + 1.22 + ht, z: -1.08, sx: 0.15, sy: 0.18, sz: 0.15 }))
   if (det) {
@@ -878,8 +936,8 @@ function fMonasterio ({ p, n, t, det }) {
   l.push(cajaR(p.muro, 0.25, y + 0.22, 0, 2.0, h, 2.0, 0, 0.13))
   l.push(cornisa(p.muroAlt, 0.25, y + 0.22 + h, 0, 2.25, 2.25, 0.12))
   l.push(techo2Aguas(p.techo, 0.25, y + 0.34 + h, 0, 2.25, 2.2, 0.72))
-  l.push(hastial(p.muroAlt, 0.25, y + 0.34 + h, 1.1, 2.25, 0.72))
-  l.push(hastial(p.muroAlt, 0.25, y + 0.34 + h, -1.1, 2.25, 0.72))
+  l.push(fronton(p.muroAlt, 0.25, y + 0.34 + h, 1.1, 2.25, 0.72))
+  l.push(fronton(p.muroAlt, 0.25, y + 0.34 + h, -1.1, 2.25, 0.72))
   // CAMPANARIO CON AGUJA DE COBRE: la torre más fina y más alta de la aldea
   const ht = h + 1.85
   l.push(cajaR(p.muro, -1.05, y, 0.9, 0.82, ht, 0.82, 0, 0.1))
@@ -887,11 +945,11 @@ function fMonasterio ({ p, n, t, det }) {
   l.push(arco(p.muro, -1.05, y + ht - 0.12, 0.9, 0.82, 0.86))
   l.push(pieza(G.cono8, p.oro, { x: -1.05, y: y + ht - 0.4, z: 0.9, sx: 0.36, sy: 0.36, sz: 0.36, rx: PI }))
   l.push(cornisa(p.muroAlt, -1.05, y + ht + 0.29, 0.9, 0.98, 0.98, 0.11))
-  l.push(pieza(G.cono8, p.acento, { x: -1.05, y: y + ht + 0.4 + 0.55, z: 0.9, sx: 1.0, sy: 1.1, sz: 1.0 }))
+  l.push(techoCono(p.acento, -1.05, y + ht + 0.4, 0.9, 1.0, 1.15))
   l.push(caja(p.oro, -1.05, y + ht + 1.5, 0.9, 0.07, 0.42, 0.07))
   l.push(caja(p.oro, -1.05, y + ht + 1.66, 0.9, 0.28, 0.07, 0.07))
   // ROSETÓN: la mancha de color de la fachada
-  l.push(pieza(G.cilindro12, p.telaAzul, { x: 0.25, y: y + 0.22 + h * 0.62, z: 1.03, sx: 0.66, sy: 0.06, sz: 0.66, rx: PI / 2 }))
+  l.push(pieza(G.cilindro12, p.vidrio, { x: 0.25, y: y + 0.22 + h * 0.62, z: 1.03, sx: 0.66, sy: 0.06, sz: 0.66, rx: PI / 2 }))
   l.push(pieza(G.cilindro12, p.acento, { x: 0.25, y: y + 0.22 + h * 0.62, z: 1.07, sx: 0.32, sy: 0.05, sz: 0.32, rx: PI / 2 }))
   // portada con arco apuntado sobre arco de medio punto
   hueco(l, p.madera, 0.25, y + 0.22, 1.03, 0.56, h * 0.4, 0.07)
@@ -1144,8 +1202,8 @@ function fPuestoAvanzado ({ p, n, t, det }) {
     l.push(cajaR(p.zocalo, cx, y, cz, w + 0.14, 0.1, w * 0.84 + 0.14, 0, 0.06))
     l.push(cajaR(p.muro, cx, y + 0.1, cz, w, alt, w * 0.84, 0, 0.07))
     l.push(techo2Aguas(p.techo, cx, y + 0.1 + alt, cz, w + 0.24, w * 0.84 + 0.2, 0.34, 0.1))
-    l.push(hastial(p.muroAlt, cx, y + 0.1 + alt, cz + (w * 0.84 + 0.2) / 2, w + 0.24, 0.34, 0.08))
-    l.push(hastial(p.muroAlt, cx, y + 0.1 + alt, cz - (w * 0.84 + 0.2) / 2, w + 0.24, 0.34, 0.08))
+    l.push(fronton(p.muroAlt, cx, y + 0.1 + alt, cz + (w * 0.84 + 0.2) / 2, w + 0.24, 0.34, 0.08))
+    l.push(fronton(p.muroAlt, cx, y + 0.1 + alt, cz - (w * 0.84 + 0.2) / 2, w + 0.24, 0.34, 0.08))
     hueco(l, p.oscuro, cx, y + 0.1, cz + w * 0.42 + 0.02, w * 0.32, alt * 0.5, 0.05)
   }
   casita(0.62, -0.62, 0.92, 0.5 + 0.02 * n)
@@ -1273,6 +1331,116 @@ function fPuerta ({ p, n, t, det }) {
   return l
 }
 
+// ── GALONES DE NIVEL ─────────────────────────────────────────────────────
+
+/**
+ * Lo que hace que subir de nivel SE VEA, nivel a nivel.
+ *
+ * Es una lista ACUMULATIVA: el nivel n lleva todo lo del anterior y una cosa
+ * más. Se reparte entre el nivel 1 y el máximo del edificio, así que en uno de
+ * 14 niveles cae un añadido por nivel y en uno de 8 caen dos. Todo vive en el
+ * PERÍMETRO de la plataforma —el único sitio que se conoce sin saber la forma
+ * del edificio— y todo reutiliza materiales que el edificio ya tiene, así que
+ * se funde en las mismas mallas: ni una llamada de dibujo más.
+ *
+ * OJO: p.remate es madera hasta el escalón de piedra y ORO en el último, así
+ * que los mismos adornos se vuelven dorados al llegar al tope sin código aparte.
+ */
+const ORNAMENTOS = [
+  // 1 · PEANA: un escalón ancho al pie. El edificio deja de flotar sobre el césped.
+  (l, p, o) => l.push(caja(p.piedra, 0, o.y - 0.07, 0, o.ancho - 0.02, 0.08, o.alto - 0.02)),
+  // 2 · ESCALINATA al frente: ya hay por dónde entrar, y se nota desde arriba
+  (l, p, o) => l.push(caja(p.piedra, 0, o.y - 0.09, o.hz + 0.3, Math.min(1.25, o.ancho * 0.45), 0.1, 0.44)),
+  // 3 · FAROL a la izquierda de la puerta
+  (l, p, o) => farol(l, p, o, -1),
+  // 4 · …y el de la derecha: dos niveles, dos cambios
+  (l, p, o) => farol(l, p, o, 1),
+  // 5 · CONTRAFUERTES: los machones que dicen "esto ya pesa"
+  (l, p, o) => {
+    for (const sx of [-1, 1]) {
+      l.push(pieza(G.caja, p.piedra, { x: sx * (o.hx + 0.02), y: o.y + 0.44, z: -o.hz * 0.3, sx: 0.26, sy: 0.95, sz: 0.44, rz: sx * 0.1 }))
+    }
+  },
+  // 6 · ESTANDARTE alto a la espalda: la primera seña de rango que se ve de lejos
+  (l, p, o) => {
+    const z = -(o.hz + 0.3)
+    l.push(caja(p.palo, 0, o.y - 0.05, z, 0.09, 1.5, 0.09))
+    l.push(caja(p.tela, 0.25, o.y + 0.9, z, 0.44, 0.52, 0.04))
+    l.push(pieza(G.cono, p.tela, { x: 0.25, y: o.y + 0.79, z, sx: 0.44, sy: 0.22, sz: 0.04, rz: PI }))
+  },
+  // 7 · MOJONES delanteros: el recinto propio empieza a cerrarse
+  (l, p, o) => {
+    for (const sx of [-1, 1]) l.push(caja(p.piedra, sx * o.hx, o.y - 0.04, o.hz, 0.24, 0.52, 0.24))
+  },
+  // 8 · …y los de atrás: el recinto queda cerrado
+  (l, p, o) => {
+    for (const sx of [-1, 1]) l.push(caja(p.piedra, sx * o.hx, o.y - 0.04, -o.hz, 0.24, 0.52, 0.24))
+  },
+  // 9 · PINÁCULOS sobre los mojones (de madera abajo, de oro en el tope)
+  (l, p, o) => {
+    for (const sx of [-1, 1]) {
+      l.push(pieza(G.cono6, p.luz, { x: sx * o.hx, y: o.y + 0.62, z: -o.hz, sx: 0.3, sy: 0.36, sz: 0.3 }))
+      l.push(pieza(G.cono6, p.luz, { x: sx * o.hx, y: o.y + 0.62, z: o.hz, sx: 0.3, sy: 0.36, sz: 0.3 }))
+    }
+  },
+  // 10 · FILO DE ORO en el plinto: una losa un pelín MÁS ANCHA que el plinto y
+  //      metida a media altura, así solo asoma el canto. El edificio ya es de los caros.
+  (l, p, o) => l.push(caja(p.luz, 0, o.y - 0.055, 0, o.ancho - 0.1, 0.05, o.alto - 0.1)),
+  // 11 · CORONA de remates dorados: el tope, y se ve sin leer el número
+  (l, p, o) => {
+    for (const sx of [-1, 1]) {
+      l.push(caja(p.luz, sx * o.hx, o.y + 0.06, 0, 0.16, 0.18, 0.16))
+      l.push(caja(p.luz, sx * o.hx * 0.42, o.y + 0.06, -o.hz, 0.16, 0.18, 0.16))
+    }
+  }
+]
+
+/** Farol de la entrada: poste de piedra y luz encima (dorada en el tope). */
+function farol (l, p, o, lado) {
+  const x = lado * (Math.min(1.25, o.ancho * 0.45) / 2 + 0.3)
+  const z = o.hz + 0.26
+  l.push(caja(p.piedra, x, o.y - 0.08, z, 0.13, 0.7, 0.13))
+  l.push(caja(p.luz, x, o.y + 0.62, z, 0.16, 0.17, 0.16))
+  l.push(pieza(G.cono6, p.piedra, { x, y: o.y + 0.86, z, sx: 0.24, sy: 0.14, sz: 0.24 }))
+}
+
+/**
+ * Paleta de los galones RESUELTA contra los materiales que el edificio ya usa.
+ *
+ * Es la clave de que esto sea gratis: un adorno nunca estrena material, y un
+ * material nuevo en un edificio es una llamada de dibujo más POR EDIFICIO. Si
+ * la piedra que pide el adorno no está en la casa, se coge la que sí esté.
+ * La única excepción es la LUZ dorada del tope, que sí se permite estrenar:
+ * es el premio de llegar al último cuarto de niveles y se ve a la legua.
+ */
+function paletaGalon (p, usados) {
+  const hay = (m) => m && usados.has(m.uuid)
+  const primero = (...ms) => ms.find(hay) || ms[0]
+  return {
+    piedra: primero(p.zocalo, p.muroAlt, p.piedraOscura, p.piedra, p.muro),
+    palo: primero(p.madera, p.oscuro, p.muroAlt, p.zocalo),
+    tela: primero(p.acento, p.tela, p.techo, p.muroAlt),
+    luz: p.remate
+  }
+}
+
+/** Cuántos galones toca lucir, y los coloca. */
+function galones (l, p, o, usados) {
+  const max = Math.max(1, o.max | 0)
+  if (max <= 1) return
+  const N = ORNAMENTOS.length
+  const cuantos = Math.max(0, Math.min(N, Math.round(((o.n - 1) / (max - 1)) * N)))
+  if (!cuantos) return
+  const pg = paletaGalon(p, usados)
+  const c = {
+    ...o,
+    hx: o.ancho / 2 - 0.17,
+    hz: o.alto / 2 - 0.17,
+    y: o.plano ? 0.02 : SUELO
+  }
+  for (let i = 0; i < cuantos; i++) ORNAMENTOS[i](l, pg, c)
+}
+
 // ── obra, ruina y respaldo genérico ──────────────────────────────────────
 
 /** Andamio: estructura a medias, montón de material y cartel de obra. */
@@ -1338,7 +1506,7 @@ function fGenerico ({ p, n, t, det, ancho, alto }) {
   l.push(caja(p.zocalo, 0, y, 0, ancho - 0.4, 0.14, alto - 0.4))
   l.push(caja(p.muro, 0, y + 0.14, 0, ancho - 0.6, h, alto - 0.6))
   l.push(techo2Aguas(p.techo, 0, y + 0.14 + h, 0, ancho - 0.3, alto - 0.35, 0.5))
-  l.push(hastial(p.muroAlt, 0, y + 0.14 + h, (alto - 0.6) / 2, ancho - 0.3, 0.5))
+  l.push(fronton(p.muroAlt, 0, y + 0.14 + h, (alto - 0.6) / 2, ancho - 0.3, 0.5))
   l.push(caja(p.madera, 0, y + 0.14, (alto - 0.6) / 2, 0.4, 0.6, 0.06))
   return l
 }
@@ -1374,6 +1542,13 @@ const CONSTRUCTORES = {
 
 /** Estos se apoyan directamente en la hierba: una plataforma les quedaría fatal. */
 const SIN_PLATAFORMA = new Set(['muralla', 'puerta', 'estandarte', 'pozo', 'cantera', 'mina_oro', 'granja', 'campamento_explorador'])
+
+/**
+ * Y estos tampoco lucen galones de nivel: los trozos de muralla son de una
+ * casilla y se trenzan con sus vecinos (cualquier adorno rompe el encaje), y
+ * el pozo y el estandarte no suben de nivel.
+ */
+const SIN_GALONES = new Set(['muralla', 'puerta', 'estandarte', 'pozo'])
 
 // ── fábrica de modelos (una vez por tipo+nivel+escalón, el resto son clones) ──
 
@@ -1423,7 +1598,7 @@ function fusionar (raiz) {
     raiz.updateMatrixWorld(true)
     const porMat = new Map()
     const vivos = []
-    const base = new THREE.Matrix4()
+    const base = raiz.matrix.clone()      // el escalado de nivel de la raíz se hornea aquí
     const recoger = (nodo, m) => {
       const mm = m.clone().multiply(nodo.matrix)
       if (tieneAnim(nodo)) { vivos.push({ nodo, mm }); return }
@@ -1485,8 +1660,8 @@ export function crearEdificio (tipo, nivel = 1, o = {}) {
 function montar (tipo, n, estado, mask, d) {
   const ancho = d.ancho ?? 2
   const alto = d.alto ?? 2
-  const t = escalon(n, d.maxNivel || 8)
-  const p = paletaDe(t, FAMILIA[tipo] || 'centro')
+  const p = paletaDe(tonoDe(n, d.maxNivel || 8), FAMILIA[tipo] || 'centro')
+  const t = p.t
   const det = ctx.calidad !== 'bajo'
   const raiz = new THREE.Group()
   let piezas
@@ -1494,16 +1669,39 @@ function montar (tipo, n, estado, mask, d) {
   else if (estado === 'ruina') piezas = fRuina(p, ancho, alto)
   else {
     piezas = []
-    if (!SIN_PLATAFORMA.has(tipo)) {
-      piezas.push(caja(p.suelo, 0, 0, 0, ancho - 0.14, SUELO, alto - 0.14))
-      // El escalón máximo lleva filo de oro en la plataforma: desde la cámara del
-      // juego se ve QUÉ está al tope sin abrir ninguna ficha. Es un solo prisma y
-      // comparte material con los remates dorados, así que no cuesta ni una llamada.
-      if (t === 2) piezas.push(caja(p.remate, 0, SUELO * 0.3, 0, ancho - 0.05, 0.045, alto - 0.05))
+    const plano = SIN_PLATAFORMA.has(tipo)
+    if (!plano) {
+      // PLATAFORMA PROPIA: un plinto con los doce cantos matados. Sin él el
+      // edificio se ve pegado al césped como una calcomanía; con él se asienta,
+      // que es media pelea del acabado. Va del MISMO material que el zócalo del
+      // edificio, así que no estrena material ni cuesta una llamada de dibujo.
+      piezas.push(plinto(p.zocalo, 0, -0.015, 0, ancho - 0.16, SUELO + 0.025, alto - 0.16, 0.12))
     }
-    piezas.push(...(CONSTRUCTORES[tipo] || fGenerico)({ p, n, t, det, ancho, alto, mask }))
+    const cuerpo = (CONSTRUCTORES[tipo] || fGenerico)({ p, n, t, det, ancho, alto, mask })
+    piezas.push(...cuerpo)
+    if (!SIN_GALONES.has(tipo)) {
+      // qué materiales gasta ya este edificio: los galones se atendrán a ellos
+      const usados = new Set(plano ? [] : [p.zocalo.uuid])
+      const anotar = (x) => {
+        // lo que cuelga de una pieza ANIMADA no entra en la fusión estática, así
+        // que su material no vale como "ya lo tengo": contarlo colaría un
+        // material nuevo en la malla fusionada y con él una llamada de dibujo
+        if (tieneAnim(x)) return
+        if (x.isMesh) usados.add(x.material.uuid)
+        if (x.children) for (const h of x.children) anotar(h)
+      }
+      for (const x of piezas) if (x) anotar(x)
+      galones(piezas, p, { n, max: d.maxNivel || 8, t, det, ancho, alto, plano }, usados)
+    }
   }
   for (const x of piezas) if (x) raiz.add(x)
+  // CRECER CON EL NIVEL: un empujón por nivel, mucho más en alto que en planta
+  // (en planta hay vecinos pegados). Acumulado, el nivel 14 saca una cabeza al
+  // nivel 1 y la diferencia entre dos niveles seguidos ya se nota en la silueta.
+  if (estado === 'ok') {
+    const ex = 1 + 0.005 * (n - 1)
+    raiz.scale.set(ex, 1 + 0.021 * (n - 1), ex)
+  }
   return fusionar(raiz)
 }
 
@@ -1557,6 +1755,8 @@ function registrarAnim (g, id) {
       bx: o.rotation.x,
       by: o.rotation.y,
       bz: o.rotation.z,
+      py: o.position.y,
+      s0: o.scale.x,
       sy: o.scale.y
     })
   })
@@ -1567,7 +1767,33 @@ function olvidarAnim (id) {
 }
 
 function tween (g, tipo, dur, alAcabar) {
-  tweens.push({ g, tipo, k: 0, dur, alAcabar })
+  tweens.push({ g, tipo, k: 0, dur, alAcabar, y0: g.position.y })
+}
+
+// ── el polvo de la mejora ────────────────────────────────────────────────
+// Cuando el edificio nuevo golpea el suelo levanta un halo de polvo que se
+// abre y se deshace. Es UNA malla reciclada de una reserva de tres: ni se
+// crea nada por frame ni se toca el material compartido (se apaga aplastando
+// el disco, no bajando la opacidad, que afectaría a los demás).
+const anillosPolvo = []
+const polvos = []
+
+function polvoDeMejora (pos, b) {
+  if (ctx.calidad === 'bajo') return
+  const r = Math.max(b?.ancho ?? 2, b?.alto ?? 2) * 0.42
+  let a = anillosPolvo.find(x => !x.visible)
+  if (!a) {
+    if (anillosPolvo.length >= 3) return
+    a = pieza(G.cilindro12, mat(PALETA.polvo, { transparente: 0.5 }), {})
+    a.castShadow = false
+    a.receiveShadow = false
+    a.renderOrder = 2
+    anillosPolvo.push(a)
+    aEscena(a)
+  }
+  a.position.set(pos.x, pos.y + 0.05, pos.z)
+  a.visible = true
+  polvos.push({ obj: a, k: 0, r })
 }
 
 /** Dibuja (o redibuja) un edificio. `efecto` da el plop, la mejora o nada. */
@@ -1587,8 +1813,9 @@ function pintar (b, efecto = null) {
   if (viejo) {
     olvidarAnimDe(viejo.g, b.id)
     if (efecto === 'mejora') {
-      tween(viejo.g, 'encoger', 0.28, () => desmontar(viejo.g))
-      tween(g, 'plop', 0.45)
+      tween(viejo.g, 'encoger', 0.2, () => desmontar(viejo.g))
+      tween(g, 'aterrizar', 0.62)
+      polvoDeMejora(g.position, b)
     } else {
       desmontar(viejo.g)
       if (efecto === 'plop') tween(g, 'plop', 0.45)
@@ -1674,14 +1901,51 @@ function animar (dt, t) {
         a.obj.scale.y = a.sy * (1 + Math.sin(t * 7 + a.fase) * 0.22)
         a.obj.rotation.y = a.by + Math.sin(t * 4 + a.fase) * 0.25
         break
+      case 'humo': {
+        // El penacho SUBE, se abre y se deshace, y vuelve a empezar. Un solo
+        // objeto reciclado: ni una malla nueva por frame.
+        const u = (t * 0.3 * a.vel + a.fase * 0.16) % 1
+        a.obj.position.y = a.py + u * 1.25
+        const e = a.s0 * (0.4 + u * 1.15) * (1 - u * 0.82)
+        a.obj.scale.set(Math.max(0.01, e), Math.max(0.01, e), Math.max(0.01, e))
+        a.obj.rotation.y = a.by + u * 1.4
+        break
+      }
+      case 'fuelle':
+        // el fuelle de la fragua respira: aplasta y estira despacio
+        a.obj.scale.y = a.sy * (1 + Math.sin(t * 1.9 + a.fase) * 0.28)
+        break
+      case 'veleta':
+        // gira a rachas, no a velocidad constante: parece viento y no un motor
+        a.obj.rotation.y = a.by + Math.sin(t * 0.31 + a.fase) * 1.5 + Math.sin(t * 0.73 + a.fase) * 0.35
+        break
     }
+  }
+
+  for (let i = polvos.length - 1; i >= 0; i--) {
+    const d = polvos[i]
+    d.k += dt / 0.5
+    const k = Math.min(1, d.k)
+    const e = d.r * (0.55 + k * 1.7)
+    d.obj.scale.set(e, Math.max(0.005, 0.3 * (1 - k) * (1 - k)), e)
+    d.obj.position.y += dt * 0.22
+    if (k >= 1) { d.obj.visible = false; polvos.splice(i, 1) }
   }
 
   for (let i = tweens.length - 1; i >= 0; i--) {
     const w = tweens[i]
     w.k += dt / w.dur
     const k = Math.min(1, w.k)
-    if (w.tipo === 'plop') {
+    if (w.tipo === 'aterrizar') {
+      // LA MEJORA: el edificio nuevo cae desde arriba y da un golpe al asentar.
+      // El rebote amortiguado (squash & stretch) es lo que le da el empaque.
+      const caida = k < 0.4 ? Math.pow(1 - k / 0.4, 2) * 0.85 : 0
+      const g2 = Math.max(0, (k - 0.4) / 0.6)
+      const golpe = k < 0.4 ? 0 : Math.sin(g2 * Math.PI * 2.3) * Math.exp(-g2 * 3.6) * 0.2
+      w.g.position.y = w.y0 + caida
+      w.g.scale.set(1 + golpe, Math.max(0.05, 1 - golpe * 1.4), 1 + golpe)
+      if (k >= 1) { w.g.position.y = w.y0; w.g.scale.set(1, 1, 1) }
+    } else if (w.tipo === 'plop') {
       // rebote corto: aparece cayendo y asienta. Es la recompensa de tocar "construir".
       const c = 2.2
       const s = 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2)

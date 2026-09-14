@@ -97,13 +97,13 @@ export const G = {
   get esfera1 () { return geo('esf1', () => new THREE.IcosahedronGeometry(0.5, 1)) },
   get plano () { return geo('plano', () => new THREE.PlaneGeometry(1, 1)) },
   /**
-   * Medio cilindro tumbado: vale a la vez de ARCO DE MEDIO PUNTO (puertas y
+   * Medio cilindro tumbado (ocho caras): vale a la vez de ARCO DE MEDIO PUNTO (puertas y
    * ventanas) y de BÓVEDA DE CAÑÓN (el tejado del almacén). Unidad: 1 de luz,
    * 0.5 de flecha, 1 de grosor; el arranque del arco está en y=0.
    */
   get arco () {
     return geo('arco', () => {
-      const g = new THREE.CylinderGeometry(0.5, 0.5, 1, 10, 1, false, 0, Math.PI)
+      const g = new THREE.CylinderGeometry(0.5, 0.5, 1, 8, 1, false, 0, Math.PI)
       g.rotateZ(Math.PI / 2)      // la media luna queda mirando hacia arriba
       g.rotateY(Math.PI / 2)      // y el eje del cilindro pasa a ser Z (el grosor)
       return g
@@ -181,3 +181,152 @@ export function grupo (piezas = []) {
   for (const p of piezas) if (p) g.add(p)
   return g
 }
+
+// ── VOLÚMENES REDONDEADOS ────────────────────────────────────────────────
+// Lo que separa una maqueta de pruebas de un juego publicado no son más
+// piezas, es el PERFIL de las pocas que hay: tejados con panza y alero
+// volado, agujas que se estrechan con curva, zócalos con todos los cantos
+// matados. Todo se genera por revolución o por extrusión de un perfil de
+// pocos puntos, así que sigue siendo facetado (flatShading intacto) y cuesta
+// decenas de triángulos, no cientos.
+
+const cachePerfil = new Map()
+
+/** Caché con tope: los modelos se montan una vez por tipo+nivel, se estabiliza sola. */
+function perfil (clave, crear) {
+  const hecha = cachePerfil.get(clave)
+  if (hecha) return hecha
+  if (cachePerfil.size > 900) {
+    for (const g of cachePerfil.values()) g.dispose?.()
+    cachePerfil.clear()
+  }
+  const g = crear()
+  g.computeVertexNormals()
+  cachePerfil.set(clave, g)
+  return g
+}
+
+/**
+ * TEJADO A DOS AGUAS de una sola pieza, con la pendiente CURVA (empinada en la
+ * cumbrera y tendida en el alero) y el vuelo por fuera del muro. Sustituye a
+ * las dos losas inclinadas + cilindro de cumbrera: mejor silueta y menos
+ * triángulos. El caballete corre en Z; los hastiales miran a ±Z.
+ */
+export function geoTejado2 (ancho, prof, alt, vuelo = 0.16) {
+  const k = `t2|${ancho.toFixed(2)}|${prof.toFixed(2)}|${alt.toFixed(2)}|${vuelo.toFixed(2)}`
+  return perfil(k, () => {
+    const W = ancho / 2
+    const A = alt
+    const v = vuelo
+    const s = new THREE.Shape()
+    s.moveTo(-W - v, -A * 0.1)
+    s.lineTo(-W, A * 0.03)
+    s.lineTo(-W * 0.85, A * 0.19)
+    s.lineTo(-W * 0.6, A * 0.44)
+    s.lineTo(-W * 0.3, A * 0.73)
+    s.lineTo(0, A)
+    s.lineTo(W * 0.3, A * 0.73)
+    s.lineTo(W * 0.6, A * 0.44)
+    s.lineTo(W * 0.85, A * 0.19)
+    s.lineTo(W, A * 0.03)
+    s.lineTo(W + v, -A * 0.1)
+    s.closePath()
+    const g = new THREE.ExtrudeGeometry(s, { depth: prof + vuelo * 2, bevelEnabled: false, curveSegments: 1, steps: 1 })
+    g.translate(0, 0, -(prof + vuelo * 2) / 2)
+    return g
+  })
+}
+
+/** El hastial que tapa el testero: MISMO perfil que el tejado, así encaja al milímetro. */
+export function geoHastial (ancho, alt, gro = 0.14) {
+  const k = `hp|${ancho.toFixed(2)}|${alt.toFixed(2)}|${gro.toFixed(2)}`
+  return perfil(k, () => {
+    const W = ancho / 2
+    const A = alt
+    const s = new THREE.Shape()
+    s.moveTo(-W * 0.99, 0)
+    s.lineTo(-W * 0.84, A * 0.19)
+    s.lineTo(-W * 0.59, A * 0.44)
+    s.lineTo(-W * 0.29, A * 0.73)
+    s.lineTo(0, A * 0.98)
+    s.lineTo(W * 0.29, A * 0.73)
+    s.lineTo(W * 0.59, A * 0.44)
+    s.lineTo(W * 0.84, A * 0.19)
+    s.lineTo(W * 0.99, 0)
+    s.closePath()
+    const g = new THREE.ExtrudeGeometry(s, { depth: gro, bevelEnabled: false, curveSegments: 1, steps: 1 })
+    g.translate(0, 0, -gro / 2)
+    return g
+  })
+}
+
+/**
+ * Superficie de revolución de POCOS lados a partir de un perfil (r, y)
+ * normalizado (radio 0.5, altura 1). Con 4 lados sale un tejado a cuatro
+ * aguas; con 8 o 12, una aguja o un capirote.
+ */
+function revolucion (clave, puntos, lados, girar45) {
+  return perfil(clave, () => {
+    const pts = puntos.map(([r, y]) => new THREE.Vector2(r, y))
+    const g = new THREE.LatheGeometry(pts, lados)
+    if (girar45) g.rotateY(Math.PI / lados)
+    return g
+  })
+}
+
+/**
+ * TEJADO A CUATRO AGUAS con faldón curvo y alero volado. Se escala igual que
+ * `G.piramide` (ancho * 1.4143), porque el lado del cuadrado nace girado.
+ */
+export function geoTejado4 (vuelo = 0.06) {
+  const v = vuelo
+  return revolucion(`t4|${v.toFixed(3)}`, [
+    [0, -0.08], [0.5 + v, -0.08], [0.5, 0.03],
+    [0.43, 0.2], [0.3, 0.47], [0.15, 0.75], [0, 1]
+  ], 4, true)
+}
+
+/** Aguja / capirote: la silueta de torreón, ahora con panza y alero. */
+export function geoAguja (lados = 8, vuelo = 0.05) {
+  return revolucion(`ag|${lados}|${vuelo.toFixed(3)}`, [
+    [0, -0.07], [0.5 + vuelo, -0.07], [0.5, 0.04],
+    [0.41, 0.24], [0.26, 0.56], [0.11, 0.8], [0, 1]
+  ], lados, false)
+}
+
+/** Cúpula BULBOSA (de cebolla): el remate noble que más carácter da. */
+export function geoBulbo (lados = 10) {
+  return revolucion(`bu|${lados}`, [
+    [0, 0], [0.34, 0.02], [0.5, 0.22], [0.46, 0.52], [0.26, 0.78], [0.08, 0.94], [0, 1]
+  ], lados, false)
+}
+
+/**
+ * ZÓCALO / PLATAFORMA con TODOS los cantos matados (también los de arriba).
+ * Es lo que asienta el edificio en el suelo en vez de dejarlo pegado como una
+ * calcomanía. Cuesta el doble que `geoCajaCh`, así que va uno por edificio.
+ */
+export function geoZocalo (sx, sy, sz, ch = 0.1) {
+  const c = Math.max(0.03, Math.min(ch, sx * 0.3, sz * 0.3, sy * 0.45))
+  const k = `zo|${sx.toFixed(2)}|${sy.toFixed(2)}|${sz.toFixed(2)}|${c.toFixed(3)}`
+  return perfil(k, () => {
+    // Rectángulo simple: el bisel de la extrusión ya mata las DOCE aristas, y
+    // así cuesta 28 triángulos en vez de 60. Esta pieza la lleva cada edificio
+    // de la aldea, así que aquí cada triángulo se paga caro.
+    const hx = sx / 2 - c; const hz = sz / 2 - c
+    const s = new THREE.Shape()
+    s.moveTo(-hx, -hz)
+    s.lineTo(hx, -hz)
+    s.lineTo(hx, hz)
+    s.lineTo(-hx, hz)
+    s.closePath()
+    const g = new THREE.ExtrudeGeometry(s, {
+      depth: Math.max(0.02, sy - c * 2), bevelEnabled: true, bevelThickness: c, bevelSize: c,
+      bevelOffset: 0, bevelSegments: 1, curveSegments: 1, steps: 1
+    })
+    g.rotateX(-Math.PI / 2)
+    g.translate(0, -sy / 2 + c, 0)
+    return g
+  })
+}
+
